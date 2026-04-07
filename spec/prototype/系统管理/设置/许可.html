@@ -261,8 +261,9 @@
     <div class="main-container">
         <div class="content-wrapper">
             <div class="settings-page-tabs" aria-label="设置页签">
-                <button class="settings-page-tab" type="button">密钥</button>
-                <button class="settings-page-tab active" type="button">许可</button>
+                <a class="settings-page-tab" href="../组织/组织架构.html#settings">密钥</a>
+                <a class="settings-page-tab" href="./门户.html">门户</a>
+                <a class="settings-page-tab active" href="./许可管理.html" aria-current="page">许可</a>
             </div>
 
             <div class="section-card intro-card">
@@ -3948,6 +3949,11 @@
             background: #fff;
             color: #5d6a7d;
             font-size: 13px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-decoration: none;
+            transition: all 0.2s ease;
         }
 
         .settings-page-tab.active {

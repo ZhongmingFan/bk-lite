@@ -314,6 +314,21 @@ class AnsibleNATSService:
         self.task_store.update_status(
             task.task_id, "running", {"started_at": started_at}, self._now_iso()
         )
+        logger.info(
+            "server config: "
+            "nats_servers=%r "
+            "nats_protocol=%s "
+            "nats_conn_timeout=%s "
+            "has_nats_username=%s "
+            "has_nats_password=%s "
+            "has_nats_tls_ca_file=%s",
+            list(self.config.nats_servers),
+            self.config.nats_protocol,
+            self.config.nats_conn_timeout,
+            bool(self.config.nats_username),
+            bool(self.config.nats_password),
+            bool(self.config.nats_tls_ca_file),
+        )
 
         try:
             if task.task_type == "adhoc":

@@ -14,6 +14,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 import nats_client
+from apps.core.constants import VERIFY_TOKEN_USER_NOT_FOUND_CODE, VERIFY_TOKEN_USER_NOT_FOUND_MESSAGE
 from apps.core.logger import system_mgmt_logger as logger
 from apps.core.utils.loader import LanguageLoader
 from apps.core.utils.permission_cache import clear_users_permission_cache, get_cached_token_info, set_cached_token_info
@@ -111,7 +112,7 @@ def _verify_token(token):
         raise Exception("Token is invalid")
     user = User.objects.filter(id=user_info["user_id"]).first()
     if not user:
-        raise Exception("User not found")
+        raise Exception(VERIFY_TOKEN_USER_NOT_FOUND_MESSAGE)
     return user
 
 
@@ -157,7 +158,11 @@ def verify_token(token):
     try:
         user = _verify_token(token)
     except Exception as e:
-        return {"result": False, "message": str(e)}
+        error_message = str(e)
+        return_data = {"result": False, "message": error_message}
+        if error_message == VERIFY_TOKEN_USER_NOT_FOUND_MESSAGE:
+            return_data["error_code"] = VERIFY_TOKEN_USER_NOT_FOUND_CODE
+        return return_data
 
     # 命中缓存直接返回，跳过全量数据库查询
     cached = get_cached_token_info(user.username, user.domain)

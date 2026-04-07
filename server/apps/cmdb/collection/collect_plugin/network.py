@@ -6,7 +6,9 @@ from collections import defaultdict
 
 from apps.cmdb.collection.collect_plugin.base import CollectBase
 from apps.cmdb.collection.collect_util import timestamp_gt_one_day_ago
-from apps.cmdb.collection.constants import NETWORK_INTERFACES_RELATIONS, NETWORK_COLLECT
+from apps.cmdb.collection.constants import NETWORK_INTERFACES_RELATIONS
+from apps.cmdb.collection.plugins import get_collection_plugin
+from apps.cmdb.constants.constants import CollectPluginTypes
 from apps.cmdb.models import OidMapping
 from apps.core.logger import cmdb_logger as logger
 
@@ -41,12 +43,23 @@ class CollectNetworkMetrics(CollectBase):
 
     @property
     def _metrics(self):
-        return NETWORK_COLLECT
+        plugin_cls = get_collection_plugin(CollectPluginTypes.SNMP, self.model_id)
+        return plugin_cls._metrics.fget(self)
 
     @staticmethod
     def get_oid_map():
-        result = OidMapping.objects.all().values("model", "oid", "brand", "device_type", "built_in")
+        result = OidMapping._default_manager.all().values("model", "oid", "brand", "device_type", "built_in")
         return {i["oid"]: i for i in result}
+
+    @staticmethod
+    def get_default_oid_map(oid):
+        return {
+            "model": "未知",
+            "oid": oid,
+            "brand": "未知",
+            "device_type": "switch",
+            "built_in": False,
+        }
 
     @staticmethod
     def set_inst_name(*args, **kwargs):
@@ -82,17 +95,8 @@ class CollectNetworkMetrics(CollectBase):
 
     @property
     def device_map(self):
-        # 网络设备
-        mapping = {
-            "inst_name": self.set_inst_name,
-            "ip_addr": "ip_addr",
-            "soid": "sysobjectid",
-            "port": "port",
-            "model": "model",
-            "brand": "brand",
-            "model_id": "model_id"
-        }
-        return mapping
+        plugin_cls = get_collection_plugin(CollectPluginTypes.SNMP, self.model_id)
+        return plugin_cls.device_map.fget(self)
 
     @staticmethod
     def interface_name(data, *args, **kwargs):
@@ -100,16 +104,8 @@ class CollectNetworkMetrics(CollectBase):
 
     @property
     def model_field_mapping(self):
-        # 接口
-        mapping = {
-            "inst_name": self.set_interface_inst_name,
-            "self_device": self.set_self_device,
-            "mac": "mac_address",
-            "name": self.interface_name,
-            "status": (self.set_interface_status, "oper_status"),
-            self.asso: self.get_interface_asso,
-        }
-        return mapping
+        plugin_cls = get_collection_plugin(CollectPluginTypes.SNMP, self.model_id)
+        return plugin_cls.model_field_mapping.fget(self)
 
     def format_data(self, data):
         """格式化数据"""
@@ -119,10 +115,9 @@ class CollectNetworkMetrics(CollectBase):
                 oid = index_data["metric"]["sysobjectid"]
                 oid_data = self.oid_map.get(oid, "")
                 if not oid_data:
-                    logger.info("==OID does not exist, this instance data is skipped OID={}==".format(oid))
-                    continue
-                else:
-                    index_data["metric"].update(oid_data)
+                    oid_data = self.get_default_oid_map(oid)
+                    logger.info("==OID does not exist, use default mapping OID={}==".format(oid))
+                index_data["metric"].update(oid_data)
 
             value = index_data["value"]
             _time, value = value[0], value[1]
@@ -181,14 +176,15 @@ class CollectNetworkMetrics(CollectBase):
     def add_interface_assos(self, relationships):
         for relationship in relationships:
             source_inst_name = relationship["source_inst_name"]
-            if not self.interfaces_data.get(source_inst_name):
+            source_interface_data = self.interfaces_data.get(source_inst_name)
+            if not source_interface_data:
                 continue
             data = {'asst_id': 'connect',
                     'inst_name': relationship["target_inst_name"],
                     'model_asst_id': 'interface_connect_interface',
                     'model_id': 'interface'
                     }
-            self.interfaces_data.get(source_inst_name)["assos"].append(data)
+            source_interface_data.setdefault("assos", []).append(data)
 
     def find_interface_relationships(self, data):
         # 数据结构

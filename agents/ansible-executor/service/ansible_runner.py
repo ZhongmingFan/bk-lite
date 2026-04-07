@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from core.config import ServiceConfig
 from service.runtime import current_entrypoint_command
 
 logging.basicConfig(
@@ -140,7 +141,7 @@ def to_playbook_request(payload: dict[str, Any]) -> PlaybookRequest:
         raise ValueError("file_distribution must be object")
 
     logger.info(
-        "to_playbook_request payload check: "
+        "to_playbook_request payload check1: "
         "task_id=%s "
         "playbook_path=%r "
         "playbook_content_is_none=%s "
@@ -166,7 +167,7 @@ def to_playbook_request(payload: dict[str, Any]) -> PlaybookRequest:
     no_file_distribution = not file_distribution
 
     logger.info(
-        "to_playbook_request validation booleans: "
+        "to_playbook_request validation booleans2: "
         "task_id=%s "
         "no_playbook_path=%s "
         "no_playbook_content=%s "
@@ -233,7 +234,7 @@ def to_playbook_request(payload: dict[str, Any]) -> PlaybookRequest:
 
 
 async def download_object_to_workspace(
-    workspace: Path, bucket_name: str, file_item: dict[str, Any]
+    config: ServiceConfig, workspace: Path, bucket_name: str, file_item: dict[str, Any]
 ) -> str:
     file_key = str(file_item.get("file_key", "")).strip()
     file_name = str(file_item.get("name", "")).strip() or Path(file_key).name
@@ -242,31 +243,47 @@ async def download_object_to_workspace(
     if not file_name:
         raise ValueError("file name is required")
 
+    logger.info(
+        "download_object_to_workspace config: "
+        "task_file=%s "
+        "bucket_name=%s "
+        "nats_servers=%r "
+        "nats_protocol=%s "
+        "nats_conn_timeout=%s "
+        "has_nats_username=%s "
+        "has_nats_password=%s "
+        "has_nats_tls_ca_file=%s",
+        file_name,
+        bucket_name,
+        list(config.nats_servers),
+        config.nats_protocol,
+        config.nats_conn_timeout,
+        bool(config.nats_username),
+        bool(config.nats_password),
+        bool(config.nats_tls_ca_file),
+    )
+
     nats_client_module = importlib.import_module("nats.aio.client")
     nc = nats_client_module.Client()
 
     connect_kwargs: dict[str, Any] = {
-        "servers": [
-            item.strip()
-            for item in os.getenv("NATS_SERVERS", "").split(",")
-            if item.strip()
-        ],
-        "connect_timeout": int(os.getenv("NATS_CONNECT_TIMEOUT", "5")),
+        "servers": list(config.nats_servers),
+        "connect_timeout": int(config.nats_conn_timeout),
         "name": "ansible-executor-object-store",
     }
     if not connect_kwargs["servers"]:
         raise ValueError("NATS_SERVERS is required for object store download")
 
-    nats_username = os.getenv("NATS_USERNAME", "")
-    nats_password = os.getenv("NATS_PASSWORD", "")
+    nats_username = config.nats_username
+    nats_password = config.nats_password
     if nats_username:
         connect_kwargs["user"] = nats_username
     if nats_password:
         connect_kwargs["password"] = nats_password
 
-    if os.getenv("NATS_PROTOCOL", "nats").lower() == "tls":
+    if str(config.nats_protocol).lower() == "tls":
         tls_context = ssl.create_default_context()
-        nats_tls_ca_file = os.getenv("NATS_TLS_CA_FILE", "")
+        nats_tls_ca_file = config.nats_tls_ca_file
         if nats_tls_ca_file:
             tls_context.load_verify_locations(cafile=nats_tls_ca_file)
         connect_kwargs["tls"] = tls_context
@@ -574,6 +591,7 @@ def prepare_adhoc_execution(payload: AdhocRequest) -> tuple[list[str], Path]:
 
 
 async def prepare_playbook_execution(
+    config: ServiceConfig,
     payload: PlaybookRequest,
 ) -> tuple[list[str], Path]:
     workspace = create_task_workspace(payload.task_id)
@@ -603,7 +621,7 @@ async def prepare_playbook_execution(
         downloaded_files: list[dict[str, Any]] = []
         for file_item in payload.files or []:
             local_path = await download_object_to_workspace(
-                workspace, bucket_name, file_item
+                config, workspace, bucket_name, file_item
             )
             downloaded_files.append({**file_item, "local_path": local_path})
         playbook_content = _build_windows_file_distribution_playbook(

@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -50,3 +51,11 @@ def current_entrypoint_command() -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable]
     return [sys.executable, str(application_root() / "main.py")]
+
+
+def configure_ansible_environment() -> None:
+    if os.environ.get("ANSIBLE_COLLECTIONS_PATH"):
+        return
+    collections_dir = application_root() / "collections"
+    if collections_dir.exists() and collections_dir.is_dir():
+        os.environ["ANSIBLE_COLLECTIONS_PATH"] = str(collections_dir)

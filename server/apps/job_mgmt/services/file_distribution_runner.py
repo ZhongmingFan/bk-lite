@@ -222,7 +222,23 @@ class FileDistributionRunner(ExecutionTaskBaseService):
         query_timeout = min(timeout, DEFAULT_RPC_TIMEOUT)
         start_time = time.monotonic()
         query_result = None
+        poll_attempt = 0
+        logger.info(
+            "ansible file distribution polling enabled: task_id=%s timeout=%ss query_timeout=%ss poll_interval=%ss",
+            accepted_task_id,
+            timeout,
+            query_timeout,
+            ANSIBLE_TASK_POLL_INTERVAL,
+        )
         while True:
+            poll_attempt += 1
+            elapsed = time.monotonic() - start_time
+            logger.info(
+                "ansible file distribution polling attempt: task_id=%s attempt=%s elapsed=%.2fs",
+                accepted_task_id,
+                poll_attempt,
+                elapsed,
+            )
             query_result = executor.task_query(accepted_task_id, timeout=query_timeout)
             logger.info(f"query_result data: {query_result}")
             if not isinstance(query_result, dict):
@@ -230,6 +246,12 @@ class FileDistributionRunner(ExecutionTaskBaseService):
                 raise ValueError("Ansible 文件分发返回结果格式非法")
 
             task_status = query_result.get("status")
+            logger.info(
+                "ansible file distribution polling snapshot: task_id=%s attempt=%s status=%s",
+                accepted_task_id,
+                poll_attempt,
+                task_status,
+            )
             if task_status in {"success", "failed", "callback_failed"}:
                 break
 

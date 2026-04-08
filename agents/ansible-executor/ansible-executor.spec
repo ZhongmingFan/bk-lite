@@ -26,11 +26,12 @@ ANSIBLE_WINDOWS_ROOT = BUILD_SUPPORT_MODULE.ensure_ansible_windows_collection(
 )
 
 ansible_datas, ansible_binaries, ansible_hiddenimports = collect_all("ansible")
-ansible_windows_datas = Tree(
+ansible_windows_tree = Tree(
     str(ANSIBLE_WINDOWS_ROOT),
     prefix="collections/ansible_collections/ansible/windows",
     excludes=["*.pyc", "__pycache__"],
 )
+ansible_windows_datas = [(src_name, dest_name) for dest_name, src_name, _ in ansible_windows_tree]
 
 a = Analysis(
     ["main.py"],

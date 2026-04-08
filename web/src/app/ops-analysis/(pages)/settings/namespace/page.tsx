@@ -125,7 +125,6 @@ const Namespace: React.FC = () => {
         scope: 'config',
         object_type: 'namespace',
         object_ids: [row.id],
-        include_dependencies: false,
       });
       if (response.yaml_content) {
         downloadYaml(response.yaml_content, `namespace_${row.name}_export`);

@@ -166,7 +166,10 @@ SECTION_TO_OBJECT_TYPE = {v: k for k, v in OBJECT_TYPE_TO_SECTION.items()}
 class ConflictReason:
     """冲突原因枚举"""
 
+    # 名称冲突：当前组织可访问该记录
     NAME_CONFLICT = "name_conflict"
+    # 无权限冲突：记录存在但当前组织无权访问（只允许重命名）
+    NO_PERMISSION_CONFLICT = "no_permission_conflict"
 
 
 # ===== 警告码定义 =====

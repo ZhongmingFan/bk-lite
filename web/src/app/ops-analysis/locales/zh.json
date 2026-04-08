@@ -323,7 +323,8 @@
       "namespace": "命名空间"
     },
     "conflictReasonLabel": {
-      "name_conflict": "名称冲突"
+      "name_conflict": "名称冲突",
+      "no_permission_conflict": "跨组织冲突"
     },
     "conflictAction": "处理方式",
     "actionSkip": "跳过",

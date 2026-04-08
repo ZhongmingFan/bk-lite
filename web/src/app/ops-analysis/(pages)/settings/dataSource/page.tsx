@@ -123,7 +123,6 @@ const Datasource: React.FC = () => {
         scope: 'config',
         object_type: 'datasource',
         object_ids: [row.id],
-        include_dependencies: true,
       });
       if (response.yaml_content) {
         downloadYaml(response.yaml_content, `datasource_${row.name}_export`);

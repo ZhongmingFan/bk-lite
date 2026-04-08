@@ -322,7 +322,8 @@
       "namespace": "Namespace"
     },
     "conflictReasonLabel": {
-      "name_conflict": "Name conflict"
+      "name_conflict": "Name conflict",
+      "no_permission_conflict": "Cross-org conflict"
     },
     "conflictAction": "Action",
     "actionSkip": "Skip",

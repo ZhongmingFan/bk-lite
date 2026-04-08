@@ -1,6 +1,4 @@
 # -- coding: utf-8 --
-import logging
-
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.decorators import action
@@ -8,9 +6,11 @@ from rest_framework.response import Response
 from rest_framework.viewsets import ViewSet
 
 from apps.core.decorators.api_permission import HasPermission
+from apps.core.logger import operation_analysis_logger as logger
 from apps.operation_analysis.constants.import_export import (
     ObjectType,
     ConflictAction,
+    ConflictReason,
     ImportExportErrorCode,
 )
 from apps.operation_analysis.serializers.import_export_serializers import (
@@ -22,8 +22,6 @@ from apps.operation_analysis.services.import_export.export_service import Export
 from apps.operation_analysis.services.import_export.precheck_service import PrecheckService
 from apps.operation_analysis.services.import_export.import_service import ImportService
 from apps.operation_analysis.schemas.import_export_schema import YAMLDocument
-
-logger = logging.getLogger(__name__)
 
 
 class ImportExportViewSet(ViewSet):
@@ -45,7 +43,6 @@ class ImportExportViewSet(ViewSet):
         scope = data["scope"]
         object_type = data["object_type"]
         object_ids = data["object_ids"]
-        include_dependencies = data.get("include_dependencies", True)
 
         organization_id = getattr(request, "organization_id", 0)
 
@@ -55,7 +52,6 @@ class ImportExportViewSet(ViewSet):
             scope_type=scope,
             object_types=[object_type],
             object_keys=object_keys,
-            include_dependencies=include_dependencies,
             organization_id=organization_id,
         )
 
@@ -71,9 +67,12 @@ class ImportExportViewSet(ViewSet):
         yaml_content = data["yaml_content"]
         target_directory_id = data.get("target_directory_id")
 
+        current_team = self._get_current_team(request)
+
         result = PrecheckService.precheck(
             yaml_content=yaml_content,
             target_directory_id=target_directory_id,
+            current_team=current_team,
         )
 
         if result["valid"]:
@@ -100,6 +99,7 @@ class ImportExportViewSet(ViewSet):
         precheck_result = PrecheckService.precheck(
             yaml_content=yaml_content,
             target_directory_id=target_directory_id,
+            current_team=self._get_current_team(request),
         )
 
         if not precheck_result["valid"]:
@@ -113,6 +113,17 @@ class ImportExportViewSet(ViewSet):
             )
 
         conflict_decisions = {item["object_key"]: item["action"] for item in conflict_decisions_list}
+
+        invalid_decisions = self._validate_conflict_decisions(precheck_result["conflicts"], conflict_decisions)
+        if invalid_decisions:
+            return Response(
+                {
+                    "success": False,
+                    "errors": invalid_decisions,
+                    "message": "冲突决策无效",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         secret_supplements = {}
         for item in secret_supplements_list:
@@ -164,6 +175,15 @@ class ImportExportViewSet(ViewSet):
             for obj in NameSpace.objects.filter(id__in=object_ids):
                 keys.append(obj.name)
         return keys
+
+    def _get_current_team(self, request) -> int | None:
+        current_team = request.COOKIES.get("current_team")
+        if current_team:
+            try:
+                return int(current_team)
+            except (ValueError, TypeError):
+                pass
+        return None
 
     def _parse_yaml_to_document(self, yaml_content: str) -> YAMLDocument:
         import yaml as pyyaml
@@ -299,3 +319,21 @@ class ImportExportViewSet(ViewSet):
                     "errors": denied_permissions,
                 }
             )
+
+    def _validate_conflict_decisions(self, conflicts: list[dict], conflict_decisions: dict[str, str]) -> list[dict]:
+        errors = []
+        for conflict in conflicts:
+            if conflict["reason"] != ConflictReason.NO_PERMISSION_CONFLICT:
+                continue
+            object_key = conflict["object_key"]
+            action = conflict_decisions.get(object_key, ConflictAction.RENAME.value)
+            if action != ConflictAction.RENAME.value:
+                errors.append(
+                    {
+                        "code": ImportExportErrorCode.IMPORT_PERMISSION_DENIED,
+                        "message": f"对象 '{object_key}' 在其他组织中已存在，只能选择重命名",
+                        "object_key": object_key,
+                        "object_type": conflict["object_type"],
+                    }
+                )
+        return errors

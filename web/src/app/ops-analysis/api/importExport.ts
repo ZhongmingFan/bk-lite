@@ -8,7 +8,6 @@ export interface ExportRequest {
   scope: ScopeType;
   object_type: ObjectType;
   object_ids: number[];
-  include_dependencies?: boolean;
 }
 
 export interface ExportResponse {

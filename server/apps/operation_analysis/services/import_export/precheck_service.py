@@ -299,12 +299,18 @@ class PrecheckService:
         return errors
 
     @classmethod
-    def identify_conflicts(cls, doc: YAMLDocument) -> list[dict]:
-        """识别目标环境中的同名冲突"""
-        conflicts = []
-        suggested_actions = [ConflictAction.SKIP.value, ConflictAction.OVERWRITE.value, ConflictAction.RENAME.value]
+    def identify_conflicts(cls, doc: YAMLDocument, current_team: int | None = None) -> list[dict]:
+        """
+        识别目标环境中的同名冲突
 
-        # 检查命名空间冲突
+        Args:
+            doc: YAML文档对象
+            current_team: 当前组织ID，用于判断是否有权限访问冲突记录
+        """
+        conflicts = []
+        all_actions = [ConflictAction.SKIP.value, ConflictAction.OVERWRITE.value, ConflictAction.RENAME.value]
+        rename_only = [ConflictAction.RENAME.value]
+
         for ns in doc.namespaces:
             if NameSpace.objects.filter(name=ns.name).exists():
                 conflicts.append(
@@ -312,23 +318,23 @@ class PrecheckService:
                         "object_key": ns.key,
                         "object_type": ObjectType.NAMESPACE.value,
                         "reason": ConflictReason.NAME_CONFLICT,
-                        "suggested_actions": suggested_actions,
+                        "suggested_actions": all_actions,
                     }
                 )
 
-        # 检查数据源冲突（基于name + rest_api唯一约束）
         for ds in doc.datasources:
-            if DataSourceAPIModel.objects.filter(name=ds.name, rest_api=ds.rest_api).exists():
+            existing = DataSourceAPIModel.objects.filter(name=ds.name, rest_api=ds.rest_api).first()
+            if existing:
+                has_permission = cls._check_group_permission(existing, current_team)
                 conflicts.append(
                     {
                         "object_key": ds.key,
                         "object_type": ObjectType.DATASOURCE.value,
-                        "reason": ConflictReason.NAME_CONFLICT,
-                        "suggested_actions": suggested_actions,
+                        "reason": ConflictReason.NAME_CONFLICT if has_permission else ConflictReason.NO_PERMISSION_CONFLICT,
+                        "suggested_actions": all_actions if has_permission else rename_only,
                     }
                 )
 
-        # 检查画布冲突
         canvas_checks = [
             (doc.dashboards, ObjectType.DASHBOARD, Dashboard),
             (doc.topologies, ObjectType.TOPOLOGY, Topology),
@@ -337,17 +343,29 @@ class PrecheckService:
 
         for canvas_list, obj_type, model in canvas_checks:
             for canvas in canvas_list:
-                if model.objects.filter(name=canvas.name).exists():
+                existing = model.objects.filter(name=canvas.name).first()
+                if existing:
+                    has_permission = cls._check_group_permission(existing, current_team)
                     conflicts.append(
                         {
                             "object_key": canvas.key,
                             "object_type": obj_type.value,
-                            "reason": ConflictReason.NAME_CONFLICT,
-                            "suggested_actions": suggested_actions,
+                            "reason": ConflictReason.NAME_CONFLICT if has_permission else ConflictReason.NO_PERMISSION_CONFLICT,
+                            "suggested_actions": all_actions if has_permission else rename_only,
                         }
                     )
 
         return conflicts
+
+    @staticmethod
+    def _check_group_permission(obj, current_team: int | None) -> bool:
+        """检查当前组织是否有权限访问对象"""
+        if current_team is None:
+            return True
+        groups = getattr(obj, "groups", None)
+        if groups is None:
+            return True
+        return int(current_team) in groups
 
     @classmethod
     def has_canvas_objects(cls, doc: YAMLDocument) -> bool:
@@ -360,6 +378,7 @@ class PrecheckService:
         yaml_content: str,
         target_directory_id: int | None = None,
         default_conflict_action: str = ConflictAction.RENAME.value,
+        current_team: int | None = None,
     ) -> dict:
         """
         执行完整预检流程
@@ -418,7 +437,7 @@ class PrecheckService:
         all_warnings.extend(cls.check_sensitive_placeholders(doc))
 
         # Step 9: 冲突识别
-        conflicts = cls.identify_conflicts(doc)
+        conflicts = cls.identify_conflicts(doc, current_team)
 
         valid = len(all_errors) == 0
         return cls._build_precheck_result(valid, doc, conflicts, all_warnings, all_errors)

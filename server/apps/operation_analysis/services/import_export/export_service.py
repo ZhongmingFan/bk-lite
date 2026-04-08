@@ -160,17 +160,8 @@ class ExportService:
             for nested in value.values():
                 collect_datasource_ids(nested)
 
-        if object_type == ObjectType.DASHBOARD:
+        if object_type in CANVAS_TYPES:
             collect_datasource_ids(normalized)
-            return datasource_ids, namespace_ids
-
-        if object_type == ObjectType.TOPOLOGY:
-            collect_datasource_ids(normalized)
-            return datasource_ids, namespace_ids
-
-        if object_type == ObjectType.ARCHITECTURE:
-            collect_datasource_ids(normalized)
-            return datasource_ids, namespace_ids
 
         return datasource_ids, namespace_ids
 
@@ -212,9 +203,93 @@ class ExportService:
         return base_data
 
     @classmethod
-    def export_objects(
-        cls, scope_type: str, object_types: list[str], object_keys: list[str], include_dependencies: bool = True, organization_id: int = 0
-    ) -> dict:
+    def _collect_canvas_dependencies(cls, object_types: list[str], object_keys: list[str]) -> tuple[set, set]:
+        collected_datasource_ids = set()
+        collected_namespace_ids = set()
+
+        for object_type_str in object_types:
+            if object_type_str not in [t.value for t in CANVAS_TYPES]:
+                continue
+
+            object_type = ObjectType(object_type_str)
+            model = cls.MODEL_MAP[object_type]
+            prefix = f"{object_type_str}{BUSINESS_KEY_SEPARATOR}"
+
+            for key in object_keys:
+                if not key.startswith(prefix):
+                    continue
+                name = key[len(prefix) :]
+
+                try:
+                    canvas = model.objects.get(name=name)
+                    ds_ids, ns_ids = cls.extract_canvas_dependencies(canvas.view_sets or [], object_type)
+                    collected_datasource_ids.update(ds_ids)
+                    collected_namespace_ids.update(ns_ids)
+                except model.DoesNotExist:
+                    continue
+
+        return collected_datasource_ids, collected_namespace_ids
+
+    @classmethod
+    def _collect_config_objects(cls, object_types: list[str], object_keys: list[str]) -> tuple[set, set]:
+        collected_datasource_ids = set()
+        collected_namespace_ids = set()
+
+        for object_type_str in object_types:
+            if object_type_str == ObjectType.DATASOURCE.value:
+                for key in object_keys:
+                    if BUSINESS_KEY_SEPARATOR not in key:
+                        continue
+                    parts = key.split(BUSINESS_KEY_SEPARATOR, 1)
+                    if len(parts) != 2:
+                        continue
+                    name, rest_api = parts
+                    try:
+                        ds = DataSourceAPIModel.objects.get(name=name, rest_api=rest_api)
+                        collected_datasource_ids.add(ds.id)
+                    except DataSourceAPIModel.DoesNotExist:
+                        continue
+
+            elif object_type_str == ObjectType.NAMESPACE.value:
+                for key in object_keys:
+                    try:
+                        ns = NameSpace.objects.get(name=key)
+                        collected_namespace_ids.add(ns.id)
+                    except NameSpace.DoesNotExist:
+                        continue
+
+        return collected_datasource_ids, collected_namespace_ids
+
+    @classmethod
+    def _convert_canvases_to_yaml(
+        cls, scope_type: str, object_types: list[str], object_keys: list[str], ds_key_map: dict, ns_key_map: dict, export_data: dict
+    ):
+        if scope_type != ScopeType.CANVAS.value:
+            return
+
+        for object_type_str in object_types:
+            if object_type_str not in [t.value for t in CANVAS_TYPES]:
+                continue
+
+            object_type = ObjectType(object_type_str)
+            model = cls.MODEL_MAP[object_type]
+            section_name = OBJECT_TYPE_TO_SECTION[object_type]
+            prefix = f"{object_type_str}{BUSINESS_KEY_SEPARATOR}"
+
+            for key in object_keys:
+                if not key.startswith(prefix):
+                    continue
+                name = key[len(prefix) :]
+
+                try:
+                    canvas = model.objects.get(name=name)
+                    yaml_obj = cls.convert_canvas_to_yaml(canvas, object_type, ds_key_map, ns_key_map)
+                    export_data[section_name].append(yaml_obj)
+                except model.DoesNotExist:
+                    continue
+
+    @classmethod
+    def export_objects(cls, scope_type: str, object_types: list[str], object_keys: list[str], organization_id: int = 0) -> dict:
         """
         导出对象为YAML
 
@@ -222,7 +297,6 @@ class ExportService:
         - scope_type: canvas 或 config
         - object_types: 要导出的对象类型列表
         - object_keys: 要导出的对象业务键列表
-        - include_dependencies: 是否包含依赖（数据源、命名空间）
         - organization_id: 组织ID
 
         返回：
@@ -231,9 +305,6 @@ class ExportService:
             "summary": {"exported": {...}}
         }
         """
-        include_dependencies = True
-
-        # 初始化导出数据结构
         export_data = {
             "meta": {
                 "schema_version": YAML_SCHEMA_VERSION,
@@ -248,63 +319,11 @@ class ExportService:
             "namespaces": [],
         }
 
-        # 收集需要导出的依赖对象
-        collected_datasource_ids = set()
-        collected_namespace_ids = set()
-
-        # 处理画布对象导出
         if scope_type == ScopeType.CANVAS.value:
-            for object_type_str in object_types:
-                if object_type_str not in [t.value for t in CANVAS_TYPES]:
-                    continue
+            collected_datasource_ids, collected_namespace_ids = cls._collect_canvas_dependencies(object_types, object_keys)
+        else:
+            collected_datasource_ids, collected_namespace_ids = cls._collect_config_objects(object_types, object_keys)
 
-                object_type = ObjectType(object_type_str)
-                model = cls.MODEL_MAP[object_type]
-                # 从业务键解析对象名称
-                for key in object_keys:
-                    prefix = f"{object_type_str}{BUSINESS_KEY_SEPARATOR}"
-                    if not key.startswith(prefix):
-                        continue
-                    name = key[len(prefix) :]
-
-                    try:
-                        canvas = model.objects.get(name=name)
-
-                        # 收集依赖
-                        if include_dependencies:
-                            ds_ids, ns_ids = cls.extract_canvas_dependencies(canvas.view_sets or [], object_type)
-                            collected_datasource_ids.update(ds_ids)
-                            collected_namespace_ids.update(ns_ids)
-
-                    except model.DoesNotExist:
-                        continue
-
-        # 处理配置对象导出
-        if scope_type == ScopeType.CONFIG.value:
-            for object_type_str in object_types:
-                if object_type_str == ObjectType.DATASOURCE.value:
-                    for key in object_keys:
-                        if BUSINESS_KEY_SEPARATOR not in key:
-                            continue
-                        parts = key.split(BUSINESS_KEY_SEPARATOR, 1)
-                        if len(parts) != 2:
-                            continue
-                        name, rest_api = parts
-                        try:
-                            ds = DataSourceAPIModel.objects.get(name=name, rest_api=rest_api)
-                            collected_datasource_ids.add(ds.id)
-                        except DataSourceAPIModel.DoesNotExist:
-                            continue
-
-                elif object_type_str == ObjectType.NAMESPACE.value:
-                    for key in object_keys:
-                        try:
-                            ns = NameSpace.objects.get(name=key)
-                            collected_namespace_ids.add(ns.id)
-                        except NameSpace.DoesNotExist:
-                            continue
-
-        # 加载并转换命名空间
         ns_key_map = {}
         if collected_namespace_ids:
             namespaces = NameSpace.objects.filter(id__in=collected_namespace_ids)
@@ -312,7 +331,6 @@ class ExportService:
                 ns_key_map[ns.id] = ns.name
                 export_data["namespaces"].append(cls.convert_namespace_to_yaml(ns))
 
-        # 加载并转换数据源（需要先有命名空间映射）
         ds_key_map = {}
         if collected_datasource_ids:
             datasources = DataSourceAPIModel.objects.filter(id__in=collected_datasource_ids).prefetch_related("namespaces", "tag")
@@ -321,41 +339,16 @@ class ExportService:
                 ds_key_map[ds.id] = ds_key
                 export_data["datasources"].append(cls.convert_datasource_to_yaml(ds))
 
-                # 同时收集数据源关联的命名空间
-                if include_dependencies:
-                    for ns in ds.namespaces.all():
-                        if ns.id not in ns_key_map:
-                            ns_key_map[ns.id] = ns.name
-                            export_data["namespaces"].append(cls.convert_namespace_to_yaml(ns))
+                for ns in ds.namespaces.all():
+                    if ns.id not in ns_key_map:
+                        ns_key_map[ns.id] = ns.name
+                        export_data["namespaces"].append(cls.convert_namespace_to_yaml(ns))
 
-        # 现在转换画布对象（需要ds_key_map和ns_key_map）
-        if scope_type == ScopeType.CANVAS.value:
-            for object_type_str in object_types:
-                if object_type_str not in [t.value for t in CANVAS_TYPES]:
-                    continue
+        cls._convert_canvases_to_yaml(scope_type, object_types, object_keys, ds_key_map, ns_key_map, export_data)
 
-                object_type = ObjectType(object_type_str)
-                model = cls.MODEL_MAP[object_type]
-                section_name = OBJECT_TYPE_TO_SECTION[object_type]
-
-                for key in object_keys:
-                    prefix = f"{object_type_str}{BUSINESS_KEY_SEPARATOR}"
-                    if not key.startswith(prefix):
-                        continue
-                    name = key[len(prefix) :]
-
-                    try:
-                        canvas = model.objects.get(name=name)
-                        yaml_obj = cls.convert_canvas_to_yaml(canvas, object_type, ds_key_map, ns_key_map)
-                        export_data[section_name].append(yaml_obj)
-                    except model.DoesNotExist:
-                        continue
-
-        # 稳定排序：按对象类型和名称排序
         for section in ["dashboards", "topologies", "architectures", "datasources", "namespaces"]:
             export_data[section].sort(key=lambda x: x.get("name", ""))
 
-        # 更新统计信息
         export_data["meta"]["object_counts"] = {
             "dashboards": len(export_data["dashboards"]),
             "topologies": len(export_data["topologies"]),
@@ -364,7 +357,6 @@ class ExportService:
             "namespaces": len(export_data["namespaces"]),
         }
 
-        # 序列化为YAML
         yaml_content = yaml.dump(
             export_data,
             allow_unicode=True,

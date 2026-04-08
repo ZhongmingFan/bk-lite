@@ -24,15 +24,10 @@ class ExportRequestSerializer(serializers.Serializer):
         min_length=1,
         help_text="要导出的对象ID列表",
     )
-    include_dependencies = serializers.BooleanField(
-        default=True,
-        help_text="是否包含依赖对象",
-    )
 
     def validate(self, attrs):
         scope = attrs["scope"]
         object_type = attrs["object_type"]
-        include_dependencies = attrs.get("include_dependencies", True)
 
         if scope == ScopeType.CANVAS.value:
             if object_type not in [t.value for t in CANVAS_TYPES]:
@@ -40,9 +35,6 @@ class ExportRequestSerializer(serializers.Serializer):
         elif scope == ScopeType.CONFIG.value:
             if object_type not in [t.value for t in CONFIG_TYPES]:
                 raise serializers.ValidationError(f"config范围仅支持datasource/namespace类型")
-
-        if include_dependencies is False:
-            raise serializers.ValidationError("当前导出会自动包含依赖对象，不支持关闭 include_dependencies")
 
         return attrs
 

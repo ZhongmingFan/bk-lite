@@ -310,6 +310,7 @@ const ImportModal: React.FC<ImportModalProps> = ({
                   pagination={false}
                   size="small"
                   tableLayout="fixed"
+                  scroll={{ y: 300 }}
                 />
               </>
             ) : (

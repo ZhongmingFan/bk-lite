@@ -77,12 +77,20 @@ class NamespaceItem(BaseModel):
 
     key: str
     name: str
-    domain: str = Field(default="")
+    domain: str
     namespace: str = Field(default="bklite")
-    account: str = Field(default="")
+    account: str
     password: str = Field(default="")
     enable_tls: bool = Field(default=False)
     desc: str = Field(default="")
+
+    @field_validator("key", "name", "domain", "account")
+    @classmethod
+    def validate_required_non_empty_fields(cls, v: Any, info) -> str:
+        value = "" if v is None else str(v).strip()
+        if not value:
+            raise ValueError(f"字段 '{info.field_name}' 不能为空")
+        return value
 
 
 class DatasourceItem(BaseModel):
@@ -98,6 +106,14 @@ class DatasourceItem(BaseModel):
     chart_type: list = Field(default_factory=list)
     field_schema: list = Field(default_factory=list)
     namespace_keys: list = Field(default_factory=list)
+
+    @field_validator("key", "name", "rest_api")
+    @classmethod
+    def validate_required_non_empty_fields(cls, v: Any, info) -> str:
+        value = "" if v is None else str(v).strip()
+        if not value:
+            raise ValueError(f"字段 '{info.field_name}' 不能为空")
+        return value
 
 
 class CanvasRefs(BaseModel):
@@ -117,6 +133,14 @@ class DashboardItem(BaseModel):
     other: dict = Field(default_factory=dict)
     view_sets: list = Field(default_factory=list)
     refs: CanvasRefs = Field(default_factory=CanvasRefs)
+
+    @field_validator("key", "name")
+    @classmethod
+    def validate_required_non_empty_fields(cls, v: Any, info) -> str:
+        value = "" if v is None else str(v).strip()
+        if not value:
+            raise ValueError(f"字段 '{info.field_name}' 不能为空")
+        return value
 
     @field_validator("desc", mode="before")
     @classmethod
@@ -142,6 +166,14 @@ class TopologyItem(BaseModel):
     view_sets: dict = Field(default_factory=dict)
     refs: CanvasRefs = Field(default_factory=CanvasRefs)
 
+    @field_validator("key", "name")
+    @classmethod
+    def validate_required_non_empty_fields(cls, v: Any, info) -> str:
+        value = "" if v is None else str(v).strip()
+        if not value:
+            raise ValueError(f"字段 '{info.field_name}' 不能为空")
+        return value
+
     @field_validator("desc", mode="before")
     @classmethod
     def normalize_desc(cls, v: Any) -> str:
@@ -164,6 +196,14 @@ class ArchitectureItem(BaseModel):
     other: dict = Field(default_factory=dict)
     view_sets: dict = Field(default_factory=dict)
     refs: CanvasRefs = Field(default_factory=CanvasRefs)
+
+    @field_validator("key", "name")
+    @classmethod
+    def validate_required_non_empty_fields(cls, v: Any, info) -> str:
+        value = "" if v is None else str(v).strip()
+        if not value:
+            raise ValueError(f"字段 '{info.field_name}' 不能为空")
+        return value
 
     @field_validator("desc", mode="before")
     @classmethod

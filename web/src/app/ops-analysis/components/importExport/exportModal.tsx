@@ -30,7 +30,6 @@ const ExportModal: React.FC<ExportModalProps> = ({
         scope: 'canvas',
         object_type: objectType,
         object_ids: [objectId],
-        include_dependencies: true,
       });
 
       if (response.yaml_content) {

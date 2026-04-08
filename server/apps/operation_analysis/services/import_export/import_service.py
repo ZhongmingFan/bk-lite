@@ -13,11 +13,11 @@ Tech Plan参考：
 - 5.3 导入执行流程
 """
 
-import logging
 from typing import Any
 
 from django.db import transaction
 
+from apps.core.logger import operation_analysis_logger as logger
 from apps.operation_analysis.constants.import_export import (
     ObjectType,
     ConflictAction,
@@ -50,8 +50,6 @@ from apps.operation_analysis.services.import_export.view_sets import (
     normalize_canvas_view_sets_for_storage,
     rewrite_canvas_view_sets_refs_for_storage,
 )
-
-logger = logging.getLogger(__name__)
 
 
 class ImportService:
@@ -337,6 +335,7 @@ class ImportService:
                     field_schema=ds_item.field_schema,
                     created_by=self.created_by,
                     updated_by=self.updated_by,
+                    groups=self.groups,
                 )
                 ds.namespaces.set(namespace_ids)
                 ds.tag.set(tag_ids)
@@ -360,6 +359,7 @@ class ImportService:
                 field_schema=ds_item.field_schema,
                 created_by=self.created_by,
                 updated_by=self.updated_by,
+                groups=self.groups,
             )
             ds.namespaces.set(namespace_ids)
             ds.tag.set(tag_ids)

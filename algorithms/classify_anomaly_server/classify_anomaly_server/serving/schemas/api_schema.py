@@ -16,7 +16,9 @@ class DetectionConfig(BaseModel):
     """异常检测配置."""
 
     threshold: Optional[float] = Field(
-        None, description="异常阈值（可选，不提供则使用模型默认阈值）", gt=0.0, le=1.0
+        None,
+        description="异常阈值（原始异常分数阈值，可选，不提供则使用模型默认阈值）",
+        gt=0.0,
     )
 
 

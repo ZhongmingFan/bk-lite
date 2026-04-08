@@ -38,7 +38,7 @@ def get_early_stopping_config(max_evals: int) -> Dict[str, Any]:
     }
 
 
-def validate_structure(config: Dict) -> None:
+def validate_structure(config: Dict[str, Any]) -> None:
     """Layer 1: 结构完整性校验"""
     required_sections = ["model", "hyperparams", "preprocessing", "mlflow"]
 
@@ -56,7 +56,7 @@ def validate_structure(config: Dict) -> None:
             )
 
 
-def validate_required_fields(config: Dict) -> None:
+def validate_required_fields(config: Dict[str, Any]) -> None:
     """Layer 2: 必需字段 + 基本类型校验"""
 
     # model 配置
@@ -65,6 +65,10 @@ def validate_required_fields(config: Dict) -> None:
         raise ConfigError("model.type 为必填项")
     if "name" not in model:
         raise ConfigError("model.name 为必填项")
+    if model["type"] not in SUPPORTED_MODELS:
+        raise ConfigError(
+            f"model.type 必须是以下之一: {SUPPORTED_MODELS}，当前值: {model['type']}"
+        )
 
     # hyperparams 配置
     hp = config.get("hyperparams", {})

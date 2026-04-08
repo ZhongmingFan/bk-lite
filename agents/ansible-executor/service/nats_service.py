@@ -1,8 +1,6 @@
 import asyncio
 import importlib
 import json
-import logging
-import os
 import ssl
 import uuid
 from dataclasses import dataclass
@@ -28,14 +26,16 @@ from service.ansible_runner import (
     run_command,
     to_adhoc_request,
     to_playbook_request,
+    logger,
 )
 from service.task_store import TaskStore
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
-    format="%(asctime)s %(levelname)s [ansible-executor] %(message)s",
-)
-logger = logging.getLogger(__name__)
+
+# logging.basicConfig(
+#     level=os.getenv("LOG_LEVEL", "INFO").upper(),
+#     format="%(asctime)s %(levelname)s [ansible-executor] %(message)s",
+# )
+# logger = logging.getLogger(__name__)
 
 
 def _extract_payload(data: bytes) -> dict:

@@ -124,13 +124,8 @@ const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
       if (Array.isArray(data) && data.length > 0) {
         const hasValidData = data.some((item) => {
           if (!item || !item.data) return false;
-          // 兼容旧格式（data 直接为数组）和新格式（data 为 NATS 原始对象 {result, data: [...]}）
-          const innerData = Array.isArray(item.data)
-            ? item.data
-            : item.data && Array.isArray(item.data.data)
-              ? item.data.data
-              : null;
-          return innerData && innerData.length > 0;
+          const innerData = Array.isArray(item.data) ? item.data : [];
+          return innerData.length > 0;
         });
         if (!hasValidData) return true;
       }

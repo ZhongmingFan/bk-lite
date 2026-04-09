@@ -141,7 +141,7 @@ def to_playbook_request(payload: dict[str, Any]) -> PlaybookRequest:
         raise ValueError("file_distribution must be object")
 
     logger.info(
-        "to_playbook_request payload check11: "
+        "to_playbook_request payload check: "
         "task_id=%s "
         "playbook_path=%r "
         "playbook_content_is_none=%s "
@@ -167,7 +167,7 @@ def to_playbook_request(payload: dict[str, Any]) -> PlaybookRequest:
     no_file_distribution = not file_distribution
 
     logger.info(
-        "to_playbook_request validation booleans22: "
+        "to_playbook_request validation booleans: "
         "task_id=%s "
         "no_playbook_path=%s "
         "no_playbook_content=%s "
@@ -180,7 +180,7 @@ def to_playbook_request(payload: dict[str, Any]) -> PlaybookRequest:
 
     if no_playbook_path and no_playbook_content and no_file_distribution:
         logger.error(
-            "to_playbook_request validation failed33: "
+            "to_playbook_request validation failed: "
             "missing playbook_path/playbook_content/file_distribution "
             "task_id=%s "
             "raw_file_distribution=%r "
@@ -244,7 +244,7 @@ async def download_object_to_workspace(
         raise ValueError("file name is required")
 
     logger.info(
-        "download_object_to_workspace config44: "
+        "download_object_to_workspace config: "
         "task_file=%s "
         "bucket_name=%s "
         "nats_servers=%r "
@@ -513,7 +513,9 @@ def _build_host_credentials_inventory(
 
         lines.append(" ".join(parts))
 
-    return "\n".join(lines) + ("\n" if lines else "")
+    if not lines:
+        return ""
+    return "[all]\n" + "\n".join(lines) + "\n"
 
 
 def _sanitize_task_id(task_id: str | None) -> str:

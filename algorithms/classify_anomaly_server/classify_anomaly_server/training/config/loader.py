@@ -1,11 +1,17 @@
 """训练配置加载器"""
 
 from typing import Dict, Any, Optional
+from types import UnionType
 from pathlib import Path
 import json
 from loguru import logger
 
-from .schema import SUPPORTED_MODELS, SUPPORTED_METRICS, SUPPORTED_MISSING_HANDLERS
+from .schema import (
+    SUPPORTED_MODELS,
+    SUPPORTED_METRICS,
+    SUPPORTED_MISSING_HANDLERS,
+    SUPPORTED_PELT_COST_MODELS,
+)
 
 
 class ConfigError(Exception):
@@ -47,13 +53,34 @@ def validate_structure(config: Dict[str, Any]) -> None:
             raise ConfigError(f"配置缺少必需的顶层字段: {section}")
 
     # 条件依赖
+    model_type = config.get("model", {}).get("type")
     use_fe = config.get("hyperparams", {}).get("use_feature_engineering")
+    if model_type == "PELT" and use_fe is True:
+        raise ConfigError("PELT 模型要求 hyperparams.use_feature_engineering=false")
+
     if use_fe is True:
         if "feature_engineering" not in config:
             raise ConfigError(
                 "hyperparams.use_feature_engineering=true 时，"
                 "必须提供 feature_engineering 配置段"
             )
+
+
+def _validate_search_space_list(
+    search_space: Dict[str, Any],
+    key: str,
+    expected_type: type | tuple[type, ...],
+) -> None:
+    """校验 search_space 中的非空列表字段。"""
+    if key not in search_space:
+        raise ConfigError(f"hyperparams.search_space.{key} 为必填项")
+
+    values = search_space[key]
+    if not isinstance(values, list) or len(values) == 0:
+        raise ConfigError(f"hyperparams.search_space.{key} 必须是非空列表")
+
+    if not all(isinstance(value, expected_type) for value in values):
+        raise ConfigError(f"hyperparams.search_space.{key} 包含非法元素类型")
 
 
 def validate_required_fields(config: Dict[str, Any]) -> None:
@@ -69,6 +96,7 @@ def validate_required_fields(config: Dict[str, Any]) -> None:
         raise ConfigError(
             f"model.type 必须是以下之一: {SUPPORTED_MODELS}，当前值: {model['type']}"
         )
+    model_type = model["type"]
 
     # hyperparams 配置
     hp = config.get("hyperparams", {})
@@ -98,15 +126,43 @@ def validate_required_fields(config: Dict[str, Any]) -> None:
             f"当前值: {hp['metric']}"
         )
 
+    if model_type == "PELT":
+        if hp["use_feature_engineering"]:
+            raise ConfigError("PELT 模型要求 hyperparams.use_feature_engineering=false")
+
+        if "cost_model" not in hp:
+            raise ConfigError("hyperparams.cost_model 为必填项")
+        if not isinstance(hp["cost_model"], str):
+            raise ConfigError("hyperparams.cost_model 类型错误: 期望 str")
+        if hp["cost_model"] not in SUPPORTED_PELT_COST_MODELS:
+            raise ConfigError(
+                "hyperparams.cost_model 必须是以下之一: "
+                f"{SUPPORTED_PELT_COST_MODELS}，当前值: {hp['cost_model']}"
+            )
+
+        if "event_window" not in hp:
+            raise ConfigError("hyperparams.event_window 为必填项")
+        if not isinstance(hp["event_window"], int):
+            raise ConfigError("hyperparams.event_window 类型错误: 期望 int")
+        if hp["event_window"] < 0:
+            raise ConfigError(
+                f"hyperparams.event_window 必须 >= 0，当前值: {hp['event_window']}"
+            )
+
     # search_space 配置
     ss = hp.get("search_space", {})
-    required_params = ["contamination"]
+    if model_type == "ECOD":
+        _validate_search_space_list(ss, "contamination", (int, float))
+    elif model_type == "PELT":
+        _validate_search_space_list(ss, "pen", (int, float))
+        _validate_search_space_list(ss, "min_size", int)
+        if "jump" in ss:
+            _validate_search_space_list(ss, "jump", int)
 
-    for param in required_params:
-        if param not in ss:
-            raise ConfigError(f"hyperparams.search_space.{param} 为必填项")
-        if not isinstance(ss[param], list) or len(ss[param]) == 0:
-            raise ConfigError(f"hyperparams.search_space.{param} 必须是非空列表")
+        if any(value <= 0 for value in ss["min_size"]):
+            raise ConfigError("hyperparams.search_space.min_size 必须全部 > 0")
+        if "jump" in ss and any(value <= 0 for value in ss["jump"]):
+            raise ConfigError("hyperparams.search_space.jump 必须全部 > 0")
 
     # feature_engineering 配置（条件依赖）
     if hp["use_feature_engineering"]:
@@ -306,6 +362,16 @@ class TrainingConfig:
     def metric(self) -> str:
         """优化指标"""
         return self.config["hyperparams"]["metric"]
+
+    @property
+    def event_window(self) -> Optional[int]:
+        """PELT 固定事件窗口大小。"""
+        return self.config["hyperparams"].get("event_window")
+
+    @property
+    def cost_model(self) -> Optional[str]:
+        """PELT 使用的 ruptures cost model。"""
+        return self.config["hyperparams"].get("cost_model")
 
     @property
     def search_space(self) -> Dict[str, Any]:

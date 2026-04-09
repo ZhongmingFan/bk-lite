@@ -9,6 +9,7 @@ from typing import List
 # 支持的模型类型
 SUPPORTED_MODELS: List[str] = [
     "ECOD",
+    "PELT",
     # 未来可扩展: "IsolationForest", "LOF", "KNN"
 ]
 
@@ -25,3 +26,7 @@ SUPPORTED_MISSING_HANDLERS: List[str] = [
     "drop",
     "median",
 ]
+
+
+# PELT 支持的 ruptures cost model
+SUPPORTED_PELT_COST_MODELS: List[str] = ["l1", "l2", "rbf"]

@@ -482,12 +482,17 @@ class UniversalTrainer:
 
         # 获取模型参数
         random_state = self.config.random_state
+        model_kwargs: Dict[str, Any] = {"random_state": random_state}
+
+        if model_type == "PELT":
+            model_kwargs["cost_model"] = self.config.cost_model
+            model_kwargs["event_window"] = self.config.event_window
 
         logger.info(f"创建模型: {model_type}")
         logger.debug(f"随机种子: {random_state}")
 
         # 实例化模型
-        model = model_class(random_state=random_state)
+        model = model_class(**model_kwargs)
 
         return model
 

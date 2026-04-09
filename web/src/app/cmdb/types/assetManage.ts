@@ -325,6 +325,43 @@ export interface UniqueRulePayload {
   field_ids: string[];
 }
 
+export interface AutoAssociationRuleMatchPair {
+  src_field_id: string;
+  dst_field_id: string;
+}
+
+export interface AutoAssociationRuleConfig {
+  enabled: boolean;
+  match_pairs: AutoAssociationRuleMatchPair[];
+  updated_by: string;
+  updated_at: string;
+}
+
+export interface ModelAutoAssociationRuleItem {
+  _id?: string | number;
+  model_asst_id: string;
+  src_model_id: string;
+  dst_model_id: string;
+  asst_id?: string;
+  mapping: string;
+  auto_relation_rule: AutoAssociationRuleConfig | null;
+  [key: string]: unknown;
+}
+
+export interface AutoAssociationRuleFormAssociationItem extends ModelAutoAssociationRuleItem {
+  current_side: 'src' | 'dst';
+  form_source_model_id: string;
+  form_target_model_id: string;
+}
+
+export interface AutoAssociationRulePayload {
+  model_asst_id?: string;
+  enabled: boolean;
+  match_pairs: AutoAssociationRuleMatchPair[];
+}
+
+export type ModelAutoAssociationRuleListResponse = ModelAutoAssociationRuleItem[];
+
 // 获取模型完整信息接口相关类型
 export interface FullInfoAttrItem {
   attr_id: string;

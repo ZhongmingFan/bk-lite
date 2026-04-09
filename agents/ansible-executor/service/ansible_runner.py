@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
 from core.config import ServiceConfig, logger
 from service.runtime import current_entrypoint_command
 
@@ -142,7 +141,7 @@ def to_playbook_request(payload: dict[str, Any]) -> PlaybookRequest:
         raise ValueError("file_distribution must be object")
 
     logger.info(
-        "to_playbook_request payload check: "
+        "to_playbook_request payload check11: "
         "task_id=%s "
         "playbook_path=%r "
         "playbook_content_is_none=%s "
@@ -168,7 +167,7 @@ def to_playbook_request(payload: dict[str, Any]) -> PlaybookRequest:
     no_file_distribution = not file_distribution
 
     logger.info(
-        "to_playbook_request validation booleans: "
+        "to_playbook_request validation booleans22: "
         "task_id=%s "
         "no_playbook_path=%s "
         "no_playbook_content=%s "
@@ -181,7 +180,7 @@ def to_playbook_request(payload: dict[str, Any]) -> PlaybookRequest:
 
     if no_playbook_path and no_playbook_content and no_file_distribution:
         logger.error(
-            "to_playbook_request validation failed: "
+            "to_playbook_request validation failed33: "
             "missing playbook_path/playbook_content/file_distribution "
             "task_id=%s "
             "raw_file_distribution=%r "
@@ -245,7 +244,7 @@ async def download_object_to_workspace(
         raise ValueError("file name is required")
 
     logger.info(
-        "download_object_to_workspace config: "
+        "download_object_to_workspace config44: "
         "task_file=%s "
         "bucket_name=%s "
         "nats_servers=%r "
@@ -361,7 +360,7 @@ def _quote_inventory_value(value: Any) -> str:
 def _mask_sensitive_inventory_content(content: str) -> str:
     masked = str(content)
     for key in _SENSITIVE_INVENTORY_PATTERNS:
-        masked = re.sub(rf"({key}=)(\S+)", rf"\1***", masked)
+        masked = re.sub(rf"({key}=)(\S+)", r"\1***", masked)
     return masked
 
 
@@ -752,5 +751,16 @@ async def run_command(cmd: list[str], timeout: int) -> tuple[int, str]:
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
+        logger.error(
+            "command timed out: %s", " ".join(shlex.quote(part) for part in cmd)
+        )
         return 124, "command timed out"
-    return proc.returncode or 0, stdout.decode("utf-8", errors="replace")
+    output = stdout.decode("utf-8", errors="replace")
+    exit_code = proc.returncode or 0
+    logger.info("command finished: exit_code=%s", exit_code)
+    if output:
+        if exit_code == 0:
+            logger.info("command output:\n%s", output)
+        else:
+            logger.error("command output:\n%s", output)
+    return exit_code, output

@@ -626,9 +626,14 @@ class UniversalTrainer:
                 )
 
             # 3. 异常分数分布（分离正常和异常样本）
+            # PELT 的 predict_proba 返回窗口化 0/1 分数，分布图信息量低，跳过
             normal_mask = y_true == 0
             anomaly_mask = y_true == 1
-            if normal_mask.any() and anomaly_mask.any():
+            if (
+                self.config.model_type.upper() != "PELT"
+                and normal_mask.any()
+                and anomaly_mask.any()
+            ):
                 MLFlowUtils.plot_score_distribution(
                     normal_scores=y_scores[normal_mask],
                     anomaly_scores=y_scores[anomaly_mask],

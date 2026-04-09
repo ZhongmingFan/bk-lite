@@ -106,9 +106,14 @@ class PELTModel(BaseAnomalyModel):
         }
 
         jump_values = search_space.get("jump", [self.jump])
+        eval_count = 0
+        total_evals = (
+            len(search_space["pen"]) * len(search_space["min_size"]) * len(jump_values)
+        )
         for pen in search_space["pen"]:
             for min_size in search_space["min_size"]:
                 for jump in jump_values:
+                    eval_count += 1
                     candidate = PELTModel(
                         pen=pen,
                         min_size=min_size,
@@ -124,6 +129,34 @@ class PELTModel(BaseAnomalyModel):
                         labels_array = val_labels.astype(int, copy=False)
                     metrics = candidate.evaluate(val_data, labels_array)
                     score = float(metrics.get(metric, metrics["f1"]))
+
+                    logger.debug(
+                        f"PELT trial [{eval_count}/{total_evals}] "
+                        f"pen={pen}, min_size={min_size}, jump={jump}: "
+                        f"{metric}={score:.4f}"
+                    )
+
+                    # 每轮试验记录到 MLflow（镜像 ECOD 的 hyperopt/* 命名）
+                    if mlflow.active_run():
+                        mlflow.log_metric(
+                            f"hyperopt/val_{metric}", score, step=eval_count
+                        )
+                        mlflow.log_metric(
+                            "hyperopt/val_f1",
+                            float(metrics.get("f1", score)),
+                            step=eval_count,
+                        )
+                        mlflow.log_metric(
+                            "hyperopt/val_precision",
+                            float(metrics.get("precision", 0.0)),
+                            step=eval_count,
+                        )
+                        mlflow.log_metric(
+                            "hyperopt/val_recall",
+                            float(metrics.get("recall", 0.0)),
+                            step=eval_count,
+                        )
+
                     if score > best_score:
                         best_score = score
                         best_params = {
@@ -131,6 +164,24 @@ class PELTModel(BaseAnomalyModel):
                             "min_size": int(min_size),
                             "jump": int(jump),
                         }
+                        if mlflow.active_run():
+                            mlflow.log_metric(
+                                "hyperopt/best_so_far", score, step=eval_count
+                            )
+
+        # 汇总指标（镜像 ECOD 的 hyperopt_summary/* 命名）
+        if mlflow.active_run():
+            mlflow.log_metrics(
+                {
+                    "hyperopt_summary/total_evals": float(total_evals),
+                    "hyperopt_summary/actual_evals": float(eval_count),
+                    "hyperopt_summary/best_score": best_score,
+                }
+            )
+            logger.info(
+                f"PELT 超参数搜索完成: {eval_count} 轮, 最优 {metric}={best_score:.4f}, "
+                f"参数={best_params}"
+            )
 
         self.pen = float(best_params["pen"])
         self.min_size = int(best_params["min_size"])

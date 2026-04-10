@@ -1,7 +1,7 @@
-import logging
 import os
 import sys
 from pathlib import Path
+
 from core.config import logger
 
 
@@ -82,4 +82,23 @@ def configure_ansible_environment() -> None:
         "ansible collections path not found: application_root=%s candidates=%s",
         root,
         [str(candidate) for candidate in candidates],
+    )
+
+
+def log_ansible_windows_collection_layout() -> None:
+    collections_path = os.environ.get("ANSIBLE_COLLECTIONS_PATH")
+    if not collections_path:
+        logger.warning("ansible windows collection layout check skipped: collections_path is unset")
+        return
+
+    module_path = Path(collections_path) / "ansible_collections" / "ansible" / "windows" / "plugins" / "modules" / "win_ping.ps1"
+    nested_module_path = module_path / "win_ping.ps1"
+    logger.info(
+        "ansible windows collection layout: module_path=%s exists=%s is_file=%s is_dir=%s nested_exists=%s nested_is_file=%s",
+        module_path,
+        module_path.exists(),
+        module_path.is_file(),
+        module_path.is_dir(),
+        nested_module_path.exists(),
+        nested_module_path.is_file(),
     )

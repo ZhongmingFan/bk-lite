@@ -235,7 +235,7 @@ export class ChartDataTransformer {
    */
   static validatePieData(rawData: any, errorMessage?: string): { isValid: boolean; message?: string } {
     // 数据为空时图表组件会显示 Empty 状态，不需要校验
-    if (!rawData) {
+    if (!rawData || (Array.isArray(rawData) && rawData.length === 0)) {
       return { isValid: true };
     }
 
@@ -243,7 +243,7 @@ export class ChartDataTransformer {
       const transformedData = this.transformToPieData(rawData);
 
       if (!transformedData || transformedData.length === 0) {
-        return { isValid: true }; // 空数据让图表组件自行处理
+        return { isValid: false, message: errorMessage || '数据格式不匹配' };
       }
 
       const hasValidValues = transformedData.some(item =>

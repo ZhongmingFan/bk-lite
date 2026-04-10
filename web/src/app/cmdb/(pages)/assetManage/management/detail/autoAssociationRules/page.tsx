@@ -5,6 +5,7 @@ import { Alert, Button, Modal, Space, Switch, Tag, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import CustomTable from '@/components/custom-table';
 import PermissionWrapper from '@/components/permission';
+import { useLocalizedTime } from '@/hooks/useLocalizedTime';
 import { useTranslation } from '@/utils/i18n';
 import { useModelApi } from '@/app/cmdb/api';
 import { useCommon } from '@/app/cmdb/context/common';
@@ -21,6 +22,7 @@ import { CONSTRAINT_List } from '@/app/cmdb/constants/asset';
 
 const AutoAssociationRulesPage: React.FC = () => {
   const { t } = useTranslation();
+  const { convertToLocalizedTime } = useLocalizedTime();
   const { confirm } = Modal;
   const modalRef = useRef<AutoAssociationRuleModalRef>(null);
   const commonContext = useCommon();
@@ -242,7 +244,10 @@ const AutoAssociationRulesPage: React.FC = () => {
     {
       title: t('Model.updatedAt', 'Updated At'),
       key: 'updated_at',
-      render: (_, record) => record.auto_relation_rule?.updated_at || '--',
+      render: (_, record) => {
+        const updatedAt = record.auto_relation_rule?.updated_at;
+        return updatedAt ? convertToLocalizedTime(updatedAt) : '--';
+      },
     },
     {
       title: t('common.action', 'Actions'),

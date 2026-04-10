@@ -50,8 +50,10 @@ from apps.cmdb.services.auto_relation_rule import (
     AutoRelationRule,
     AutoRelationRuleSet,
     build_auto_relation_rule_response,
+    canonicalize_auto_relation_rule_set_payload,
     dump_auto_relation_rule,
     dump_auto_relation_rule_set,
+    dump_auto_relation_rule_set_compact,
     parse_auto_relation_rule,
     parse_auto_relation_rule_set,
     validate_auto_relation_rule_payload,
@@ -1536,8 +1538,9 @@ class ModelManage(object):
         except Exception:
             raise BaseAppException(f"{context} auto_relation_rule 不是合法 JSON")
 
-        if not isinstance(data, dict):
-            raise BaseAppException(f"{context} auto_relation_rule 必须是对象")
+        if not isinstance(data, (dict, list)):
+            raise BaseAppException(f"{context} auto_relation_rule 必须是对象或数组")
+        data = canonicalize_auto_relation_rule_set_payload(data)
         if not isinstance(data.get("rules"), list) or not data.get("rules"):
             raise BaseAppException(f"{context} auto_relation_rule.rules 不能为空")
         return data
@@ -1549,6 +1552,13 @@ class ModelManage(object):
             raise BaseAppException(f"{context} 自动关联规则只能在 sheet[{expected_sheet}] 中定义")
 
     @staticmethod
+    def _is_empty_auto_rule_sheet_row(row: dict[str, Any]) -> bool:
+        return all(
+            str(row.get(key) or "").strip() == ""
+            for key in ("src_model_id", "dst_model_id", "asst_id", AUTO_RELATION_RULE_FIELD)
+        )
+
+    @staticmethod
     def _import_auto_relation_rule_sets_from_asso_sheets(model_config: dict[str, list[dict]]):
         pending_items = []
         seen_model_asst_ids: dict[str, str] = {}
@@ -1558,37 +1568,20 @@ class ModelManage(object):
                 continue
 
             for row_index, row in enumerate(rows, start=3):
+                if ModelManage._is_empty_auto_rule_sheet_row(row):
+                    continue
                 if AUTO_RELATION_RULE_FIELD not in row:
                     continue
-
-                raw_rule_set = row.get(AUTO_RELATION_RULE_FIELD, "")
 
                 src_model_id = str(row.get("src_model_id", "")).strip()
                 dst_model_id = str(row.get("dst_model_id", "")).strip()
                 asst_id = str(row.get("asst_id", "")).strip()
                 context = f"sheet[{sheet_name}] 第 {row_index} 行"
+                raw_rule_set = row.get(AUTO_RELATION_RULE_FIELD, "")
 
                 model_asst_id = ModelManage._build_model_asst_id(src_model_id, asst_id, dst_model_id)
 
                 if raw_rule_set in (None, ""):
-                    if sheet_name != f"asso-{src_model_id}":
-                        continue
-
-                    previous_context = seen_model_asst_ids.get(model_asst_id)
-                    if previous_context:
-                        raise BaseAppException(
-                            f"{context} ({model_asst_id}) 与 {previous_context} 重复定义了自动关联规则"
-                        )
-                    seen_model_asst_ids[model_asst_id] = context
-
-                    pending_items.append(
-                        {
-                            "context": context,
-                            "model_id": src_model_id,
-                            "model_asst_id": model_asst_id,
-                            "payload": None,
-                        }
-                    )
                     continue
 
                 ModelManage._validate_auto_rule_sheet_authority(sheet_name, src_model_id, context)
@@ -1888,7 +1881,7 @@ class ModelManage(object):
                     rule_set_value = ""
                     if asso.get("src_model_id") == model_id:
                         rule_set = parse_auto_relation_rule_set(asso.get(AUTO_RELATION_RULE_FIELD))
-                        rule_set_value = dump_auto_relation_rule_set(rule_set) if rule_set else ""
+                        rule_set_value = dump_auto_relation_rule_set_compact(rule_set) if rule_set else ""
                     ws_asso.append(
                         [
                             asso.get("src_model_id", ""),

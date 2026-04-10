@@ -4,7 +4,15 @@ from django.db import transaction
 
 from apps.cmdb.constants.constants import INSTANCE, INSTANCE_ASSOCIATION
 from apps.cmdb.graph.drivers.graph_client import GraphClient
-from apps.cmdb.services.auto_relation_rule import AUTO_RELATION_RULE_FIELD, AutoRelationRule, parse_auto_relation_rule_set
+from apps.cmdb.services.auto_relation_rule import (
+    AUTO_RELATION_MATCHING_RULE_CONTAINS,
+    AUTO_RELATION_MATCHING_RULE_EXACT,
+    AUTO_RELATION_MATCHING_RULE_IEXACT,
+    AUTO_RELATION_RULE_FIELD,
+    AutoRelationMatchPair,
+    AutoRelationRule,
+    parse_auto_relation_rule_set,
+)
 from apps.core.exceptions.base_app_exception import BaseAppException
 from apps.core.logger import cmdb_logger as logger
 
@@ -91,6 +99,24 @@ def schedule_incoming_rule_full_sync_by_model_ids(model_ids: list[str] | tuple[s
 
 
 class AutoRelationRuleReconcileService:
+    @staticmethod
+    def _matches_pair(source_value, target_value, pair: AutoRelationMatchPair) -> bool:
+        if pair.matching_rule == AUTO_RELATION_MATCHING_RULE_EXACT:
+            return source_value == target_value
+        if source_value is None or target_value is None:
+            return False
+        if pair.matching_rule == AUTO_RELATION_MATCHING_RULE_IEXACT:
+            return str(source_value).strip().lower() == str(target_value).strip().lower()
+        if pair.matching_rule == AUTO_RELATION_MATCHING_RULE_CONTAINS:
+            return str(source_value).strip() in str(target_value).strip()
+        logger.warning(
+            "[AutoRelationRule] unsupported matching_rule skipped, matching_rule=%s, src_field_id=%s, dst_field_id=%s",
+            pair.matching_rule,
+            pair.src_field_id,
+            pair.dst_field_id,
+        )
+        return False
+
     @staticmethod
     def _get_mapping(association: dict) -> str:
         return str(association.get("mapping") or "n:n")
@@ -182,7 +208,11 @@ class AutoRelationRuleReconcileService:
             for target_instance in candidate_targets:
                 matched = True
                 for pair in rule.match_pairs:
-                    if source_instance.get(pair.src_field_id) != target_instance.get(pair.dst_field_id):
+                    if not cls._matches_pair(
+                        source_instance.get(pair.src_field_id),
+                        target_instance.get(pair.dst_field_id),
+                        pair,
+                    ):
                         matched = False
                         break
                 if matched:

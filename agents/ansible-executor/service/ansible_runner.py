@@ -135,7 +135,7 @@ def to_playbook_request(payload: dict[str, Any]) -> PlaybookRequest:
         raise ValueError("file_distribution must be object")
 
     logger.info(
-        "to_playbook_request payload check999: "
+        "to_playbook_request payload check: "
         "task_id=%s "
         "playbook_path=%r "
         "playbook_content_is_none=%s "
@@ -448,7 +448,7 @@ def _build_host_credentials_inventory(workspace: Path, host_credentials: list[di
         if password:
             parts.append(f"ansible_password={_quote_inventory_value(password)}")
             if str(connection).strip().lower() == "ssh":
-                parts.append("ansible_ssh_common_args=" f"{_quote_inventory_value(_get_password_auth_ssh_common_args(item))}")
+                parts.append(f"ansible_ssh_common_args={_quote_inventory_value(_get_password_auth_ssh_common_args(item))}")
 
         private_key_file = item.get("private_key_file")
         private_key_content = item.get("private_key_content")
@@ -679,6 +679,25 @@ def build_playbook_list_hosts_command(payload: PlaybookRequest) -> list[str]:
         *current_entrypoint_command(),
         "--internal-ansible-cli",
         "playbook",
+        "--",
+        *cli_args,
+    ]
+
+
+def build_playbook_winrm_preflight_command(payload: PlaybookRequest) -> list[str]:
+    cli_args = [
+        "all",
+        "-i",
+        payload.inventory,
+        "-m",
+        "ansible.windows.win_ping",
+    ]
+    if payload.extra_vars:
+        cli_args.extend(["--extra-vars", json.dumps(payload.extra_vars, ensure_ascii=False)])
+    return [
+        *current_entrypoint_command(),
+        "--internal-ansible-cli",
+        "adhoc",
         "--",
         *cli_args,
     ]

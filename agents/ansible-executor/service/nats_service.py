@@ -13,6 +13,7 @@ from nats.js.api import AckPolicy, ConsumerConfig, DeliverPolicy, RetentionPolic
 from nats.js.errors import NotFoundError
 from service.ansible_runner import (
     build_playbook_list_hosts_command,
+    build_playbook_winrm_preflight_command,
     cleanup_workspace,
     parse_ansible_output_per_host,
     prepare_adhoc_execution,
@@ -318,6 +319,18 @@ class AnsibleNATSService:
                     logger.info(
                         "playbook host preflight output:\n%s",
                         preflight_output,
+                    )
+                winrm_preflight_cmd = build_playbook_winrm_preflight_command(prepared_request)
+                winrm_preflight_code, winrm_preflight_output = await run_command(winrm_preflight_cmd, request.execute_timeout)
+                logger.info(
+                    "playbook winrm preflight finished: task_id=%s exit_code=%s",
+                    task.task_id,
+                    winrm_preflight_code,
+                )
+                if winrm_preflight_output:
+                    logger.info(
+                        "playbook winrm preflight output:\n%s",
+                        winrm_preflight_output,
                     )
                 code, output = await run_command(cmd, request.execute_timeout)
         except Exception as err:

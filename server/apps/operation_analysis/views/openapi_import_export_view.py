@@ -13,6 +13,7 @@
 from rest_framework import status
 from rest_framework.decorators import action
 from rest_framework.response import Response
+from rest_framework.exceptions import ValidationError
 
 from apps.core.utils.open_base import OpenAPIViewSet
 from apps.core.exceptions.base_app_exception import UnauthorizedException
@@ -54,17 +55,39 @@ class OpenImportExportViewSet(OpenAPIViewSet):
             raise UnauthorizedException("缺少有效的 API Token，请在请求头中提供有效的认证信息")
 
     def _get_groups_from_request(self, request) -> list[int]:
-        """从请求中获取组织列表"""
-        groups = request.data.get("groups", [])
-        if isinstance(groups, list):
-            return [int(g) for g in groups if str(g).isdigit()]
-        return []
+        user = getattr(request, "user", None)
+        group_list = getattr(user, "group_list", None)
+        if not isinstance(group_list, list):
+            return []
+
+        resolved_groups = []
+        for item in group_list:
+            if isinstance(item, int):
+                resolved_groups.append(item)
+                continue
+            if isinstance(item, str) and item.isdigit():
+                resolved_groups.append(int(item))
+                continue
+            if isinstance(item, dict):
+                group_id = item.get("id")
+                if isinstance(group_id, int):
+                    resolved_groups.append(group_id)
+                    continue
+                if isinstance(group_id, str) and group_id.isdigit():
+                    resolved_groups.append(int(group_id))
+
+        return resolved_groups
+
+    def _require_groups(self, request) -> list[int]:
+        groups = self._get_groups_from_request(request)
+        if not groups:
+            raise ValidationError("无法从API Token上下文解析有效的组织信息")
+        return groups
 
     def _get_username_from_request(self, request) -> str:
-        """从请求中获取用户名"""
-        if hasattr(request, "user") and hasattr(request.user, "username"):
+        if hasattr(request, "user") and getattr(request.user, "is_authenticated", False) and getattr(request.user, "username", None):
             return request.user.username
-        return request.data.get("operator", "api_user")
+        return "api_user"
 
     def _convert_ids_to_keys(self, object_type: str, object_ids: list[int]) -> list[str]:
         """将对象 ID 转换为业务键"""
@@ -126,10 +149,8 @@ class OpenImportExportViewSet(OpenAPIViewSet):
 
         Request Body:
             {
-                "scope": "single",  # 导出范围: "single" | "cascade"
                 "object_type": "dashboard",  # 对象类型: "dashboard" | "topology" | "architecture" | "datasource" | "namespace"
-                "object_ids": [1, 2, 3],  # 要导出的对象 ID 列表
-                "groups": [1]  # 可选，组织 ID 列表
+                "object_ids": [1, 2, 3]  # 要导出的对象 ID 列表
             }
 
         Response (200 OK):
@@ -162,8 +183,8 @@ class OpenImportExportViewSet(OpenAPIViewSet):
         object_type = data["object_type"]
         object_ids = data["object_ids"]
 
-        groups = self._get_groups_from_request(request)
-        organization_id = groups[0] if groups else 0
+        groups = self._require_groups(request)
+        organization_id = groups[0]
 
         object_keys = self._convert_ids_to_keys(object_type, object_ids)
 
@@ -196,8 +217,7 @@ class OpenImportExportViewSet(OpenAPIViewSet):
         Request Body:
             {
                 "yaml_content": "version: '1.0'\\n...",  # YAML 内容
-                "target_directory_id": 1,  # 可选，目标目录 ID（仅对画布类对象有效）
-                "groups": [1]  # 可选，组织 ID 列表，用于检测跨组织冲突
+                "target_directory_id": 1  # 可选，目标目录 ID（仅对画布类对象有效）
             }
 
         Response (200 OK):
@@ -245,8 +265,8 @@ class OpenImportExportViewSet(OpenAPIViewSet):
         yaml_content = data["yaml_content"]
         target_directory_id = data.get("target_directory_id")
 
-        groups = self._get_groups_from_request(request)
-        current_team = groups[0] if groups else None
+        groups = self._require_groups(request)
+        current_team = groups[0]
 
         logger.info(
             "Open API import precheck request: yaml_size=%d, target_directory_id=%s, current_team=%s",
@@ -289,9 +309,7 @@ class OpenImportExportViewSet(OpenAPIViewSet):
                         "field": "password",
                         "value": "secret123"
                     }
-                ],
-                "groups": [1],  # 组织 ID 列表
-                "operator": "api_user"  # 可选，操作者用户名
+                ]
             }
 
         Response (200 OK):
@@ -340,8 +358,8 @@ class OpenImportExportViewSet(OpenAPIViewSet):
         conflict_decisions_list = data.get("conflict_decisions", [])
         secret_supplements_list = data.get("secret_supplements", [])
 
-        groups = self._get_groups_from_request(request)
-        current_team = groups[0] if groups else None
+        groups = self._require_groups(request)
+        current_team = groups[0]
         username = self._get_username_from_request(request)
 
         logger.info(

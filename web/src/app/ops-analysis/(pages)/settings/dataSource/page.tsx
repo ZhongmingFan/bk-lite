@@ -123,7 +123,6 @@ const Datasource: React.FC = () => {
     try {
       setExportLoading(row.id);
       const response = await exportObjects({
-        scope: 'config',
         object_type: 'datasource',
         object_ids: [row.id],
       });

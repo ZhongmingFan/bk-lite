@@ -858,6 +858,512 @@
             display: none;
         }
 
+        .structure-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .structure-toolbar {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 16px;
+        }
+
+        .structure-toolbar-main {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .structure-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #313238;
+        }
+
+        .structure-subtitle {
+            font-size: 13px;
+            color: #7f8795;
+            line-height: 1.6;
+        }
+
+        .structure-toolbar-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-shrink: 0;
+        }
+
+        .btn-ghost {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 8px 14px;
+            border: 1px solid #dcdee5;
+            border-radius: 4px;
+            background: #fff;
+            color: #63656e;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .btn-ghost:hover {
+            border-color: #3a84ff;
+            color: #3a84ff;
+        }
+
+        .structure-stats {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .structure-stat-card {
+            padding: 16px;
+            border: 1px solid #e6e8eb;
+            border-radius: 8px;
+            background: linear-gradient(180deg, #ffffff 0%, #fafbfd 100%);
+        }
+
+        .structure-stat-label {
+            font-size: 12px;
+            color: #979ba5;
+            margin-bottom: 10px;
+        }
+
+        .structure-stat-value {
+            font-size: 24px;
+            font-weight: 600;
+            color: #313238;
+            line-height: 1;
+            margin-bottom: 8px;
+        }
+
+        .structure-stat-desc {
+            font-size: 12px;
+            color: #7f8795;
+            line-height: 1.5;
+        }
+
+        .structure-layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1.6fr) 360px;
+            gap: 16px;
+            align-items: start;
+        }
+
+        .structure-main {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            min-width: 0;
+        }
+
+        .structure-flow {
+            padding: 20px;
+            border: 1px solid #e6e8eb;
+            border-radius: 8px;
+            background: linear-gradient(135deg, #fbfcff 0%, #f5f7fa 100%);
+        }
+
+        .structure-flow-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .structure-section-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #313238;
+        }
+
+        .structure-section-desc {
+            font-size: 12px;
+            color: #7f8795;
+        }
+
+        .structure-flow-track {
+            display: grid;
+            grid-template-columns: 180px 42px 180px 42px 1fr;
+            gap: 12px;
+            align-items: center;
+        }
+
+        .flow-node {
+            min-height: 88px;
+            padding: 14px 16px;
+            border-radius: 8px;
+            border: 1px solid #d9e2f2;
+            background: #fff;
+            box-shadow: 0 6px 18px rgba(58, 132, 255, 0.06);
+        }
+
+        .flow-node-label {
+            font-size: 12px;
+            color: #7f8795;
+            margin-bottom: 8px;
+        }
+
+        .flow-node-title {
+            font-size: 15px;
+            font-weight: 600;
+            color: #313238;
+            margin-bottom: 6px;
+        }
+
+        .flow-node-meta {
+            font-size: 12px;
+            color: #63656e;
+            line-height: 1.6;
+        }
+
+        .flow-arrow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #3a84ff;
+        }
+
+        .flow-arrow svg {
+            width: 24px;
+            height: 24px;
+        }
+
+        .flow-output {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .flow-output-card {
+            padding: 14px 16px;
+            border-radius: 8px;
+            border: 1px dashed #c5d6f8;
+            background: rgba(255, 255, 255, 0.9);
+        }
+
+        .flow-output-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #313238;
+            margin-bottom: 8px;
+        }
+
+        .chip-list {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .mini-chip {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 4px 8px;
+            border-radius: 999px;
+            background: #eaf3ff;
+            color: #3a84ff;
+            font-size: 12px;
+            line-height: 1;
+        }
+
+        .mini-chip.gray {
+            background: #f5f7fa;
+            color: #63656e;
+        }
+
+        .mini-chip.warn {
+            background: #fff1f0;
+            color: #f5222d;
+        }
+
+        .structure-filters {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .structure-filter {
+            padding: 6px 12px;
+            border: 1px solid #dcdee5;
+            border-radius: 999px;
+            background: #fff;
+            color: #63656e;
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .structure-filter:hover {
+            border-color: #3a84ff;
+            color: #3a84ff;
+        }
+
+        .structure-filter.active {
+            background: #e1ecff;
+            border-color: #c5d6f8;
+            color: #3a84ff;
+        }
+
+        .structure-columns {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 16px;
+        }
+
+        .structure-column {
+            border: 1px solid #e6e8eb;
+            border-radius: 8px;
+            background: #fff;
+            overflow: hidden;
+        }
+
+        .structure-column-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 14px 16px;
+            background: #f5f7fa;
+            border-bottom: 1px solid #edf0f5;
+        }
+
+        .structure-column-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: #313238;
+        }
+
+        .structure-column-body {
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .structure-node {
+            width: 100%;
+            text-align: left;
+            padding: 14px;
+            border: 1px solid #e6e8eb;
+            border-radius: 8px;
+            background: #fff;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .structure-node:hover {
+            border-color: #a3c5fd;
+            box-shadow: 0 8px 20px rgba(58, 132, 255, 0.08);
+        }
+
+        .structure-node.active {
+            border-color: #3a84ff;
+            box-shadow: 0 0 0 2px rgba(58, 132, 255, 0.12);
+            background: #f8fbff;
+        }
+
+        .structure-node-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+
+        .structure-node-name {
+            font-size: 14px;
+            font-weight: 600;
+            color: #313238;
+        }
+
+        .structure-node-type {
+            font-size: 12px;
+            color: #3a84ff;
+            background: #eaf3ff;
+            border-radius: 999px;
+            padding: 4px 8px;
+            flex-shrink: 0;
+        }
+
+        .structure-node-code {
+            margin-bottom: 10px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 12px;
+            color: #5b6575;
+            line-height: 1.6;
+            word-break: break-all;
+        }
+
+        .structure-node-desc {
+            font-size: 12px;
+            color: #7f8795;
+            line-height: 1.6;
+            margin-bottom: 10px;
+        }
+
+        .structure-node-foot {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .structure-side {
+            position: sticky;
+            top: 0;
+        }
+
+        .structure-detail {
+            border: 1px solid #e6e8eb;
+            border-radius: 8px;
+            background: #fff;
+            overflow: hidden;
+        }
+
+        .structure-detail-header {
+            padding: 18px 18px 16px;
+            border-bottom: 1px solid #edf0f5;
+            background: linear-gradient(180deg, #f9fbff 0%, #ffffff 100%);
+        }
+
+        .structure-detail-kicker {
+            font-size: 12px;
+            color: #3a84ff;
+            margin-bottom: 8px;
+        }
+
+        .structure-detail-title {
+            font-size: 18px;
+            font-weight: 600;
+            color: #313238;
+            margin-bottom: 8px;
+        }
+
+        .structure-detail-desc {
+            font-size: 13px;
+            color: #7f8795;
+            line-height: 1.6;
+        }
+
+        .structure-detail-body {
+            padding: 18px;
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+        }
+
+        .detail-section {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .detail-section-title {
+            font-size: 13px;
+            font-weight: 600;
+            color: #313238;
+        }
+
+        .detail-meta-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .detail-meta-item {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            font-size: 13px;
+        }
+
+        .detail-meta-label {
+            color: #7f8795;
+            flex-shrink: 0;
+        }
+
+        .detail-meta-value {
+            color: #313238;
+            text-align: right;
+            line-height: 1.6;
+            word-break: break-word;
+        }
+
+        .detail-preview {
+            padding: 12px 14px;
+            border-radius: 6px;
+            background: #f5f7fa;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 12px;
+            color: #313238;
+            white-space: pre-wrap;
+            line-height: 1.7;
+            word-break: break-word;
+        }
+
+        .detail-risk-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .detail-risk-item {
+            padding: 10px 12px;
+            border-radius: 6px;
+            background: #fff7e6;
+            color: #8c6d1f;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .detail-risk-item.ok {
+            background: #f6ffed;
+            color: #389e0d;
+        }
+
+        @media (max-width: 1360px) {
+            .structure-stats {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+
+            .structure-layout {
+                grid-template-columns: 1fr;
+            }
+
+            .structure-side {
+                position: static;
+            }
+
+            .structure-flow-track {
+                grid-template-columns: 1fr;
+            }
+
+            .flow-arrow {
+                transform: rotate(90deg);
+            }
+        }
+
+        @media (max-width: 960px) {
+            .structure-stats,
+            .structure-columns {
+                grid-template-columns: 1fr;
+            }
+
+            .structure-toolbar {
+                flex-direction: column;
+            }
+        }
+
         /* 隐藏内容区 */
         .content-panel {
             display: none;
@@ -1212,20 +1718,32 @@
         <!-- 左侧导航 -->
         <div class="left-sidebar">
             <div class="sidebar-menu">
-                <div class="sidebar-item active" onclick="switchTab('config')">
+                <div class="sidebar-item active" onclick="switchTab('config', this)">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <circle cx="12" cy="12" r="3"/>
                         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
                     </svg>
                     <span>配置</span>
                 </div>
-                <div class="sidebar-item" onclick="switchTab('metrics')">
+                <div class="sidebar-item" onclick="switchTab('metrics', this)">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <line x1="18" y1="20" x2="18" y2="10"/>
                         <line x1="12" y1="20" x2="12" y2="4"/>
                         <line x1="6" y1="20" x2="6" y2="14"/>
                     </svg>
                     <span>指标</span>
+                </div>
+                <div class="sidebar-item" onclick="switchTab('structure', this)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M3 5h7v5H3z"/>
+                        <path d="M14 3h7v9h-7z"/>
+                        <path d="M3 14h7v7H3z"/>
+                        <path d="M14 16h7v5h-7z"/>
+                        <path d="M10 7h4"/>
+                        <path d="M7 10v4"/>
+                        <path d="M17.5 12v4"/>
+                    </svg>
+                    <span>采集结构</span>
                 </div>
             </div>
             <div class="sidebar-back" onclick="goBack()">
@@ -1669,6 +2187,246 @@
                     <div class="metric-group-content"></div>
                 </div>
             </div>
+
+            <div class="content-panel" id="structurePanel">
+                <div class="structure-panel">
+                    <div class="structure-toolbar">
+                        <div class="structure-toolbar-main">
+                            <div class="structure-title">采集结构</div>
+                            <div class="structure-subtitle">以 Telegraf SNMP input 的 field 与 table 为中心查看采集模版结构，快速确认 OID 映射、输出标签与字段关系。</div>
+                        </div>
+                        <div class="structure-toolbar-actions">
+                            <button class="btn-ghost">结构图视图</button>
+                            <button class="btn-ghost">输出预览</button>
+                        </div>
+                    </div>
+
+                    <div class="structure-stats">
+                        <div class="structure-stat-card">
+                            <div class="structure-stat-label">标量字段</div>
+                            <div class="structure-stat-value">4</div>
+                            <div class="structure-stat-desc">直接通过 SNMP GET 拉取单值变量。</div>
+                        </div>
+                        <div class="structure-stat-card">
+                            <div class="structure-stat-label">表采集</div>
+                            <div class="structure-stat-value">3</div>
+                            <div class="structure-stat-desc">按 table 行采集，每行生成一条观测记录。</div>
+                        </div>
+                        <div class="structure-stat-card">
+                            <div class="structure-stat-label">输出标签</div>
+                            <div class="structure-stat-value">5</div>
+                            <div class="structure-stat-desc">用于区分实例、端口和存储对象。</div>
+                        </div>
+                        <div class="structure-stat-card">
+                            <div class="structure-stat-label">输出字段</div>
+                            <div class="structure-stat-value">18</div>
+                            <div class="structure-stat-desc">写入平台的数值与状态型字段总量。</div>
+                        </div>
+                        <div class="structure-stat-card">
+                            <div class="structure-stat-label">结构风险</div>
+                            <div class="structure-stat-value">2</div>
+                            <div class="structure-stat-desc">包含高基数字段与缺少单位定义的采集项。</div>
+                        </div>
+                    </div>
+
+                    <div class="structure-layout">
+                        <div class="structure-main">
+                            <div class="structure-flow">
+                                <div class="structure-flow-header">
+                                    <div>
+                                        <div class="structure-section-title">采集路径</div>
+                                        <div class="structure-section-desc">从设备连接到 Telegraf SNMP input，再到平台输出字段的转换关系。</div>
+                                    </div>
+                                    <div class="chip-list">
+                                        <span class="mini-chip">v2c</span>
+                                        <span class="mini-chip gray">161/udp</span>
+                                        <span class="mini-chip gray">10s 轮询</span>
+                                    </div>
+                                </div>
+                                <div class="structure-flow-track">
+                                    <div class="flow-node">
+                                        <div class="flow-node-label">采集目标</div>
+                                        <div class="flow-node-title">交换机设备</div>
+                                        <div class="flow-node-meta">source = 10.0.0.12<br>community = public</div>
+                                    </div>
+                                    <div class="flow-arrow">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/><path d="M13 5l7 7-7 7"/></svg>
+                                    </div>
+                                    <div class="flow-node">
+                                        <div class="flow-node-label">采集器</div>
+                                        <div class="flow-node-title">inputs.snmp</div>
+                                        <div class="flow-node-meta">4 个 field<br>3 个 table<br>自动生成 tags / fields</div>
+                                    </div>
+                                    <div class="flow-arrow">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14"/><path d="M13 5l7 7-7 7"/></svg>
+                                    </div>
+                                    <div class="flow-output">
+                                        <div class="flow-output-card">
+                                            <div class="flow-output-title">输出标签</div>
+                                            <div class="chip-list">
+                                                <span class="mini-chip">source</span>
+                                                <span class="mini-chip">sysName</span>
+                                                <span class="mini-chip">ifDescr</span>
+                                                <span class="mini-chip">hrStorageDescr</span>
+                                            </div>
+                                        </div>
+                                        <div class="flow-output-card">
+                                            <div class="flow-output-title">输出字段</div>
+                                            <div class="chip-list">
+                                                <span class="mini-chip gray">ifHCInOctets</span>
+                                                <span class="mini-chip gray">ifHCOutOctets</span>
+                                                <span class="mini-chip gray">ifOperStatus</span>
+                                                <span class="mini-chip gray">hrStorageUsed</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="structure-filters">
+                                <button class="structure-filter active" onclick="filterStructure('all', this)">全部</button>
+                                <button class="structure-filter" onclick="filterStructure('field', this)">标量字段</button>
+                                <button class="structure-filter" onclick="filterStructure('table', this)">表采集</button>
+                                <button class="structure-filter" onclick="filterStructure('tag', this)">标签输出</button>
+                                <button class="structure-filter" onclick="filterStructure('warning', this)">异常项</button>
+                            </div>
+
+                            <div class="structure-columns">
+                                <div class="structure-column">
+                                    <div class="structure-column-header">
+                                        <div class="structure-column-title">标量字段</div>
+                                        <span class="mini-chip gray">用于全局标签与设备状态</span>
+                                    </div>
+                                    <div class="structure-column-body">
+                                        <button class="structure-node active" data-category="field tag" onclick="selectStructureNode('sysName', this)">
+                                            <div class="structure-node-top">
+                                                <span class="structure-node-name">设备名称</span>
+                                                <span class="structure-node-type">field → tag</span>
+                                            </div>
+                                            <div class="structure-node-code">SNMPv2-MIB::sysName.0</div>
+                                            <div class="structure-node-desc">作为 inherit_tags 的核心来源，供所有 table 结果继承。</div>
+                                            <div class="structure-node-foot">
+                                                <span class="mini-chip">source 维度</span>
+                                                <span class="mini-chip gray">is_tag = true</span>
+                                            </div>
+                                        </button>
+
+                                        <button class="structure-node" data-category="field" onclick="selectStructureNode('sysUpTime', this)">
+                                            <div class="structure-node-top">
+                                                <span class="structure-node-name">运行时长</span>
+                                                <span class="structure-node-type">field</span>
+                                            </div>
+                                            <div class="structure-node-code">DISMAN-EVENT-MIB::sysUpTimeInstance</div>
+                                            <div class="structure-node-desc">用于判断设备是否重启，建议统一换算为秒。</div>
+                                            <div class="structure-node-foot">
+                                                <span class="mini-chip gray">conversion = float(2)</span>
+                                            </div>
+                                        </button>
+
+                                        <button class="structure-node" data-category="field tag warning" onclick="selectStructureNode('sysLocation', this)">
+                                            <div class="structure-node-top">
+                                                <span class="structure-node-name">设备位置</span>
+                                                <span class="structure-node-type">field → tag</span>
+                                            </div>
+                                            <div class="structure-node-code">SNMPv2-MIB::sysLocation.0</div>
+                                            <div class="structure-node-desc">可用于资产定位，但高自由文本可能导致 tag 基数升高。</div>
+                                            <div class="structure-node-foot">
+                                                <span class="mini-chip warn">高基数风险</span>
+                                            </div>
+                                        </button>
+
+                                        <button class="structure-node" data-category="field" onclick="selectStructureNode('sysServices', this)">
+                                            <div class="structure-node-top">
+                                                <span class="structure-node-name">服务能力标识</span>
+                                                <span class="structure-node-type">field</span>
+                                            </div>
+                                            <div class="structure-node-code">SNMPv2-MIB::sysServices.0</div>
+                                            <div class="structure-node-desc">表示设备网络层与应用层服务能力，可作为设备分类补充字段。</div>
+                                            <div class="structure-node-foot">
+                                                <span class="mini-chip gray">int</span>
+                                            </div>
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div class="structure-column">
+                                    <div class="structure-column-header">
+                                        <div class="structure-column-title">表采集</div>
+                                        <span class="mini-chip gray">每一行生成一条采集记录</span>
+                                    </div>
+                                    <div class="structure-column-body">
+                                        <button class="structure-node" data-category="table tag" onclick="selectStructureNode('ifTable', this)">
+                                            <div class="structure-node-top">
+                                                <span class="structure-node-name">接口基础信息表</span>
+                                                <span class="structure-node-type">table</span>
+                                            </div>
+                                            <div class="structure-node-code">IF-MIB::ifTable</div>
+                                            <div class="structure-node-desc">采集接口名、状态、带宽与错误统计，是网络流量指标的主表。</div>
+                                            <div class="structure-node-foot">
+                                                <span class="mini-chip">4 tags</span>
+                                                <span class="mini-chip gray">6 fields</span>
+                                                <span class="mini-chip gray">inherit sysName</span>
+                                            </div>
+                                        </button>
+
+                                        <button class="structure-node" data-category="table" onclick="selectStructureNode('ifXTable', this)">
+                                            <div class="structure-node-top">
+                                                <span class="structure-node-name">接口高容量统计</span>
+                                                <span class="structure-node-type">table</span>
+                                            </div>
+                                            <div class="structure-node-code">IF-MIB::ifXTable</div>
+                                            <div class="structure-node-desc">补充 64 位流量计数器，适合千兆与万兆接口的长期统计。</div>
+                                            <div class="structure-node-foot">
+                                                <span class="mini-chip gray">2 fields</span>
+                                                <span class="mini-chip gray">counter64</span>
+                                            </div>
+                                        </button>
+
+                                        <button class="structure-node" data-category="table tag warning" onclick="selectStructureNode('storageTable', this)">
+                                            <div class="structure-node-top">
+                                                <span class="structure-node-name">存储使用情况表</span>
+                                                <span class="structure-node-type">table</span>
+                                            </div>
+                                            <div class="structure-node-code">HOST-RESOURCES-MIB::hrStorageTable</div>
+                                            <div class="structure-node-desc">采集磁盘、内存或缓存池使用率，当前仍缺少统一单位换算说明。</div>
+                                            <div class="structure-node-foot">
+                                                <span class="mini-chip">hrStorageDescr tag</span>
+                                                <span class="mini-chip warn">单位待确认</span>
+                                            </div>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="structure-side">
+                            <div class="structure-detail">
+                                <div class="structure-detail-header">
+                                    <div class="structure-detail-kicker" id="detailKicker">标量字段</div>
+                                    <div class="structure-detail-title" id="detailTitle">设备名称</div>
+                                    <div class="structure-detail-desc" id="detailDesc">通过单值 OID 获取设备名，并作为全局 tag 继承到接口、存储等 table 的所有输出结果。</div>
+                                </div>
+                                <div class="structure-detail-body">
+                                    <div class="detail-section">
+                                        <div class="detail-section-title">基本信息</div>
+                                        <div class="detail-meta-list" id="detailMeta"></div>
+                                    </div>
+
+                                    <div class="detail-section">
+                                        <div class="detail-section-title">输出预览</div>
+                                        <div class="detail-preview" id="detailPreview"></div>
+                                    </div>
+
+                                    <div class="detail-section">
+                                        <div class="detail-section-title">风险与建议</div>
+                                        <div class="detail-risk-list" id="detailRisks"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -1752,12 +2510,128 @@
 
     <script>
         // 切换标签页
-        function switchTab(tab) {
+        const structureDetails = {
+            sysName: {
+                kicker: '标量字段',
+                title: '设备名称',
+                desc: '通过单值 OID 获取设备名，并作为全局 tag 继承到接口、存储等 table 的所有输出结果。',
+                meta: [
+                    ['OID', 'SNMPv2-MIB::sysName.0'],
+                    ['输出类型', 'tag'],
+                    ['用途', 'inherit_tags 的主来源'],
+                    ['建议', '与 source 一起作为实例识别维度']
+                ],
+                preview: 'snmp,source=10.0.0.12,sysName=core-sw-01 ifOperStatus=1i,ifSpeed=1000000000i',
+                risks: [
+                    { text: '建议保留为 tag，这样接口表与存储表都能继承设备名称。', ok: true },
+                    { text: '如果设备名经常变更，建议在资产侧同步并避免作为唯一主键。', ok: false }
+                ]
+            },
+            sysUpTime: {
+                kicker: '标量字段',
+                title: '运行时长',
+                desc: '用于判断设备重启与稳定性，适合单独展示为设备级状态指标。',
+                meta: [
+                    ['OID', 'DISMAN-EVENT-MIB::sysUpTimeInstance'],
+                    ['输出类型', 'field'],
+                    ['转换', 'float(2)'],
+                    ['用途', '重启检测与稳定性监控']
+                ],
+                preview: 'snmp,source=10.0.0.12,sysName=core-sw-01 sysUptime=183942.12',
+                risks: [
+                    { text: '建议统一转换为秒，减少前端和规则侧重复换算。', ok: true },
+                    { text: '如果不做单位说明，指标消费者可能误认为原始值是毫秒。', ok: false }
+                ]
+            },
+            sysLocation: {
+                kicker: '标量字段',
+                title: '设备位置',
+                desc: '适合在设备视图中展示，但作为 tag 时要警惕自由文本导致的高基数问题。',
+                meta: [
+                    ['OID', 'SNMPv2-MIB::sysLocation.0'],
+                    ['输出类型', 'tag'],
+                    ['用途', '资产定位与拓扑展示'],
+                    ['当前状态', '仅在详情与筛选场景中使用']
+                ],
+                preview: 'snmp,source=10.0.0.12,sysName=core-sw-01,sysLocation=sh-a3-floor7 ifOperStatus=1i',
+                risks: [
+                    { text: '如果位置值未标准化，建议先落字段或通过枚举映射后再转为 tag。', ok: false },
+                    { text: '可与 CMDB 机房/机柜字典对齐，控制 tag 基数。', ok: true }
+                ]
+            },
+            sysServices: {
+                kicker: '标量字段',
+                title: '服务能力标识',
+                desc: '用于表达设备支持的服务层能力，可作为设备类型的辅助判断字段。',
+                meta: [
+                    ['OID', 'SNMPv2-MIB::sysServices.0'],
+                    ['输出类型', 'field'],
+                    ['数据类型', 'int'],
+                    ['用途', '分类与规则过滤']
+                ],
+                preview: 'snmp,source=10.0.0.12,sysName=core-sw-01 sysServices=78i',
+                risks: [
+                    { text: '建议补充枚举解释，否则直接展示整数值可读性较差。', ok: false }
+                ]
+            },
+            ifTable: {
+                kicker: '表采集',
+                title: '接口基础信息表',
+                desc: '接口级主表，负责输出 ifDescr、ifOperStatus、ifSpeed 等核心网络指标。',
+                meta: [
+                    ['表 OID', 'IF-MIB::ifTable'],
+                    ['继承标签', 'sysName'],
+                    ['索引策略', '接口索引自动转为 tag'],
+                    ['输出规模', '4 tags / 6 fields']
+                ],
+                preview: 'interface,source=10.0.0.12,sysName=core-sw-01,ifDescr=GigabitEthernet1/0/1 ifOperStatus=1i,ifSpeed=1000000000i,ifInErrors=0i',
+                risks: [
+                    { text: '建议将 ifDescr 作为 tag 保留，方便按端口维度检索。', ok: true },
+                    { text: '如果还要采集别名字段，注意不要叠加过多接口属性导致 tag 过宽。', ok: false }
+                ]
+            },
+            ifXTable: {
+                kicker: '表采集',
+                title: '接口高容量统计',
+                desc: '补充 64 位输入/输出字节计数器，适合高速接口和长期趋势计算。',
+                meta: [
+                    ['表 OID', 'IF-MIB::ifXTable'],
+                    ['核心字段', 'ifHCInOctets / ifHCOutOctets'],
+                    ['依赖关系', '与 ifTable 共享接口索引'],
+                    ['输出规模', '2 fields']
+                ],
+                preview: 'interface_x,source=10.0.0.12,sysName=core-sw-01,ifDescr=GigabitEthernet1/0/1 ifHCInOctets=9876543210i,ifHCOutOctets=7123456789i',
+                risks: [
+                    { text: '建议在产品侧把该表和 ifTable 视作同一端口视图的补充数据。', ok: true },
+                    { text: '若没有统一 measurement 命名策略，用户会误以为是两类不同指标。', ok: false }
+                ]
+            },
+            storageTable: {
+                kicker: '表采集',
+                title: '存储使用情况表',
+                desc: '用于采集磁盘、内存与缓存池等资源对象的使用情况，适合产出容量型指标。',
+                meta: [
+                    ['表 OID', 'HOST-RESOURCES-MIB::hrStorageTable'],
+                    ['标签字段', 'hrStorageDescr'],
+                    ['当前问题', '单位换算定义未沉淀'],
+                    ['输出规模', '1 tag / 4 fields']
+                ],
+                preview: 'storage,source=10.0.0.12,sysName=core-sw-01,hrStorageDescr=/var hrStorageSize=102400i,hrStorageUsed=76120i',
+                risks: [
+                    { text: '需要明确 hrStorageAllocationUnits 的换算策略，否则前端无法稳定展示容量单位。', ok: false },
+                    { text: '建议把使用率直接输出成派生字段，减少告警规则重复计算。', ok: true }
+                ]
+            }
+        };
+
+        function switchTab(tab, element) {
             // 更新侧边栏选中状态
             document.querySelectorAll('.sidebar-item').forEach(item => {
                 item.classList.remove('active');
             });
-            event.currentTarget.classList.add('active');
+            if (element) {
+                element.classList.add('active');
+            }
 
             // 切换内容面板
             document.querySelectorAll('.content-panel').forEach(panel => {
@@ -1768,7 +2642,58 @@
                 document.getElementById('configPanel').classList.add('active');
             } else if (tab === 'metrics') {
                 document.getElementById('metricsPanel').classList.add('active');
+            } else if (tab === 'structure') {
+                document.getElementById('structurePanel').classList.add('active');
             }
+        }
+
+        function renderStructureDetail(detailKey) {
+            const detail = structureDetails[detailKey];
+            if (!detail) {
+                return;
+            }
+
+            document.getElementById('detailKicker').textContent = detail.kicker;
+            document.getElementById('detailTitle').textContent = detail.title;
+            document.getElementById('detailDesc').textContent = detail.desc;
+            document.getElementById('detailMeta').innerHTML = detail.meta.map(item => `
+                <div class="detail-meta-item">
+                    <span class="detail-meta-label">${item[0]}</span>
+                    <span class="detail-meta-value">${item[1]}</span>
+                </div>
+            `).join('');
+            document.getElementById('detailPreview').textContent = detail.preview;
+            document.getElementById('detailRisks').innerHTML = detail.risks.map(item => `
+                <div class="detail-risk-item${item.ok ? ' ok' : ''}">${item.text}</div>
+            `).join('');
+        }
+
+        function selectStructureNode(detailKey, element) {
+            document.querySelectorAll('.structure-node').forEach(node => {
+                node.classList.remove('active');
+            });
+
+            if (element) {
+                element.classList.add('active');
+            }
+
+            renderStructureDetail(detailKey);
+        }
+
+        function filterStructure(category, element) {
+            document.querySelectorAll('.structure-filter').forEach(filter => {
+                filter.classList.remove('active');
+            });
+
+            if (element) {
+                element.classList.add('active');
+            }
+
+            document.querySelectorAll('.structure-node').forEach(node => {
+                const categories = (node.dataset.category || '').split(' ');
+                const matched = category === 'all' || categories.includes(category);
+                node.style.display = matched ? 'block' : 'none';
+            });
         }
 
         // 展开/折叠指标分组

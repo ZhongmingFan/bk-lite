@@ -5,6 +5,7 @@ import { Alert, Button, Modal, Space, Switch, Tag, message } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import CustomTable from '@/components/custom-table';
 import PermissionWrapper from '@/components/permission';
+import { useLocalizedTime } from '@/hooks/useLocalizedTime';
 import { useTranslation } from '@/utils/i18n';
 import { useModelApi } from '@/app/cmdb/api';
 import { useCommon } from '@/app/cmdb/context/common';
@@ -21,6 +22,7 @@ import { CONSTRAINT_List } from '@/app/cmdb/constants/asset';
 
 const AutoAssociationRulesPage: React.FC = () => {
   const { t } = useTranslation();
+  const { convertToLocalizedTime } = useLocalizedTime();
   const { confirm } = Modal;
   const modalRef = useRef<AutoAssociationRuleModalRef>(null);
   const commonContext = useCommon();
@@ -44,13 +46,22 @@ const AutoAssociationRulesPage: React.FC = () => {
   const [currentModelAttrs, setCurrentModelAttrs] = useState<AttrFieldType[]>([]);
   const [allModelAttrsMap, setAllModelAttrsMap] = useState<Record<string, AttrFieldType[]>>({});
 
+  const modelNameMap = useMemo(
+    () => Object.fromEntries(modelList.map((item) => [item.model_id, item.model_name])),
+    [modelList],
+  );
+
   const mapAssociationToFormContext = (item: AutoAssociationRuleAssociationItem): AutoAssociationRuleFormAssociationItem => {
     const currentSide = item.src_model_id === modelId ? 'src' : 'dst';
+    const formSourceModelId = modelId || item.src_model_id;
+    const formTargetModelId = currentSide === 'src' ? item.dst_model_id : item.src_model_id;
     return {
       ...item,
       current_side: currentSide,
-      form_source_model_id: modelId || item.src_model_id,
-      form_target_model_id: currentSide === 'src' ? item.dst_model_id : item.src_model_id,
+      form_source_model_id: formSourceModelId,
+      form_source_model_name: modelDetail?.model_name || modelNameMap[formSourceModelId] || formSourceModelId,
+      form_target_model_id: formTargetModelId,
+      form_target_model_name: modelNameMap[formTargetModelId] || formTargetModelId,
     };
   };
 
@@ -89,12 +100,7 @@ const AutoAssociationRulesPage: React.FC = () => {
 
   useEffect(() => {
     loadData();
-  }, [modelId]);
-
-  const modelNameMap = useMemo(
-    () => Object.fromEntries(modelList.map((item) => [item.model_id, item.model_name])),
-    [modelList],
-  );
+  }, [modelDetail?.model_name, modelId, modelNameMap]);
 
   const unsupportedAttrTypes = useMemo(() => new Set(['enum', 'tag', 'table', 'organization', 'user']), []);
 
@@ -238,7 +244,10 @@ const AutoAssociationRulesPage: React.FC = () => {
     {
       title: t('Model.updatedAt', 'Updated At'),
       key: 'updated_at',
-      render: (_, record) => record.auto_relation_rule?.updated_at || '--',
+      render: (_, record) => {
+        const updatedAt = record.auto_relation_rule?.updated_at;
+        return updatedAt ? convertToLocalizedTime(updatedAt) : '--';
+      },
     },
     {
       title: t('common.action', 'Actions'),

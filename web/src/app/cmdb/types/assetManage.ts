@@ -361,7 +361,9 @@ export interface ModelAutoAssociationRuleItem extends AutoAssociationRuleAssocia
 export interface AutoAssociationRuleFormAssociationItem extends AutoAssociationRuleAssociationItem {
   current_side: 'src' | 'dst';
   form_source_model_id: string;
+  form_source_model_name?: string;
   form_target_model_id: string;
+  form_target_model_name?: string;
 }
 
 export interface AutoAssociationRulePayload {

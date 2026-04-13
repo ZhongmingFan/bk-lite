@@ -113,6 +113,14 @@ const AutoAssociationRuleModal = forwardRef<AutoAssociationRuleModalRef, Props>(
     return targetModelId ? (allModelAttrsMap[targetModelId] || []) : [];
   }, [allModelAttrsMap, selectedAssociation]);
 
+  const currentModelFieldsLabel = selectedAssociation?.form_source_model_id
+    ? `${t('Model.currentModelFields', 'Current Model Fields')} (${selectedAssociation.form_source_model_name || selectedAssociation.form_source_model_id})`
+    : t('Model.currentModelFields', 'Current Model Fields');
+
+  const relatedModelFieldsLabel = selectedAssociation?.form_target_model_id
+    ? `${t('Model.relatedModelFields', 'Related Model Fields')} (${selectedAssociation.form_target_model_name || selectedAssociation.form_target_model_id})`
+    : t('Model.relatedModelFields', 'Related Model Fields');
+
   const currentFieldTypeMap = useMemo(
     () => new Map(currentModelAttrs.map((field) => [field.attr_id, String(field.attr_type || '')])),
     [currentModelAttrs],
@@ -338,7 +346,7 @@ const AutoAssociationRuleModal = forwardRef<AutoAssociationRuleModalRef, Props>(
 
           <Space direction="vertical" className="w-full" size={12}>
             <Form.Item
-              label={t('Model.currentModelFields', 'Current Model Fields')}
+              label={currentModelFieldsLabel}
               name="source_field_ids"
               rules={[
                 { required: true, type: 'array', min: 1, message: t('required') },
@@ -368,7 +376,7 @@ const AutoAssociationRuleModal = forwardRef<AutoAssociationRuleModalRef, Props>(
             </Form.Item>
 
             <Form.Item
-              label={t('Model.relatedModelFields', 'Related Model Fields')}
+              label={relatedModelFieldsLabel}
               name="target_field_ids"
               rules={[
                 { required: true, type: 'array', min: 1, message: t('required') },

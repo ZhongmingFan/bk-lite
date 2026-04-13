@@ -329,6 +329,8 @@ commandFinished:
 	output := append(stdoutBuf.Bytes(), stderrBuf.Bytes()...)
 	decodedOutput := decodeExecuteOutput(output, shell)
 	rawSample := hex.EncodeToString(sampleBytes(output, 32))
+	stdoutDecoded, stdoutStrategy := decodeExecuteOutputWithStrategy(stdoutBuf.Bytes(), shell)
+	stderrDecoded, stderrStrategy := decodeExecuteOutputWithStrategy(stderrBuf.Bytes(), shell)
 
 	var exitCode int
 	if exitError, ok := err.(*exec.ExitError); ok {
@@ -384,6 +386,20 @@ commandFinished:
 			utf8.Valid(output),
 			rawSample,
 			truncateForLog(decodedOutput, 120),
+		)
+		logger.Infof(
+			"[Local Execute][Windows CMD Streams] Instance: %s, stdout_bytes=%d, stdout_utf8_valid=%t, stdout_strategy=%s, stdout_hex_prefix=%s, stdout_prefix=%q, stderr_bytes=%d, stderr_utf8_valid=%t, stderr_strategy=%s, stderr_hex_prefix=%s, stderr_prefix=%q",
+			instanceId,
+			stdoutBuf.Len(),
+			utf8.Valid(stdoutBuf.Bytes()),
+			stdoutStrategy,
+			hex.EncodeToString(sampleBytes(stdoutBuf.Bytes(), 32)),
+			truncateForLog(stdoutDecoded, 120),
+			stderrBuf.Len(),
+			utf8.Valid(stderrBuf.Bytes()),
+			stderrStrategy,
+			hex.EncodeToString(sampleBytes(stderrBuf.Bytes(), 32)),
+			truncateForLog(stderrDecoded, 120),
 		)
 	}
 
@@ -485,21 +501,26 @@ func formatSCPLogContext(logContext string) string {
 }
 
 func decodeExecuteOutput(output []byte, shell string) string {
+	decoded, _ := decodeExecuteOutputWithStrategy(output, shell)
+	return decoded
+}
+
+func decodeExecuteOutputWithStrategy(output []byte, shell string) (string, string) {
 	if decoded, ok := decodeUTF16LEOutput(output); ok {
-		return decoded
+		return decoded, "utf16le"
 	}
 
 	if utf8.Valid(output) {
-		return string(output)
+		return string(output), "utf8"
 	}
 
 	if runtime.GOOS == "windows" && (shell == ShellTypeBat || shell == ShellTypeCmd || shell == ShellTypePowerShell || shell == ShellTypePwsh) {
 		if decoded, err := simplifiedchinese.GBK.NewDecoder().Bytes(output); err == nil {
-			return string(decoded)
+			return string(decoded), "gbk"
 		}
 	}
 
-	return string(output)
+	return string(output), "raw"
 }
 
 func wrapPowerShellCommand(command string) string {

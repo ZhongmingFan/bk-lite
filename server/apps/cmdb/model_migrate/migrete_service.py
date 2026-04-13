@@ -839,6 +839,15 @@ class ModelMigrate:
 
     def migrate_associations(self):
         """初始模型关联"""
+        allowed_fields = {
+            "src_model_id",
+            "dst_model_id",
+            "asst_id",
+            "asst_name",
+            "mapping",
+            "on_delete",
+            "is_pre",
+        }
         associations = []
         for model in self.model_config.get("models", []):
             asso_key = f"asso-{model['model_id']}"
@@ -856,7 +865,7 @@ class ModelMigrate:
                     dst_id=model_map.get(i["dst_model_id"]),
                     src_id=model_map.get(i["src_model_id"]),
                     model_asst_id=f"{i['src_model_id']}_{i['asst_id']}_{i['dst_model_id']}",
-                    **i,
+                    **{key: value for key, value in i.items() if key in allowed_fields},
                 )
                 for i in associations
                 if model_map.get(i["src_model_id"]) and model_map.get(i["dst_model_id"])

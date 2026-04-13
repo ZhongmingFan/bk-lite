@@ -50,11 +50,14 @@ from apps.cmdb.services.auto_relation_rule import (
     AutoRelationRule,
     AutoRelationRuleSet,
     build_auto_relation_rule_response,
+    canonicalize_auto_relation_rule_set_payload,
     dump_auto_relation_rule,
     dump_auto_relation_rule_set,
+    dump_auto_relation_rule_set_compact,
     parse_auto_relation_rule,
     parse_auto_relation_rule_set,
     validate_auto_relation_rule_payload,
+    validate_auto_relation_rule_set_payload,
 )
 from apps.cmdb.utils.change_record import create_change_record
 from apps.core.exceptions.base_app_exception import BaseAppException
@@ -1470,6 +1473,165 @@ class ModelManage(object):
         return True
 
     @staticmethod
+    def replace_model_auto_relation_rule_set(
+        model_id: str,
+        model_asst_id: str,
+        payload: dict[str, Any],
+        username: str = "system",
+    ):
+        association = ModelManage.model_association_info_search(model_asst_id)
+        if not association:
+            raise BaseAppException("模型关联不存在")
+        if model_id not in {association.get("src_model_id"), association.get("dst_model_id")}:
+            raise BaseAppException("模型关联不属于当前模型")
+
+        src_attrs = ModelManage._get_model_attrs_for_auto_rule(association["src_model_id"])
+        dst_attrs = ModelManage._get_model_attrs_for_auto_rule(association["dst_model_id"])
+        validated_rule_set = validate_auto_relation_rule_set_payload(
+            association,
+            src_attrs,
+            dst_attrs,
+            payload,
+        )
+
+        persisted_rule_set = AutoRelationRuleSet(
+            version=int(validated_rule_set.version or 2),
+            rules=[
+                AutoRelationRule(
+                    rule_id=rule.rule_id,
+                    enabled=rule.enabled,
+                    match_pairs=rule.match_pairs,
+                    updated_by=username,
+                    updated_at=timezone.now().isoformat(),
+                )
+                for rule in validated_rule_set.rules
+            ],
+        )
+
+        with GraphClient() as ag:
+            ag.set_edge_properties(
+                association["_id"],
+                {
+                    AUTO_RELATION_RULE_FIELD: dump_auto_relation_rule_set(persisted_rule_set),
+                },
+            )
+
+        from apps.cmdb.services.auto_relation_reconcile import schedule_rule_auto_relation_full_sync
+
+        schedule_rule_auto_relation_full_sync([model_asst_id])
+
+        return persisted_rule_set
+
+    @staticmethod
+    def _build_model_asst_id(src_model_id: str, asst_id: str, dst_model_id: str) -> str:
+        src_model_id = str(src_model_id or "").strip()
+        asst_id = str(asst_id or "").strip()
+        dst_model_id = str(dst_model_id or "").strip()
+        if not src_model_id or not asst_id or not dst_model_id:
+            raise BaseAppException("src_model_id / asst_id / dst_model_id 不能为空")
+        return f"{src_model_id}_{asst_id}_{dst_model_id}"
+
+    @staticmethod
+    def _parse_auto_relation_rule_set_cell(value, context: str) -> dict[str, Any]:
+        try:
+            data = value if isinstance(value, dict) else json.loads(str(value))
+        except Exception:
+            raise BaseAppException(f"{context} auto_relation_rule 不是合法 JSON")
+
+        if not isinstance(data, (dict, list)):
+            raise BaseAppException(f"{context} auto_relation_rule 必须是对象或数组")
+        data = canonicalize_auto_relation_rule_set_payload(data)
+        if not isinstance(data.get("rules"), list) or not data.get("rules"):
+            raise BaseAppException(f"{context} auto_relation_rule.rules 不能为空")
+        return data
+
+    @staticmethod
+    def _validate_auto_rule_sheet_authority(sheet_name: str, src_model_id: str, context: str):
+        expected_sheet = f"asso-{src_model_id}"
+        if sheet_name != expected_sheet:
+            raise BaseAppException(f"{context} 自动关联规则只能在 sheet[{expected_sheet}] 中定义")
+
+    @staticmethod
+    def _is_empty_auto_rule_sheet_row(row: dict[str, Any]) -> bool:
+        return all(
+            str(row.get(key) or "").strip() == ""
+            for key in ("src_model_id", "dst_model_id", "asst_id", AUTO_RELATION_RULE_FIELD)
+        )
+
+    @staticmethod
+    def _import_auto_relation_rule_sets_from_asso_sheets(model_config: dict[str, list[dict]]):
+        pending_items = []
+        seen_model_asst_ids: dict[str, str] = {}
+
+        for sheet_name, rows in model_config.items():
+            if not sheet_name.startswith("asso-"):
+                continue
+
+            for row_index, row in enumerate(rows, start=3):
+                if ModelManage._is_empty_auto_rule_sheet_row(row):
+                    continue
+                if AUTO_RELATION_RULE_FIELD not in row:
+                    continue
+
+                src_model_id = str(row.get("src_model_id", "")).strip()
+                dst_model_id = str(row.get("dst_model_id", "")).strip()
+                asst_id = str(row.get("asst_id", "")).strip()
+                context = f"sheet[{sheet_name}] 第 {row_index} 行"
+                raw_rule_set = row.get(AUTO_RELATION_RULE_FIELD, "")
+
+                model_asst_id = ModelManage._build_model_asst_id(src_model_id, asst_id, dst_model_id)
+
+                if raw_rule_set in (None, ""):
+                    continue
+
+                ModelManage._validate_auto_rule_sheet_authority(sheet_name, src_model_id, context)
+
+                previous_context = seen_model_asst_ids.get(model_asst_id)
+                if previous_context:
+                    raise BaseAppException(
+                        f"{context} ({model_asst_id}) 与 {previous_context} 重复定义了自动关联规则"
+                    )
+                seen_model_asst_ids[model_asst_id] = context
+
+                payload = ModelManage._parse_auto_relation_rule_set_cell(raw_rule_set, context)
+
+                pending_items.append(
+                    {
+                        "context": context,
+                        "model_id": src_model_id,
+                        "model_asst_id": model_asst_id,
+                        "payload": payload,
+                    }
+                )
+
+        for item in pending_items:
+            try:
+                if item["payload"] is None:
+                    association = ModelManage.model_association_info_search(item["model_asst_id"])
+                    if association and association.get(AUTO_RELATION_RULE_FIELD):
+                        with GraphClient() as ag:
+                            ag.set_edge_properties(
+                                association["_id"],
+                                {
+                                    AUTO_RELATION_RULE_FIELD: "",
+                                },
+                            )
+                        from apps.cmdb.services.auto_relation_reconcile import schedule_rule_auto_relation_full_sync
+
+                        schedule_rule_auto_relation_full_sync([item["model_asst_id"]])
+                else:
+                    ModelManage.replace_model_auto_relation_rule_set(
+                        item["model_id"],
+                        item["model_asst_id"],
+                        item["payload"],
+                        username="system",
+                    )
+            except Exception as err:
+                raise BaseAppException(
+                    f"{item['context']} ({item['model_asst_id']}) 导入自动关联规则失败: {getattr(err, 'message', str(err))}"
+                )
+
+    @staticmethod
     def check_model_exist_association(model_id):
         """模型存在关联关系"""
         edges = ModelManage.model_association_search(model_id)
@@ -1580,8 +1742,8 @@ class ModelManage(object):
             "default_value",
         ]
 
-        ASSO_HEADERS_CN = ["源模型", "目标模型", "关联关系", "源-目标约束"]
-        ASSO_HEADERS_EN = ["src_model_id", "dst_model_id", "asst_id", "mapping"]
+        ASSO_HEADERS_CN = ["源模型", "目标模型", "关联关系", "源-目标约束", "自动关联规则"]
+        ASSO_HEADERS_EN = ["src_model_id", "dst_model_id", "asst_id", "mapping", "auto_relation_rule"]
         PUBLIC_ENUM_LIBRARY_HEADERS_CN = [
             "公共选项库ID",
             "公共选项库名称",
@@ -1716,12 +1878,17 @@ class ModelManage(object):
                 ws_asso.append(ASSO_HEADERS_CN)
                 ws_asso.append(ASSO_HEADERS_EN)
                 for asso in associations:
+                    rule_set_value = ""
+                    if asso.get("src_model_id") == model_id:
+                        rule_set = parse_auto_relation_rule_set(asso.get(AUTO_RELATION_RULE_FIELD))
+                        rule_set_value = dump_auto_relation_rule_set_compact(rule_set) if rule_set else ""
                     ws_asso.append(
                         [
                             asso.get("src_model_id", ""),
                             asso.get("dst_model_id", ""),
                             asso.get("asst_id", ""),
                             asso.get("mapping", ""),
+                            rule_set_value,
                         ]
                     )
 
@@ -1782,4 +1949,6 @@ class ModelManage(object):
                         getattr(err, "message", str(err)),
                     )
                     raise
+
+        ModelManage._import_auto_relation_rule_sets_from_asso_sheets(model_config)
         return result

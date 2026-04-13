@@ -7,6 +7,18 @@ from apps.core.exceptions.base_app_exception import BaseAppException
 
 
 AUTO_RELATION_RULE_FIELD = "auto_relation_rule"
+AUTO_RELATION_MATCHING_RULE_EXACT = "exact"
+AUTO_RELATION_MATCHING_RULE_IEXACT = "iexact"
+AUTO_RELATION_MATCHING_RULE_CONTAINS = "contains"
+AUTO_RELATION_MATCHING_RULE_VALUES = {
+    AUTO_RELATION_MATCHING_RULE_EXACT,
+    AUTO_RELATION_MATCHING_RULE_IEXACT,
+    AUTO_RELATION_MATCHING_RULE_CONTAINS,
+}
+AUTO_RELATION_MATCHING_RULE_STRING_ONLY_VALUES = {
+    AUTO_RELATION_MATCHING_RULE_IEXACT,
+    AUTO_RELATION_MATCHING_RULE_CONTAINS,
+}
 AUTO_RELATION_RULE_UNSUPPORTED_ATTR_TYPES = {
     "enum",
     "tag",
@@ -20,6 +32,7 @@ AUTO_RELATION_RULE_UNSUPPORTED_ATTR_TYPES = {
 class AutoRelationMatchPair:
     src_field_id: str
     dst_field_id: str
+    matching_rule: str = AUTO_RELATION_MATCHING_RULE_EXACT
 
 
 @dataclass(slots=True, frozen=True)
@@ -41,6 +54,78 @@ def _normalize_field_id(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _normalize_matching_rule(value: Any, *, default: str = AUTO_RELATION_MATCHING_RULE_EXACT, raise_on_invalid: bool = False) -> str:
+    matching_rule = str(value or "").strip() or default
+    if matching_rule in AUTO_RELATION_MATCHING_RULE_VALUES:
+        return matching_rule
+    if raise_on_invalid:
+        raise BaseAppException(f"matching_rule 不合法: {matching_rule}")
+    return matching_rule
+
+
+def _canonicalize_rule_item_payload(item: dict[str, Any]) -> dict[str, Any]:
+    canonical_item = dict(item)
+    shorthand_matching_rule = _normalize_matching_rule(canonical_item.get("matching_rule"))
+    canonical_pairs = []
+    for raw_pair in list(canonical_item.get("match_pairs") or []):
+        if not isinstance(raw_pair, dict):
+            canonical_pairs.append(raw_pair)
+            continue
+        canonical_pairs.append(
+            {
+                **raw_pair,
+                "matching_rule": raw_pair.get("matching_rule", shorthand_matching_rule),
+            }
+        )
+    canonical_item.pop("matching_rule", None)
+    canonical_item["match_pairs"] = canonical_pairs
+    return canonical_item
+
+
+def _canonicalize_compact_rule_group(raw_rule_group: Any) -> dict[str, Any]:
+    if isinstance(raw_rule_group, list):
+        return {
+            "rule_id": uuid.uuid4().hex,
+            "enabled": True,
+            "match_pairs": list(raw_rule_group),
+        }
+    if isinstance(raw_rule_group, dict):
+        return {
+            "rule_id": str(raw_rule_group.get("rule_id") or uuid.uuid4().hex),
+            "enabled": bool(raw_rule_group.get("enabled", True)),
+            "updated_by": str(raw_rule_group.get("updated_by") or ""),
+            "updated_at": str(raw_rule_group.get("updated_at") or ""),
+            "matching_rule": raw_rule_group.get("matching_rule"),
+            "match_pairs": list(raw_rule_group.get("match_pairs") or []),
+        }
+    return raw_rule_group
+
+
+def canonicalize_auto_relation_rule_set_payload(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, list):
+        payload = {"rules": [payload]}
+
+    if not isinstance(payload, dict):
+        return payload
+
+    canonical_payload = dict(payload)
+    raw_rules = canonical_payload.get("rules")
+    if isinstance(raw_rules, list):
+        canonical_rules = []
+        for item in raw_rules:
+            normalized_item = _canonicalize_compact_rule_group(item)
+            if isinstance(normalized_item, dict):
+                canonical_rules.append(_canonicalize_rule_item_payload(normalized_item))
+            else:
+                canonical_rules.append(normalized_item)
+        canonical_payload["rules"] = canonical_rules
+        return canonical_payload
+
+    if "match_pairs" in canonical_payload:
+        return _canonicalize_rule_item_payload(canonical_payload)
+    return canonical_payload
+
+
 def _build_match_pairs(raw_pairs: list[Any], raise_on_invalid: bool = False) -> list[AutoRelationMatchPair]:
     match_pairs: list[AutoRelationMatchPair] = []
     seen_pairs: set[tuple[str, str]] = set()
@@ -53,6 +138,7 @@ def _build_match_pairs(raw_pairs: list[Any], raise_on_invalid: bool = False) -> 
 
         src_field_id = _normalize_field_id(item.get("src_field_id"))
         dst_field_id = _normalize_field_id(item.get("dst_field_id"))
+        matching_rule = _normalize_matching_rule(item.get("matching_rule"), raise_on_invalid=raise_on_invalid)
         if not src_field_id or not dst_field_id:
             if raise_on_invalid:
                 raise BaseAppException("字段匹配对不能为空")
@@ -69,6 +155,7 @@ def _build_match_pairs(raw_pairs: list[Any], raise_on_invalid: bool = False) -> 
             AutoRelationMatchPair(
                 src_field_id=src_field_id,
                 dst_field_id=dst_field_id,
+                matching_rule=matching_rule,
             )
         )
 
@@ -86,6 +173,8 @@ def parse_auto_relation_rule_set(raw: str | dict[str, Any] | None) -> AutoRelati
 
     if not isinstance(data, dict):
         return None
+
+    data = canonicalize_auto_relation_rule_set_payload(data)
 
     raw_rules = data.get("rules") or []
     if not isinstance(raw_rules, list):
@@ -136,6 +225,7 @@ def _serialize_rule(rule: AutoRelationRule) -> dict[str, Any]:
             {
                 "src_field_id": pair.src_field_id,
                 "dst_field_id": pair.dst_field_id,
+                "matching_rule": pair.matching_rule,
             }
             for pair in rule.match_pairs
         ],
@@ -162,6 +252,31 @@ def dump_auto_relation_rule_set(rule_set: AutoRelationRuleSet | None) -> str:
     )
 
 
+def dump_auto_relation_rule_set_compact(rule_set: AutoRelationRuleSet | None) -> str:
+    if not rule_set or not rule_set.rules:
+        return ""
+
+    compact_rules = []
+    for rule in rule_set.rules:
+        compact_match_pairs = [
+            {
+                "src_field_id": pair.src_field_id,
+                "dst_field_id": pair.dst_field_id,
+                **({"matching_rule": pair.matching_rule} if pair.matching_rule != AUTO_RELATION_MATCHING_RULE_EXACT else {}),
+            }
+            for pair in rule.match_pairs
+        ]
+        if rule.enabled:
+            compact_rules.append(compact_match_pairs)
+        else:
+            compact_rules.append({"enabled": False, "match_pairs": compact_match_pairs})
+
+    if len(compact_rules) == 1:
+        single_rule = compact_rules[0]
+        return json.dumps(single_rule, ensure_ascii=False)
+    return json.dumps({"rules": compact_rules}, ensure_ascii=False)
+
+
 def validate_auto_relation_rule_payload(
     model_association: dict[str, Any],
     src_attrs: list[dict[str, Any]],
@@ -170,6 +285,8 @@ def validate_auto_relation_rule_payload(
 ) -> AutoRelationRule:
     if not isinstance(payload, dict):
         raise BaseAppException("自动关联规则配置不合法")
+
+    payload = canonicalize_auto_relation_rule_set_payload(payload)
 
     raw_pairs = payload.get("match_pairs") or []
     if not isinstance(raw_pairs, list) or not raw_pairs:
@@ -206,6 +323,8 @@ def validate_auto_relation_rule_payload(
             raise BaseAppException("源字段和目标字段类型不一致")
         if src_attr_type in AUTO_RELATION_RULE_UNSUPPORTED_ATTR_TYPES:
             raise BaseAppException(f"字段类型 {src_attr_type} 不支持自动关联")
+        if pair.matching_rule in AUTO_RELATION_MATCHING_RULE_STRING_ONLY_VALUES and src_attr_type != "str":
+            raise BaseAppException(f"匹配规则 {pair.matching_rule} 仅支持字符串字段")
 
     if not match_pairs:
         raise BaseAppException("至少配置一个字段匹配对")
@@ -216,6 +335,41 @@ def validate_auto_relation_rule_payload(
         match_pairs=match_pairs,
         updated_by=str(payload.get("updated_by") or ""),
         updated_at=str(payload.get("updated_at") or ""),
+    )
+
+
+def validate_auto_relation_rule_set_payload(
+    model_association: dict[str, Any],
+    src_attrs: list[dict[str, Any]],
+    dst_attrs: list[dict[str, Any]],
+    payload: dict[str, Any],
+) -> AutoRelationRuleSet:
+    if not isinstance(payload, dict):
+        raise BaseAppException("自动关联规则配置不合法")
+
+    payload = canonicalize_auto_relation_rule_set_payload(payload)
+
+    raw_rules = payload.get("rules") or []
+    if not isinstance(raw_rules, list) or not raw_rules:
+        raise BaseAppException("rules 不能为空")
+
+    rules: list[AutoRelationRule] = []
+    seen_rule_ids: set[str] = set()
+    for item in raw_rules:
+        validated_rule = validate_auto_relation_rule_payload(
+            model_association,
+            src_attrs,
+            dst_attrs,
+            item,
+        )
+        if validated_rule.rule_id in seen_rule_ids:
+            raise BaseAppException("rules 中存在重复 rule_id")
+        seen_rule_ids.add(validated_rule.rule_id)
+        rules.append(validated_rule)
+
+    return AutoRelationRuleSet(
+        version=int(payload.get("version") or 2),
+        rules=rules,
     )
 
 
@@ -232,6 +386,7 @@ def build_auto_relation_rule_response(
             {
                 "src_field_id": pair.src_field_id,
                 "dst_field_id": pair.dst_field_id,
+                "matching_rule": pair.matching_rule,
             }
             for pair in rule.match_pairs
         ],

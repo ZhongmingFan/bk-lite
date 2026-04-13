@@ -163,6 +163,8 @@ def validate_required_fields(config: Dict[str, Any]) -> None:
         if "jump" in ss:
             _validate_search_space_list(ss, "jump", int)
 
+        if any(value <= 0 for value in ss["pen"]):
+            raise ConfigError("hyperparams.search_space.pen 必须全部 > 0")
         if any(value <= 0 for value in ss["min_size"]):
             raise ConfigError("hyperparams.search_space.min_size 必须全部 > 0")
         if "jump" in ss and any(value <= 0 for value in ss["jump"]):

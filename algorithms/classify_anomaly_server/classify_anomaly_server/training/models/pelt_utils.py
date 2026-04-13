@@ -4,6 +4,8 @@ from importlib import import_module
 from typing import Iterable
 
 import numpy as np
+from numpy.typing import NDArray
+from loguru import logger
 
 
 def breakpoints_to_changepoints(breakpoints: Iterable[int], length: int) -> list[int]:
@@ -16,7 +18,7 @@ def breakpoints_to_changepoints(breakpoints: Iterable[int], length: int) -> list
 
 
 def detect_changepoints(
-    signal: np.ndarray,
+    signal: NDArray[np.float64],
     *,
     cost_model: str,
     min_size: int,
@@ -25,6 +27,9 @@ def detect_changepoints(
 ) -> list[int]:
     """运行 PELT 并返回有效 changepoint 索引。"""
     if len(signal) == 0 or len(signal) < max(2, min_size * 2):
+        logger.warning(
+            f"PELT 跳过变点检测: signal_length={len(signal)} < required_min_length={max(2, min_size * 2)} (min_size={min_size}), returning empty changepoints"
+        )
         return []
 
     rpt = import_module("ruptures")

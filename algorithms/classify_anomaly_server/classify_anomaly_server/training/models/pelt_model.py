@@ -51,7 +51,7 @@ class PELTModel(BaseAnomalyModel):
     def fit(
         self,
         train_data: pd.DataFrame,
-        val_data: Optional[pd.DataFrame | pd.Series] = None,
+        train_labels: pd.Series | NDArray[np.int_] | None = None,
         **kwargs: Any,
     ) -> "PELTModel":
         if not isinstance(train_data, pd.DataFrame):
@@ -183,6 +183,19 @@ class PELTModel(BaseAnomalyModel):
         }
 
         jump_values = search_space.get("jump", [self.jump])
+        resolved_cost_model = config.cost_model or self.cost_model
+        resolved_event_window = (
+            config.event_window if config.event_window is not None else self.event_window
+        )
+        if isinstance(val_labels, pd.Series):
+            labels_array: NDArray[np.int_] = val_labels.to_numpy(dtype=int)
+        else:
+            labels_array = val_labels.astype(int, copy=False)
+        changepoint_metrics = {
+            "changepoint_precision",
+            "changepoint_recall",
+            "changepoint_f1",
+        }
         eval_count = 0
         no_progress_count = 0
         grid_total_evals = (
@@ -208,33 +221,26 @@ class PELTModel(BaseAnomalyModel):
                         pen=pen,
                         min_size=min_size,
                         jump=jump,
-                        cost_model=config.cost_model or self.cost_model,
-                        event_window=config.event_window or self.event_window,
+                        cost_model=resolved_cost_model,
+                        event_window=resolved_event_window,
                         threshold=self.threshold,
                     )
                     candidate.fit(train_data)
-                    if isinstance(val_labels, pd.Series):
-                        labels_array: NDArray[np.int_] = val_labels.to_numpy(dtype=int)
-                    else:
-                        labels_array = val_labels.astype(int, copy=False)
-                    changepoint_metrics = {
-                        "changepoint_precision",
-                        "changepoint_recall",
-                        "changepoint_f1",
-                    }
                     if metric in changepoint_metrics:
-                        metrics = candidate.evaluate_changepoints(
+                        changepoint_eval = candidate.evaluate_changepoints(
                             val_data, labels_array
                         )
+                        metrics = changepoint_eval
                         fallback_metric = "changepoint_f1"
                     else:
+                        changepoint_eval = candidate.evaluate_changepoints(
+                            val_data, labels_array
+                        )
                         metrics = candidate.evaluate(val_data, labels_array)
                         fallback_metric = "f1"
                     score = float(metrics.get(metric, metrics[fallback_metric]))
                     trial_num_changepoints = float(
-                        candidate.evaluate_changepoints(val_data, labels_array).get(
-                            "num_changepoints", 0.0
-                        )
+                        changepoint_eval.get("num_changepoints", 0.0)
                     )
                     self.hyperopt_history_.append(
                         {
@@ -319,6 +325,14 @@ class PELTModel(BaseAnomalyModel):
                     break
             if eval_count >= total_evals or early_stopped:
                 break
+
+        if self.hyperopt_history_ and all(
+            float(item.get("num_changepoints", 0.0)) == 0.0
+            for item in self.hyperopt_history_
+        ):
+            logger.warning(
+                "PELT 超参数搜索未检测到任何 changepoint: all trials produced num_changepoints=0"
+            )
 
         # 汇总指标（镜像 ECOD 的 hyperopt_summary/* 命名）
         if mlflow.active_run():

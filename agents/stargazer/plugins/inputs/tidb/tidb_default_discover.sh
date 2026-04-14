@@ -47,8 +47,7 @@ discover_tidb() {
         local listener_pid=$(echo "$proc" | awk '{print $2}')
         listener_ports=$(get_listener_ports $listener_pid)
         if [ -z "$listener_ports" ]; then
-            echo "{}"
-            exit 0
+            continue
         fi
         local exe=$(readlink -f /proc/$listener_pid/exe)
         local install_path=$( dirname $exe | sed 's/\/bin$//')

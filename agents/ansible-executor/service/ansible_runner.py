@@ -8,6 +8,7 @@ import shutil
 import ssl
 import stat
 import uuid
+from codecs import decode as codecs_decode
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,44 @@ _SENSITIVE_INVENTORY_PATTERNS = (
     "ansible_ssh_passphrase",
     "ansible_become_password",
 )
+
+
+def _looks_like_utf16le(output: bytes) -> bool:
+    if b"\x00" not in output:
+        return False
+    zero_count = sum(1 for idx in range(1, len(output), 2) if output[idx] == 0)
+    return zero_count >= len(output) // 4
+
+
+def _decode_utf16le_output(output: bytes) -> str | None:
+    if len(output) < 2:
+        return None
+    candidate = output
+    has_bom = candidate.startswith(b"\xff\xfe")
+    if has_bom:
+        candidate = candidate[2:]
+    if len(candidate) < 2 or len(candidate) % 2 != 0:
+        return None
+    if not has_bom and not _looks_like_utf16le(candidate):
+        return None
+    try:
+        return candidate.decode("utf-16-le")
+    except UnicodeDecodeError:
+        return None
+
+
+def decode_command_output(output: bytes) -> tuple[str, str]:
+    utf16_decoded = _decode_utf16le_output(output)
+    if utf16_decoded is not None:
+        return utf16_decoded, "utf16le"
+    try:
+        return output.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        pass
+    try:
+        return codecs_decode(output, "gbk"), "gbk"
+    except UnicodeDecodeError:
+        return output.decode("utf-8", errors="replace"), "utf-8-replace"
 
 
 @dataclass
@@ -652,6 +691,14 @@ async def run_command(cmd: list[str], timeout: int) -> tuple[int, str]:
         await proc.wait()
         logger.error("command timed out: %s", " ".join(shlex.quote(part) for part in cmd))
         return 124, "command timed out"
-    output = stdout.decode("utf-8", errors="replace")
+    output, decode_strategy = decode_command_output(stdout)
     exit_code = proc.returncode or 0
+    logger.info(
+        "command output decode: exit_code=%s strategy=%s bytes=%s raw_prefix=%s decoded_prefix=%r",
+        exit_code,
+        decode_strategy,
+        len(stdout),
+        stdout[:32].hex(),
+        output[:120],
+    )
     return exit_code, output

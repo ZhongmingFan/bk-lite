@@ -402,6 +402,16 @@ COLLECT_OBJ_TREE = [
                 "desc": "采集Elasticsearch关键配置信息",
                 "encrypted_fields": ["password"],
             },
+            {
+                "id": "hbase",
+                "model_id": "hbase",
+                "name": "【BETA】HBase",
+                "task_type": CollectPluginTypes.DB,
+                "type": CollectDriverTypes.JOB,
+                "tag": ["Agent", "JOB", "Linux"],
+                "desc": "采集HBase关键配置信息",
+                "encrypted_fields": ["password"],
+            },
         ],
     },
     {

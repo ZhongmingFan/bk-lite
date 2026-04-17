@@ -270,39 +270,64 @@ class ECODModel(BaseAnomalyModel):
                 temp_model = ECODModel(contamination=contamination)
                 temp_model.fit(train_data, verbose=False, log_to_mlflow=False)
 
-                # 验证集评估
-                val_predictions = temp_model.predict(val_data)
-                val_metrics = temp_model.evaluate(val_data, val_labels)
+                train_raw_metrics = temp_model.evaluate(train_data, train_labels)
+                val_raw_metrics = temp_model.evaluate(val_data, val_labels)
 
                 # 获取优化目标分数（越大越好，所以用负数作为 loss）
-                score = val_metrics.get(metric, val_metrics["f1"])
+                score = float(val_raw_metrics.get(metric, val_raw_metrics["f1"]))
+                train_score = float(
+                    train_raw_metrics.get(metric, train_raw_metrics["f1"])
+                )
+                generalization_gap = train_score - score
                 loss = -score  # hyperopt 最小化 loss，所以取负数
                 trial_metric_keys = ["precision", "recall", "f1", "auc"]
+                train_trial_metrics = MLFlowUtils.filter_numeric_metrics(
+                    train_raw_metrics, trial_metric_keys
+                )
+                train_trial_metrics.setdefault(str(metric), float(train_score))
                 trial_metrics = MLFlowUtils.filter_numeric_metrics(
-                    val_metrics, trial_metric_keys
+                    val_raw_metrics, trial_metric_keys
                 )
                 trial_metrics.setdefault(str(metric), float(score))
+                history_train_metrics = {
+                    f"train_{key}": value for key, value in train_trial_metrics.items()
+                }
                 self.hyperopt_history_.append(
                     {
                         "trial": int(current_eval),
                         "metric": str(metric),
                         "score": float(score),
+                        "train_score": float(train_score),
+                        "generalization_gap": float(generalization_gap),
                         "contamination": float(contamination),
                         "status": "ok",
                         **trial_metrics,
+                        **history_train_metrics,
                     }
                 )
 
                 logger.debug(
                     f"ECOD trial [{current_eval}/{max_evals}] contamination={contamination:.4f}: "
-                    f"metrics: {MLFlowUtils.format_metrics_for_log(trial_metrics, trial_metric_keys)}"
+                    f"train_metrics: {MLFlowUtils.format_metrics_for_log(train_trial_metrics, trial_metric_keys)} | "
+                    f"val_metrics: {MLFlowUtils.format_metrics_for_log(trial_metrics, trial_metric_keys)} | "
+                    f"generalization_gap={generalization_gap:.4f}"
                 )
 
                 # 记录到 MLflow
                 if mlflow.active_run():
                     MLFlowUtils.log_metrics_batch(
+                        train_trial_metrics,
+                        prefix="hyperopt/train_",
+                        step=current_eval,
+                    )
+                    MLFlowUtils.log_metrics_batch(
                         trial_metrics,
                         prefix="hyperopt/val_",
+                        step=current_eval,
+                    )
+                    mlflow.log_metric(
+                        "hyperopt/generalization_gap",
+                        generalization_gap,
                         step=current_eval,
                     )
                     mlflow.log_metric("hyperopt/trial_score", score, step=current_eval)

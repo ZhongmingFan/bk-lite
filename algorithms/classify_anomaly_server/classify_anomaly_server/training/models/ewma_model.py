@@ -293,6 +293,11 @@ class EWMAModel(BaseAnomalyModel):
             else self.severity_cap
         )
 
+        if isinstance(train_labels, pd.Series):
+            train_labels_array: NDArray[np.int_] = train_labels.to_numpy(dtype=int)
+        else:
+            train_labels_array = train_labels.astype(int, copy=False)
+
         if isinstance(val_labels, pd.Series):
             labels_array: NDArray[np.int_] = val_labels.to_numpy(dtype=int)
         else:
@@ -352,62 +357,93 @@ class EWMAModel(BaseAnomalyModel):
 
                         try:
                             if metric in drift_metrics:
-                                drift_eval = candidate.evaluate_drifts(
+                                train_eval_metrics = candidate.evaluate_drifts(
+                                    train_data, train_labels_array
+                                )
+                                val_eval_metrics = candidate.evaluate_drifts(
                                     val_data, labels_array
                                 )
-                                eval_metrics = drift_eval
                                 fallback_metric = "drift_f1"
+                                trial_metric_keys = [
+                                    "drift_precision",
+                                    "drift_recall",
+                                    "drift_f1",
+                                ]
                             else:
-                                drift_eval = candidate.evaluate_drifts(
-                                    val_data, labels_array
+                                train_eval_metrics = candidate.evaluate(
+                                    train_data, train_labels_array
                                 )
-                                eval_metrics = candidate.evaluate(val_data, labels_array)
+                                val_eval_metrics = candidate.evaluate(val_data, labels_array)
                                 fallback_metric = "f1"
+                                trial_metric_keys = ["precision", "recall", "f1", "auc"]
 
                             score = float(
-                                eval_metrics.get(metric, eval_metrics[fallback_metric])
+                                val_eval_metrics.get(metric, val_eval_metrics[fallback_metric])
                             )
-                            trial_metric_keys = (
-                                ["drift_precision", "drift_recall", "drift_f1"]
-                                if metric in drift_metrics
-                                else ["precision", "recall", "f1", "auc"]
+                            train_score = float(
+                                train_eval_metrics.get(
+                                    metric, train_eval_metrics[fallback_metric]
+                                )
                             )
+                            generalization_gap = train_score - score
+                            train_trial_metrics = MLFlowUtils.filter_numeric_metrics(
+                                train_eval_metrics, trial_metric_keys
+                            )
+                            train_trial_metrics.setdefault(str(metric), float(train_score))
                             trial_metrics = MLFlowUtils.filter_numeric_metrics(
-                                eval_metrics, trial_metric_keys
+                                val_eval_metrics, trial_metric_keys
                             )
                             trial_metrics.setdefault(str(metric), float(score))
+                            history_train_metrics = {
+                                f"train_{key}": value
+                                for key, value in train_trial_metrics.items()
+                            }
 
                             self.hyperopt_history_.append(
                                 {
                                     "trial": int(eval_count),
                                     "metric": str(metric),
                                     "score": float(score),
+                                    "train_score": float(train_score),
+                                    "generalization_gap": float(generalization_gap),
                                     "alpha": float(alpha),
                                     "scale_window": int(scale_window),
                                     "threshold": float(threshold_val),
                                     "n_consecutive": int(n_consecutive),
                                     "status": "ok",
                                     **trial_metrics,
+                                    **history_train_metrics,
                                 }
                             )
 
                             logger.debug(
                                 f"EWMA trial [{eval_count}/{total_evals}] | alpha={alpha} | sw={scale_window} | "
-                                f"thr={threshold_val} | nc={n_consecutive} | metrics: "
-                                f"{MLFlowUtils.format_metrics_for_log(trial_metrics, trial_metric_keys)}"
+                                f"thr={threshold_val} | nc={n_consecutive} | train_metrics: "
+                                f"{MLFlowUtils.format_metrics_for_log(train_trial_metrics, trial_metric_keys)} | "
+                                f"val_metrics: {MLFlowUtils.format_metrics_for_log(trial_metrics, trial_metric_keys)} | "
+                                f"generalization_gap={generalization_gap:.4f}"
                             )
 
                             if mlflow.active_run():
+                                MLFlowUtils.log_metrics_batch(
+                                    train_trial_metrics,
+                                    prefix="hyperopt/train_",
+                                    step=eval_count,
+                                )
                                 MLFlowUtils.log_metrics_batch(
                                     trial_metrics,
                                     prefix="hyperopt/val_",
                                     step=eval_count,
                                 )
                                 mlflow.log_metric(
+                                    "hyperopt/generalization_gap",
+                                    generalization_gap,
+                                    step=eval_count,
+                                )
+                                mlflow.log_metric(
                                     "hyperopt/trial_score", score, step=eval_count
                                 )
                                 mlflow.log_metric("hyperopt/success", 1.0, step=eval_count)
-
                         except Exception as exc:
                             error_msg = str(exc)[:150]
                             self.hyperopt_history_.append(

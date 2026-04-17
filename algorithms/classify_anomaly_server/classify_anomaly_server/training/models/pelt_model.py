@@ -212,6 +212,10 @@ class PELTModel(BaseAnomalyModel):
         resolved_event_window = (
             config.event_window if config.event_window is not None else self.event_window
         )
+        if isinstance(train_labels, pd.Series):
+            train_labels_array: NDArray[np.int_] = train_labels.to_numpy(dtype=int)
+        else:
+            train_labels_array = train_labels.astype(int, copy=False)
         if isinstance(val_labels, pd.Series):
             labels_array: NDArray[np.int_] = val_labels.to_numpy(dtype=int)
         else:
@@ -252,22 +256,34 @@ class PELTModel(BaseAnomalyModel):
                     candidate.fit(train_data)
                     score: float | None = None
                     try:
+                        train_changepoint_eval = candidate.evaluate_changepoints(
+                            train_data, train_labels_array
+                        )
+                        val_changepoint_eval = candidate.evaluate_changepoints(
+                            val_data, labels_array
+                        )
+
                         if metric in changepoint_metrics:
-                            changepoint_eval = candidate.evaluate_changepoints(
-                                val_data, labels_array
-                            )
-                            metrics = changepoint_eval
+                            train_eval_metrics = train_changepoint_eval
+                            metrics = val_changepoint_eval
                             fallback_metric = "changepoint_f1"
                         else:
-                            changepoint_eval = candidate.evaluate_changepoints(
-                                val_data, labels_array
+                            train_eval_metrics = candidate.evaluate(
+                                train_data, train_labels_array
                             )
                             metrics = candidate.evaluate(val_data, labels_array)
                             fallback_metric = "f1"
 
                         score = float(metrics.get(metric, metrics[fallback_metric]))
+                        train_score = float(
+                            train_eval_metrics.get(metric, train_eval_metrics[fallback_metric])
+                        )
+                        generalization_gap = train_score - score
+                        train_num_changepoints = float(
+                            train_changepoint_eval.get("num_changepoints", 0.0)
+                        )
                         trial_num_changepoints = float(
-                            changepoint_eval.get("num_changepoints", 0.0)
+                            val_changepoint_eval.get("num_changepoints", 0.0)
                         )
                         trial_metric_keys = (
                             [
@@ -279,42 +295,68 @@ class PELTModel(BaseAnomalyModel):
                             if metric in changepoint_metrics
                             else ["precision", "recall", "f1", "auc", "num_changepoints"]
                         )
+                        train_trial_metrics = MLFlowUtils.filter_numeric_metrics(
+                            train_eval_metrics
+                        )
+                        train_trial_metrics["num_changepoints"] = train_num_changepoints
+                        train_trial_metrics = MLFlowUtils.filter_numeric_metrics(
+                            train_trial_metrics, trial_metric_keys
+                        )
+                        train_trial_metrics.setdefault(str(metric), float(train_score))
                         trial_metrics = MLFlowUtils.filter_numeric_metrics(metrics)
                         trial_metrics["num_changepoints"] = trial_num_changepoints
                         trial_metrics = MLFlowUtils.filter_numeric_metrics(
                             trial_metrics, trial_metric_keys
                         )
                         trial_metrics.setdefault(str(metric), float(score))
+                        history_train_metrics = {
+                            f"train_{key}": value
+                            for key, value in train_trial_metrics.items()
+                        }
                         self.hyperopt_history_.append(
                             {
                                 "trial": int(eval_count),
                                 "metric": str(metric),
                                 "score": float(score),
+                                "train_score": float(train_score),
+                                "generalization_gap": float(generalization_gap),
                                 "pen": float(pen),
                                 "min_size": int(min_size),
                                 "jump": int(jump),
                                 "status": "ok",
                                 **trial_metrics,
+                                **history_train_metrics,
                             }
                         )
 
                         logger.debug(
-                            f"PELT trial [{eval_count}/{total_evals}] | pen={pen} | min_size={min_size} | jump={jump} | metrics: "
-                            f"{MLFlowUtils.format_metrics_for_log(trial_metrics, trial_metric_keys)}"
+                            f"PELT trial [{eval_count}/{total_evals}] | pen={pen} | min_size={min_size} | jump={jump} | train_metrics: "
+                            f"{MLFlowUtils.format_metrics_for_log(train_trial_metrics, trial_metric_keys)} | "
+                            f"val_metrics: {MLFlowUtils.format_metrics_for_log(trial_metrics, trial_metric_keys)} | "
+                            f"generalization_gap={generalization_gap:.4f}"
                         )
 
                         # 每轮试验记录到 MLflow（镜像 ECOD 的 hyperopt/* 命名）
                         if mlflow.active_run():
+                            MLFlowUtils.log_metrics_batch(
+                                train_trial_metrics,
+                                prefix="hyperopt/train_",
+                                step=eval_count,
+                            )
                             MLFlowUtils.log_metrics_batch(
                                 trial_metrics,
                                 prefix="hyperopt/val_",
                                 step=eval_count,
                             )
                             mlflow.log_metric(
+                                "hyperopt/generalization_gap",
+                                generalization_gap,
+                                step=eval_count,
+                            )
+                            mlflow.log_metric(
                                 "hyperopt/trial_score", score, step=eval_count
                             )
                             mlflow.log_metric("hyperopt/success", 1.0, step=eval_count)
-
                     except Exception as exc:
                         error_msg = str(exc)[:150]
                         self.hyperopt_history_.append(

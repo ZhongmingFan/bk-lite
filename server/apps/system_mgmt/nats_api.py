@@ -585,12 +585,13 @@ def _prepare_user_rules_query(group_id, username, domain, app, include_children=
     is_admin = bool(set(all_role_ids).intersection(admin_list))
 
     # 获取查询的组ID列表（包含子组）
+    query_group_ids = []
     if include_children:
         # 使用优化后的单次查询方法替代 N+1 的 get_all_child_groups
         query_group_ids = GroupUtils.get_group_with_descendants_filtered(int(group_id), group_list=user_obj.group_list)
-    else:
-        query_group_ids = [int(group_id)]
 
+    query_group_ids.append(int(group_id))
+    query_group_ids = list(set(query_group_ids))
     # 设置管理员团队
     admin_teams = query_group_ids[:]
 

@@ -184,6 +184,26 @@ class PELTModel(BaseAnomalyModel):
             return {f"{prefix}_{key}": value for key, value in metrics.items()}
         return metrics
 
+    def _build_search_space(self, search_space_config: dict[str, Any]) -> dict[str, Any]:
+        from hyperopt import hp
+    
+        jump_values = search_space_config.get("jump", [self.jump])
+        return {
+            "pen": hp.choice("pen", search_space_config["pen"]),
+            "min_size": hp.choice("min_size", search_space_config["min_size"]),
+            "jump": hp.choice("jump", jump_values),
+        }
+    
+    def _decode_params(
+        self, params_raw: dict[str, Any], search_space_config: dict[str, Any]
+    ) -> dict[str, Any]:
+        del search_space_config
+        return {
+            "pen": float(params_raw["pen"]),
+            "min_size": int(params_raw["min_size"]),
+            "jump": int(params_raw["jump"]),
+        }
+    
     def optimize_hyperparams(
         self,
         train_data: pd.DataFrame,
@@ -192,6 +212,9 @@ class PELTModel(BaseAnomalyModel):
         val_labels: NDArray[np.int_] | pd.Series,
         config: Any,
     ) -> dict[str, Any]:
+        from hyperopt import STATUS_OK, Trials, fmin, space_eval, tpe
+        from hyperopt.early_stop import no_progress_loss
+    
         search_config = config.get_search_config()
         search_space = search_config["search_space"]
         max_evals = int(search_config.get("max_evals", 1))
@@ -199,14 +222,14 @@ class PELTModel(BaseAnomalyModel):
         early_stop_config = search_config.get("early_stopping", {})
         early_stop_enabled = bool(early_stop_config.get("enabled", True))
         patience = int(early_stop_config.get("patience", 10))
-
-        best_score = float("-inf")
-        best_params = {
+    
+        best_score = [float("-inf")]
+        best_params: dict[str, Any] = {
             "pen": self.pen,
             "min_size": self.min_size,
             "jump": self.jump,
         }
-
+    
         jump_values = search_space.get("jump", [self.jump])
         resolved_cost_model = config.cost_model or self.cost_model
         resolved_event_window = (
@@ -225,224 +248,237 @@ class PELTModel(BaseAnomalyModel):
             "changepoint_recall",
             "changepoint_f1",
         }
-        eval_count = 0
-        no_progress_count = 0
+        eval_count = [0]
+        failed_count = [0]
+        trials = Trials()
         grid_total_evals = (
             len(search_space["pen"]) * len(search_space["min_size"]) * len(jump_values)
         )
-        total_evals = min(max_evals, grid_total_evals)
-        early_stopped = False
-
+    
         logger.info(f"开始超参数优化 | model=PELT | max_evals={max_evals} | metric={metric}")
         if early_stop_enabled:
             logger.info(f"早停机制: 启用 (patience={patience})")
-
+    
         self.hyperopt_history_ = []
-
-        for pen in search_space["pen"]:
-            for min_size in search_space["min_size"]:
-                for jump in jump_values:
-                    if eval_count >= total_evals:
-                        break
-
-                    eval_count += 1
-                    candidate = PELTModel(
-                        pen=pen,
-                        min_size=min_size,
-                        jump=jump,
-                        cost_model=resolved_cost_model,
-                        event_window=resolved_event_window,
+        space = self._build_search_space(search_space)
+    
+        def objective(params: dict[str, Any]) -> dict[str, Any]:
+            eval_count[0] += 1
+            current_eval = eval_count[0]
+            decoded_params: dict[str, Any] | None = None
+            try:
+                decoded_params = self._decode_params(params, search_space)
+                pen = decoded_params["pen"]
+                min_size = decoded_params["min_size"]
+                jump = decoded_params["jump"]
+    
+                candidate = PELTModel(
+                    pen=pen,
+                    min_size=min_size,
+                    jump=jump,
+                    cost_model=resolved_cost_model,
+                    event_window=resolved_event_window,
+                )
+                candidate.fit(train_data)
+    
+                train_changepoint_eval = candidate.evaluate_changepoints(
+                    train_data, train_labels_array
+                )
+                val_changepoint_eval = candidate.evaluate_changepoints(
+                    val_data, labels_array
+                )
+    
+                if metric in changepoint_metrics:
+                    train_eval_metrics = train_changepoint_eval
+                    metrics = val_changepoint_eval
+                    fallback_metric = "changepoint_f1"
+                else:
+                    train_eval_metrics = candidate.evaluate(train_data, train_labels_array)
+                    metrics = candidate.evaluate(val_data, labels_array)
+                    fallback_metric = "f1"
+    
+                score = float(metrics.get(metric, metrics[fallback_metric]))
+                train_score = float(
+                    train_eval_metrics.get(metric, train_eval_metrics[fallback_metric])
+                )
+                generalization_gap = train_score - score
+                train_num_changepoints = float(
+                    train_changepoint_eval.get("num_changepoints", 0.0)
+                )
+                trial_num_changepoints = float(
+                    val_changepoint_eval.get("num_changepoints", 0.0)
+                )
+                trial_metric_keys = (
+                    [
+                        "changepoint_precision",
+                        "changepoint_recall",
+                        "changepoint_f1",
+                        "num_changepoints",
+                    ]
+                    if metric in changepoint_metrics
+                    else ["precision", "recall", "f1", "auc", "num_changepoints"]
+                )
+                train_trial_metrics = MLFlowUtils.filter_numeric_metrics(train_eval_metrics)
+                train_trial_metrics["num_changepoints"] = train_num_changepoints
+                train_trial_metrics = MLFlowUtils.filter_numeric_metrics(
+                    train_trial_metrics, trial_metric_keys
+                )
+                train_trial_metrics.setdefault(str(metric), float(train_score))
+                trial_metrics = MLFlowUtils.filter_numeric_metrics(metrics)
+                trial_metrics["num_changepoints"] = trial_num_changepoints
+                trial_metrics = MLFlowUtils.filter_numeric_metrics(
+                    trial_metrics, trial_metric_keys
+                )
+                trial_metrics.setdefault(str(metric), float(score))
+                history_train_metrics = {
+                    f"train_{key}": value for key, value in train_trial_metrics.items()
+                }
+                self.hyperopt_history_.append(
+                    {
+                        "trial": int(current_eval),
+                        "metric": str(metric),
+                        "score": float(score),
+                        "train_score": float(train_score),
+                        "generalization_gap": float(generalization_gap),
+                        "pen": float(pen),
+                        "min_size": int(min_size),
+                        "jump": int(jump),
+                        "status": "ok",
+                        **trial_metrics,
+                        **history_train_metrics,
+                    }
+                )
+    
+                logger.debug(
+                    f"PELT trial [{current_eval}/{max_evals}] | pen={pen} | min_size={min_size} | jump={jump} | train_metrics: "
+                    f"{MLFlowUtils.format_metrics_for_log(train_trial_metrics, trial_metric_keys)} | "
+                    f"val_metrics: {MLFlowUtils.format_metrics_for_log(trial_metrics, trial_metric_keys)} | "
+                    f"generalization_gap={generalization_gap:.4f}"
+                )
+    
+                if mlflow.active_run():
+                    MLFlowUtils.log_metrics_batch(
+                        train_trial_metrics,
+                        prefix="hyperopt/train_",
+                        step=current_eval,
                     )
-                    candidate.fit(train_data)
-                    score: float | None = None
-                    try:
-                        train_changepoint_eval = candidate.evaluate_changepoints(
-                            train_data, train_labels_array
-                        )
-                        val_changepoint_eval = candidate.evaluate_changepoints(
-                            val_data, labels_array
-                        )
-
-                        if metric in changepoint_metrics:
-                            train_eval_metrics = train_changepoint_eval
-                            metrics = val_changepoint_eval
-                            fallback_metric = "changepoint_f1"
-                        else:
-                            train_eval_metrics = candidate.evaluate(
-                                train_data, train_labels_array
-                            )
-                            metrics = candidate.evaluate(val_data, labels_array)
-                            fallback_metric = "f1"
-
-                        score = float(metrics.get(metric, metrics[fallback_metric]))
-                        train_score = float(
-                            train_eval_metrics.get(metric, train_eval_metrics[fallback_metric])
-                        )
-                        generalization_gap = train_score - score
-                        train_num_changepoints = float(
-                            train_changepoint_eval.get("num_changepoints", 0.0)
-                        )
-                        trial_num_changepoints = float(
-                            val_changepoint_eval.get("num_changepoints", 0.0)
-                        )
-                        trial_metric_keys = (
-                            [
-                                "changepoint_precision",
-                                "changepoint_recall",
-                                "changepoint_f1",
-                                "num_changepoints",
-                            ]
-                            if metric in changepoint_metrics
-                            else ["precision", "recall", "f1", "auc", "num_changepoints"]
-                        )
-                        train_trial_metrics = MLFlowUtils.filter_numeric_metrics(
-                            train_eval_metrics
-                        )
-                        train_trial_metrics["num_changepoints"] = train_num_changepoints
-                        train_trial_metrics = MLFlowUtils.filter_numeric_metrics(
-                            train_trial_metrics, trial_metric_keys
-                        )
-                        train_trial_metrics.setdefault(str(metric), float(train_score))
-                        trial_metrics = MLFlowUtils.filter_numeric_metrics(metrics)
-                        trial_metrics["num_changepoints"] = trial_num_changepoints
-                        trial_metrics = MLFlowUtils.filter_numeric_metrics(
-                            trial_metrics, trial_metric_keys
-                        )
-                        trial_metrics.setdefault(str(metric), float(score))
-                        history_train_metrics = {
-                            f"train_{key}": value
-                            for key, value in train_trial_metrics.items()
+                    MLFlowUtils.log_metrics_batch(
+                        trial_metrics,
+                        prefix="hyperopt/val_",
+                        step=current_eval,
+                    )
+                    mlflow.log_metric(
+                        "hyperopt/generalization_gap",
+                        generalization_gap,
+                        step=current_eval,
+                    )
+                    mlflow.log_metric("hyperopt/trial_score", score, step=current_eval)
+                    mlflow.log_metric("hyperopt/success", 1.0, step=current_eval)
+    
+                if score > best_score[0]:
+                    best_score[0] = score
+                    best_params = {
+                        "pen": float(pen),
+                        "min_size": int(min_size),
+                        "jump": int(jump),
+                    }
+                    if mlflow.active_run():
+                        mlflow.log_metric("hyperopt/best_so_far", score, step=current_eval)
+    
+                return {"loss": float(-score), "status": STATUS_OK}
+    
+            except Exception as exc:
+                failed_count[0] += 1
+                error_msg = str(exc)[:150]
+                failure_record: dict[str, float | int | str] = {
+                    "trial": int(current_eval),
+                    "metric": str(metric),
+                    "status": "failed",
+                    "error": error_msg,
+                }
+                if decoded_params is not None:
+                    failure_record.update(
+                        {
+                            "pen": float(decoded_params["pen"]),
+                            "min_size": int(decoded_params["min_size"]),
+                            "jump": int(decoded_params["jump"]),
                         }
-                        self.hyperopt_history_.append(
-                            {
-                                "trial": int(eval_count),
-                                "metric": str(metric),
-                                "score": float(score),
-                                "train_score": float(train_score),
-                                "generalization_gap": float(generalization_gap),
-                                "pen": float(pen),
-                                "min_size": int(min_size),
-                                "jump": int(jump),
-                                "status": "ok",
-                                **trial_metrics,
-                                **history_train_metrics,
-                            }
-                        )
-
-                        logger.debug(
-                            f"PELT trial [{eval_count}/{total_evals}] | pen={pen} | min_size={min_size} | jump={jump} | train_metrics: "
-                            f"{MLFlowUtils.format_metrics_for_log(train_trial_metrics, trial_metric_keys)} | "
-                            f"val_metrics: {MLFlowUtils.format_metrics_for_log(trial_metrics, trial_metric_keys)} | "
-                            f"generalization_gap={generalization_gap:.4f}"
-                        )
-
-                        # 每轮试验记录到 MLflow（镜像 ECOD 的 hyperopt/* 命名）
-                        if mlflow.active_run():
-                            MLFlowUtils.log_metrics_batch(
-                                train_trial_metrics,
-                                prefix="hyperopt/train_",
-                                step=eval_count,
-                            )
-                            MLFlowUtils.log_metrics_batch(
-                                trial_metrics,
-                                prefix="hyperopt/val_",
-                                step=eval_count,
-                            )
-                            mlflow.log_metric(
-                                "hyperopt/generalization_gap",
-                                generalization_gap,
-                                step=eval_count,
-                            )
-                            mlflow.log_metric(
-                                "hyperopt/trial_score", score, step=eval_count
-                            )
-                            mlflow.log_metric("hyperopt/success", 1.0, step=eval_count)
-                    except Exception as exc:
-                        error_msg = str(exc)[:150]
-                        self.hyperopt_history_.append(
-                            {
-                                "trial": int(eval_count),
-                                "metric": str(metric),
-                                "pen": float(pen),
-                                "min_size": int(min_size),
-                                "jump": int(jump),
-                                "status": "failed",
-                                "error": error_msg,
-                            }
-                        )
-                        logger.error(
-                            f"PELT trial [{eval_count}/{total_evals}] FAILED | pen={pen} | min_size={min_size} | jump={jump} | error={error_msg}"
-                        )
-                        if mlflow.active_run():
-                            mlflow.log_metric("hyperopt/success", 0.0, step=eval_count)
-                            mlflow.log_param(f"trial_{eval_count}_error", error_msg)
-                        raise
-
-                    if score is not None and score > best_score:
-                        best_score = score
-                        no_progress_count = 0
-                        best_params = {
-                            "pen": float(pen),
-                            "min_size": int(min_size),
-                            "jump": int(jump),
-                        }
-                        if mlflow.active_run():
-                            mlflow.log_metric(
-                                "hyperopt/best_so_far", score, step=eval_count
-                            )
-                    else:
-                        no_progress_count += 1
-
-                    if early_stop_enabled and no_progress_count >= patience:
-                        early_stopped = True
-                        logger.info(
-                            f"PELT 早停触发: 连续 {patience} 次无提升，"
-                            f"在 {eval_count}/{total_evals} 次停止"
-                        )
-                        break
-
-                if eval_count >= total_evals or early_stopped:
-                    break
-            if eval_count >= total_evals or early_stopped:
-                break
-
+                    )
+                self.hyperopt_history_.append(failure_record)
+                logger.error(
+                    f"PELT trial [{current_eval}/{max_evals}] FAILED | error={error_msg}"
+                )
+                if mlflow.active_run():
+                    mlflow.log_metric("hyperopt/success", 0.0, step=current_eval)
+                    mlflow.log_param(f"trial_{current_eval}_error", error_msg)
+                return {"loss": float("inf"), "status": STATUS_OK}
+    
+        best_params_raw = fmin(
+            fn=objective,
+            space=space,
+            algo=tpe.suggest,
+            max_evals=max_evals,
+            trials=trials,
+            early_stop_fn=no_progress_loss(patience) if early_stop_enabled else None,
+            rstate=np.random.default_rng(config.random_state),
+            verbose=False,
+        )
+    
+        best_params_actual = space_eval(space, best_params_raw)
+        best_params = self._decode_params(best_params_actual, search_space)
+    
         if self.hyperopt_history_ and all(
             float(item.get("num_changepoints", 0.0)) == 0.0
             for item in self.hyperopt_history_
+            if item.get("status") == "ok"
         ):
             logger.warning(
                 "PELT 超参数搜索未检测到任何 changepoint: all trials produced num_changepoints=0"
             )
-
-        # 汇总指标（镜像 ECOD 的 hyperopt_summary/* 命名）
+    
         if mlflow.active_run():
+            success_losses = [
+                t["result"]["loss"]
+                for t in trials.trials
+                if t["result"]["status"] == "ok"
+                and t["result"]["loss"] != float("inf")
+            ]
+            success_count = len(success_losses)
+            actual_evals = len(trials.trials)
+            is_early_stopped = actual_evals < max_evals
             summary_metrics = {
-                "hyperopt_summary/total_evals": float(total_evals),
-                "hyperopt_summary/actual_evals": float(eval_count),
+                "hyperopt_summary/total_evals": float(max_evals),
+                "hyperopt_summary/actual_evals": float(actual_evals),
                 "hyperopt_summary/grid_total_evals": float(grid_total_evals),
-                "hyperopt_summary/best_score": best_score,
+                "hyperopt_summary/successful_evals": float(success_count),
+                "hyperopt_summary/failed_evals": float(failed_count[0]),
+                "hyperopt_summary/success_rate": (
+                    success_count / actual_evals * 100 if actual_evals > 0 else 0.0
+                ),
+                "hyperopt_summary/best_score": best_score[0],
             }
             if early_stop_enabled:
                 summary_metrics["hyperopt_summary/early_stop_enabled"] = 1.0
                 summary_metrics["hyperopt_summary/early_stopped"] = (
-                    1.0 if early_stopped else 0.0
+                    1.0 if is_early_stopped else 0.0
                 )
                 summary_metrics["hyperopt_summary/patience_used"] = float(patience)
-                if early_stopped and total_evals > 0:
+                if is_early_stopped:
                     summary_metrics["hyperopt_summary/time_saved_pct"] = (
-                        (total_evals - eval_count) / total_evals * 100
+                        ((max_evals - actual_evals) / max_evals * 100)
+                        if max_evals > 0
+                        else 0.0
                     )
-
             mlflow.log_metrics(summary_metrics)
             logger.info(
-                f"PELT Hyperopt summary | trials={eval_count}/{total_evals} | best_{metric}={best_score:.4f} | "
+                f"PELT Hyperopt summary | trials={actual_evals}/{max_evals} | best_{metric}={best_score[0]:.4f} | "
                 f"best_params={best_params}"
             )
             mlflow.log_dict(
                 {"trial_history": self.hyperopt_history_},
                 "pelt_hyperopt_history.json",
             )
-
+    
         self.pen = float(best_params["pen"])
         self.min_size = int(best_params["min_size"])
         self.jump = int(best_params["jump"])

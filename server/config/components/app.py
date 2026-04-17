@@ -86,6 +86,11 @@ MIDDLEWARE = (
     "better_exceptions.integrations.django.BetterExceptionsMiddleware",
 )
 
+_install_apps = {item.strip() for item in os.getenv("INSTALL_APPS", "").split(",") if item.strip()}
+
+if "license_mgmt" in _install_apps:
+    MIDDLEWARE += ("apps.license_mgmt.middleware.license_guard.LicenseCreateGuardMiddleware",)
+
 # 达梦数据库环境下，添加连接管理中间件（放在最前面）
 if _db_engine == "dameng":
     MIDDLEWARE = ("apps.core.middlewares.dameng_connection_middleware.DamengConnectionMiddleware",) + MIDDLEWARE

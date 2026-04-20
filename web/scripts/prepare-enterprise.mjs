@@ -11,7 +11,6 @@ const enterpriseWebLink = path.resolve(webRoot, 'enterprise');
 const enterpriseWebRoot = fs.existsSync(enterpriseWebLink) ? fs.realpathSync(enterpriseWebLink) : enterpriseWebLink;
 const routesManifestPath = path.join(enterpriseWebRoot, 'manifests', 'routes.json');
 const appRoot = path.join(webRoot, 'src', 'app');
-const generatedRouteRoot = path.join(appRoot, '(enterprise)');
 const enterpriseAppRoot = path.join(enterpriseWebRoot, 'src', 'app');
 
 const createJunction = (linkPath, targetPath) => {
@@ -25,14 +24,16 @@ const createJunction = (linkPath, targetPath) => {
 /* ── cleanup ── */
 
 const cleanupGenerated = async () => {
-  // Remove (enterprise) route group
-  await fs.remove(generatedRouteRoot);
+  // Remove legacy top-level (enterprise) route group
+  await fs.remove(path.join(appRoot, '(enterprise)'));
 
-  // Remove (enterprise) sub-groups inside each app's (pages)
   if (!(await fs.pathExists(appRoot))) return;
   const appEntries = await fs.readdir(appRoot, { withFileTypes: true });
   for (const entry of appEntries) {
     if (!entry.isDirectory() || entry.name.startsWith('(')) continue;
+    // Remove (enterprise) junctions inside each module
+    await fs.remove(path.join(appRoot, entry.name, '(enterprise)'));
+    // Remove (enterprise) route shims inside each module's (pages)
     await fs.remove(path.join(appRoot, entry.name, '(pages)', '(enterprise)'));
   }
 };
@@ -65,7 +66,7 @@ const generateRouteShims = async (routes) => {
     await fs.ensureDir(path.dirname(shimFile));
     let sourceContent = await fs.readFile(sourcePath, 'utf8');
 
-    // Rewrite EE-internal imports: @/app/{appName}/xxx → @/app/(enterprise)/{appName}/xxx
+    // Rewrite EE-internal imports: @/app/{appName}/xxx → @/app/{appName}/(enterprise)/xxx
     // Only rewrite if the referenced module exists in EE but NOT in CE
     const eeImportPattern = new RegExp(`(['"])@/app/${appName}/([^'"]+)`, 'g');
     sourceContent = sourceContent.replace(eeImportPattern, (match, quote, subpath) => {
@@ -84,7 +85,7 @@ const generateRouteShims = async (routes) => {
         || fs.existsSync(path.join(eeCandidate, 'index.ts'))
         || fs.existsSync(path.join(eeCandidate, 'index.tsx'));
       if (eeExists && !ceExists) {
-        return `${quote}@/app/(enterprise)/${appName}/${subpath}`;
+        return `${quote}@/app/${appName}/(enterprise)/${subpath}`;
       }
       return match;
     });
@@ -94,12 +95,10 @@ const generateRouteShims = async (routes) => {
   }
 };
 
-/* ── junctions: link EE app dirs into (enterprise) route group ── */
+/* ── junctions: link EE app dirs into {module}/(enterprise)/ ── */
 
 const generateEnterpriseJunctions = async () => {
   if (!(await fs.pathExists(enterpriseAppRoot))) return;
-
-  await fs.ensureDir(generatedRouteRoot);
 
   // Non-route directories that should be linked (api, types, utils, etc.)
   // Route directories (containing page.tsx) are handled by generateRouteShims
@@ -124,21 +123,22 @@ const generateEnterpriseJunctions = async () => {
     if (!appEntry.isDirectory()) continue;
 
     const appSourcePath = path.join(enterpriseAppRoot, appEntry.name);
-    const appTargetPath = path.join(generatedRouteRoot, appEntry.name);
+    // Target is now inside the CE module: src/app/{module}/(enterprise)/
+    const enterpriseDir = path.join(appRoot, appEntry.name, '(enterprise)');
 
     // Link sub-directories individually, skipping those that contain route files
-    await fs.ensureDir(appTargetPath);
+    await fs.ensureDir(enterpriseDir);
     const subEntries = await fs.readdir(appSourcePath, { withFileTypes: true });
     for (const sub of subEntries) {
       if (!sub.isDirectory()) continue;
       const subSource = path.join(appSourcePath, sub.name);
-      const subTarget = path.join(appTargetPath, sub.name);
+      const subTarget = path.join(enterpriseDir, sub.name);
       if (await isRouteDir(subSource)) {
-        console.log(`  ⏭️ Skipped route dir: (enterprise)/${appEntry.name}/${sub.name}/`);
+        console.log(`  ⏭️ Skipped route dir: ${appEntry.name}/(enterprise)/${sub.name}/`);
         continue;
       }
       createJunction(subTarget, subSource);
-      console.log(`  🔗 Junction: (enterprise)/${appEntry.name}/${sub.name}/ → enterprise/src/app/${appEntry.name}/${sub.name}/`);
+      console.log(`  🔗 Junction: ${appEntry.name}/(enterprise)/${sub.name}/ → enterprise/src/app/${appEntry.name}/${sub.name}/`);
     }
   }
 };
@@ -154,7 +154,7 @@ export const prepareEnterpriseRoutes = async () => {
 
   await cleanupGenerated();
 
-  // 1) Junctions for api/types/etc under (enterprise)/
+  // 1) Junctions for api/types/etc under {module}/(enterprise)/
   await generateEnterpriseJunctions();
 
   // 2) Route shims: copy page source into CE route tree

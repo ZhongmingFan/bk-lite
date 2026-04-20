@@ -6,8 +6,8 @@
    Use direct @source paths (not globs) — parentheses in glob patterns
    are treated as extglob syntax and won't match literal directory names.
    Add a new line here when enterprise routes expand to other modules. */
-@source "../app/(enterprise)";
 @source "../app/system-manager/(pages)/(enterprise)";
+@source "../app/system-manager/(enterprise)";
 
 * {
   scrollbar-width: thin;

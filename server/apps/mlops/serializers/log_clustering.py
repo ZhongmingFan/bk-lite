@@ -232,6 +232,8 @@ class LogClusteringServingSerializer(AuthSerializer):
 
     permission_key = "serving.log_clustering_serving"
 
+    train_job_algorithm = serializers.CharField(source="train_job.algorithm", read_only=True)
+
     class Meta:
         model = LogClusteringServing
         fields = "__all__"

@@ -26,6 +26,8 @@ class ClassificationServingSerializer(AuthSerializer):
 
     permission_key = "serving.classification_serving"
 
+    train_job_algorithm = serializers.CharField(source="train_job.algorithm", read_only=True)
+
     class Meta:
         model = ClassificationServing
         fields = "__all__"

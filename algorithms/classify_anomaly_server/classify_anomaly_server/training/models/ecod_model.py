@@ -17,6 +17,7 @@ import mlflow
 from loguru import logger
 from pyod.models.ecod import ECOD
 
+from ..mlflow_utils import MLFlowUtils
 from .base import BaseAnomalyModel, ModelRegistry
 
 
@@ -68,6 +69,7 @@ class ECODModel(BaseAnomalyModel):
         self.feature_names_ = None
         self.n_features_ = None
         self.n_samples_train_ = None
+        self.hyperopt_history_: list[dict[str, Any]] = []
 
         logger.debug(f"ECOD 模型初始化: contamination={contamination}")
 
@@ -249,6 +251,7 @@ class ECODModel(BaseAnomalyModel):
         best_score = [0.0]  # 异常检测指标越大越好（f1, precision, recall）
         eval_count = [0]
         failed_count = [0]
+        self.hyperopt_history_ = []
 
         def objective(params):
             eval_count[0] += 1
@@ -267,34 +270,67 @@ class ECODModel(BaseAnomalyModel):
                 temp_model = ECODModel(contamination=contamination)
                 temp_model.fit(train_data, verbose=False, log_to_mlflow=False)
 
-                # 验证集评估
-                val_predictions = temp_model.predict(val_data)
-                val_metrics = temp_model.evaluate(val_data, val_labels)
+                train_raw_metrics = temp_model.evaluate(train_data, train_labels)
+                val_raw_metrics = temp_model.evaluate(val_data, val_labels)
 
                 # 获取优化目标分数（越大越好，所以用负数作为 loss）
-                score = val_metrics.get(metric, val_metrics["f1"])
+                score = float(val_raw_metrics.get(metric, val_raw_metrics["f1"]))
+                train_score = float(
+                    train_raw_metrics.get(metric, train_raw_metrics["f1"])
+                )
+                generalization_gap = train_score - score
                 loss = -score  # hyperopt 最小化 loss，所以取负数
+                trial_metric_keys = ["precision", "recall", "f1", "auc"]
+                train_trial_metrics = MLFlowUtils.filter_numeric_metrics(
+                    train_raw_metrics, trial_metric_keys
+                )
+                train_trial_metrics.setdefault(str(metric), float(train_score))
+                trial_metrics = MLFlowUtils.filter_numeric_metrics(
+                    val_raw_metrics, trial_metric_keys
+                )
+                trial_metrics.setdefault(str(metric), float(score))
+                history_train_metrics = {
+                    f"train_{key}": value for key, value in train_trial_metrics.items()
+                }
+                self.hyperopt_history_.append(
+                    {
+                        "trial": int(current_eval),
+                        "metric": str(metric),
+                        "score": float(score),
+                        "train_score": float(train_score),
+                        "generalization_gap": float(generalization_gap),
+                        "contamination": float(contamination),
+                        "status": "ok",
+                        **trial_metrics,
+                        **history_train_metrics,
+                    }
+                )
+
+                logger.debug(
+                    f"ECOD trial [{current_eval}/{max_evals}] contamination={contamination:.4f}: "
+                    f"train_metrics: {MLFlowUtils.format_metrics_for_log(train_trial_metrics, trial_metric_keys)} | "
+                    f"val_metrics: {MLFlowUtils.format_metrics_for_log(trial_metrics, trial_metric_keys)} | "
+                    f"generalization_gap={generalization_gap:.4f}"
+                )
 
                 # 记录到 MLflow
                 if mlflow.active_run():
-                    # 记录性能指标
-                    mlflow.log_metric(
-                        f"hyperopt/val_{metric}", score, step=current_eval
+                    MLFlowUtils.log_metrics_batch(
+                        train_trial_metrics,
+                        prefix="hyperopt/train_",
+                        step=current_eval,
                     )
-                    mlflow.log_metric(
-                        "hyperopt/val_precision",
-                        val_metrics["precision"],
+                    MLFlowUtils.log_metrics_batch(
+                        trial_metrics,
+                        prefix="hyperopt/val_",
                         step=current_eval,
                     )
                     mlflow.log_metric(
-                        "hyperopt/val_recall", val_metrics["recall"], step=current_eval
+                        "hyperopt/generalization_gap",
+                        generalization_gap,
+                        step=current_eval,
                     )
-                    mlflow.log_metric(
-                        "hyperopt/val_f1", val_metrics["f1"], step=current_eval
-                    )
-                    mlflow.log_metric(
-                        "hyperopt/val_auc", val_metrics.get("auc", 0), step=current_eval
-                    )
+                    mlflow.log_metric("hyperopt/trial_score", score, step=current_eval)
                     mlflow.log_metric("hyperopt/success", 1.0, step=current_eval)
                     # 记录contamination（同时作为参数和指标，方便可视化）
                     mlflow.log_metric(
@@ -323,10 +359,19 @@ class ECODModel(BaseAnomalyModel):
                 logger.error(
                     f"  [{current_eval}/{max_evals}] 参数评估失败: {type(e).__name__}: {str(e)}"
                 )
+                error_msg = str(e)[:150]
+                failure_record: dict[str, Any] = {
+                    "trial": int(current_eval),
+                    "metric": str(metric),
+                    "status": "failed",
+                    "error": error_msg,
+                }
+                if "contamination" in locals():
+                    failure_record["contamination"] = float(contamination)
+                self.hyperopt_history_.append(failure_record)
 
                 if mlflow.active_run():
                     mlflow.log_metric("hyperopt/success", 0.0, step=current_eval)
-                    error_msg = str(e)[:150]
                     mlflow.log_param(f"trial_{current_eval}_error", error_msg)
 
                 return {"loss": float("inf"), "status": STATUS_OK}
@@ -410,6 +455,10 @@ class ECODModel(BaseAnomalyModel):
             logger.info(
                 f"优化摘要: 成功率 {summary_metrics['hyperopt_summary/success_rate']:.1f}% "
                 f"({success_count}/{actual_evals})"
+            )
+            mlflow.log_dict(
+                {"trial_history": self.hyperopt_history_},
+                "ecod_hyperopt_history.json",
             )
 
         # 更新当前模型参数

@@ -130,6 +130,18 @@ class BaseAnomalyModel(ABC):
         """
         return {}
 
+    def evaluate_drifts(
+        self,
+        X: pd.DataFrame,
+        labels: pd.Series | NDArray[np.int_],
+        prefix: str = "",
+    ) -> Dict[str, Any]:
+        """计算漂移段相关指标。
+
+        默认实现返回空字典，供非漂移模型安全复用。
+        """
+        return {}
+
     def evaluate(
         self,
         test_data: pd.DataFrame,

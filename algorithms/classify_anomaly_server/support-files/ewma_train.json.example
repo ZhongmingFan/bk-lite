@@ -1,0 +1,32 @@
+{
+  "model": {
+    "type": "EWMA",
+    "name": "anomaly_ewma_model"
+  },
+
+  "hyperparams": {
+    "use_feature_engineering": false,
+    "scale_method": "rolling_std",
+    "severity_cap": 10.0,
+    "random_state": 42,
+    "max_evals": 50,
+    "metric": "drift_f1",
+    "search_space": {
+      "alpha": [0.1, 0.2, 0.3, 0.5],
+      "scale_window": [10, 20, 30],
+      "threshold": [2.0, 3.0, 4.0],
+      "n_consecutive": [1, 3, 5]
+    }
+  },
+
+  "preprocessing": {
+    "handle_missing": "interpolate",
+    "max_missing_ratio": 0.3,
+    "interpolation_limit": 5,
+    "label_column": "label"
+  },
+
+  "mlflow": {
+    "experiment_name": "anomaly_detection_ewma"
+  }
+}

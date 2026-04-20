@@ -134,6 +134,36 @@ class MLFlowUtils:
             logger.debug(f"已记录 {len(valid_params)} 个参数")
 
     @staticmethod
+    def filter_numeric_metrics(
+        metrics: Dict[str, Any], keys: Optional[List[str]] = None
+    ) -> Dict[str, float]:
+        """筛选有限数值指标。"""
+        filtered_metrics: Dict[str, float] = {}
+        items = (
+            ((key, metrics.get(key)) for key in keys)
+            if keys is not None
+            else metrics.items()
+        )
+
+        for key, value in items:
+            if key is None or str(key).startswith("_"):
+                continue
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                filtered_metrics[str(key)] = float(value)
+
+        return filtered_metrics
+
+    @staticmethod
+    def format_metrics_for_log(
+        metrics: Dict[str, Any], keys: Optional[List[str]] = None
+    ) -> str:
+        """将指标字典格式化为便于日志打印的字符串。"""
+        filtered_metrics = MLFlowUtils.filter_numeric_metrics(metrics, keys)
+        return ", ".join(
+            f"{key}={value:.4f}" for key, value in filtered_metrics.items()
+        )
+
+    @staticmethod
     def log_metrics_batch(
         metrics: Dict[str, float], prefix: str = "", step: Optional[int] = None
     ):
@@ -146,15 +176,10 @@ class MLFlowUtils:
             step: 记录步骤（用于时间序列指标）
         """
         if metrics:
-            # 过滤有效的指标值和内部数据
-            prefixed_metrics = {}
-            for k, v in metrics.items():
-                # 跳过以 _ 开头的内部数据（如 _predictions, _scores）
-                if k.startswith("_"):
-                    continue
-                # 跳过非数值类型
-                if isinstance(v, (int, float)) and math.isfinite(v):
-                    prefixed_metrics[f"{prefix}{k}"] = v
+            filtered_metrics = MLFlowUtils.filter_numeric_metrics(metrics)
+            prefixed_metrics = {
+                f"{prefix}{key}": value for key, value in filtered_metrics.items()
+            }
 
             if step is not None:
                 for key, value in prefixed_metrics.items():

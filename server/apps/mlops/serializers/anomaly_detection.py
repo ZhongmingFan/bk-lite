@@ -309,6 +309,8 @@ class AnomalyDetectionPredictResponseSerializer(serializers.Serializer):
 class AnomalyDetectionServingSerializer(AuthSerializer):
     permission_key = "serving.anomaly_detection_serving"
 
+    train_job_algorithm = serializers.CharField(source="train_job.algorithm", read_only=True)
+
     class Meta:
         model = AnomalyDetectionServing
         fields = "__all__"

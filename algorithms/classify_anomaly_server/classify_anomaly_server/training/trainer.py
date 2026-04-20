@@ -526,6 +526,10 @@ class UniversalTrainer:
             model_kwargs["cost_model"] = self.config.cost_model
             model_kwargs["event_window"] = self.config.event_window
 
+        if model_type == "EWMA":
+            model_kwargs["scale_method"] = self.config.scale_method
+            model_kwargs["severity_cap"] = self.config.severity_cap
+
         logger.info(f"创建模型: {model_type}")
         logger.debug(f"随机种子: {random_state}")
 
@@ -577,7 +581,28 @@ class UniversalTrainer:
             train_X, val_X, train_y, val_y, self.config
         )
 
-        logger.info(f"超参数优化完成: {best_params}")
+        trial_history = getattr(model, "hyperopt_history_", [])
+        best_metric = self.config.metric
+        if trial_history:
+            success_trials = [
+                item for item in trial_history if item.get("status", "ok") == "ok"
+            ]
+            failed_trials = len(trial_history) - len(success_trials)
+            best_trial_score = (
+                max(float(item.get("score", float("-inf"))) for item in success_trials)
+                if success_trials
+                else None
+            )
+            logger.info(
+                f"Hyperopt summary | model={self.config.model_type} | metric={best_metric} | "
+                f"trials={len(trial_history)} | success={len(success_trials)} | failed={failed_trials} | "
+                f"best_score={best_trial_score} | best_params={best_params}"
+            )
+        else:
+            logger.info(
+                f"Hyperopt summary | model={self.config.model_type} | metric={best_metric} | "
+                f"trials=0 | best_params={best_params}"
+            )
 
         return best_params
 
@@ -645,6 +670,14 @@ class UniversalTrainer:
                 prefix="test",
             )
             metrics.update(pelt_metrics)
+
+        if self.config.model_type.upper() == "EWMA":
+            drift_metrics = model.evaluate_drifts(
+                X_test,
+                y_test,
+                prefix="test",
+            )
+            metrics.update(drift_metrics)
 
         # 只输出数值统计指标到日志（过滤列表和内部数据）
         summary = {

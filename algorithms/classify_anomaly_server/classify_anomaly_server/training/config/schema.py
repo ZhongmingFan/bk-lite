@@ -10,6 +10,7 @@ from typing import List
 SUPPORTED_MODELS: List[str] = [
     "ECOD",
     "PELT",
+    "EWMA",
     # 未来可扩展: "IsolationForest", "LOF", "KNN"
 ]
 
@@ -26,6 +27,18 @@ SUPPORTED_PELT_METRICS: List[str] = [
     "changepoint_precision",
     "changepoint_recall",
     "changepoint_f1",
+]
+
+
+# EWMA 支持的优化指标（点级兼容指标 + 漂移段专属指标）
+SUPPORTED_EWMA_METRICS: List[str] = [
+    "f1",
+    "precision",
+    "recall",
+    "auc",
+    "drift_precision",
+    "drift_recall",
+    "drift_f1",
 ]
 
 

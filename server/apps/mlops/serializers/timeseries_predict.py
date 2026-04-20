@@ -168,6 +168,8 @@ class TimeSeriesPredictServingSerializer(AuthSerializer):
 
     permission_key = "serving.timeseries_predict_serving"
 
+    train_job_algorithm = serializers.CharField(source="train_job.algorithm", read_only=True)
+
     class Meta:
         model = TimeSeriesPredictServing
         fields = "__all__"

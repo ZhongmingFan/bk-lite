@@ -12,6 +12,7 @@ from .schema import (
     SUPPORTED_MISSING_HANDLERS,
     SUPPORTED_PELT_COST_MODELS,
     SUPPORTED_PELT_METRICS,
+    SUPPORTED_EWMA_METRICS,
 )
 
 
@@ -58,6 +59,9 @@ def validate_structure(config: Dict[str, Any]) -> None:
     use_fe = config.get("hyperparams", {}).get("use_feature_engineering")
     if model_type == "PELT" and use_fe is True:
         raise ConfigError("PELT 模型要求 hyperparams.use_feature_engineering=false")
+
+    if model_type == "EWMA" and use_fe is True:
+        raise ConfigError("EWMA 模型要求 hyperparams.use_feature_engineering=false")
 
     if use_fe is True:
         if "feature_engineering" not in config:
@@ -122,7 +126,11 @@ def validate_required_fields(config: Dict[str, Any]) -> None:
         raise ConfigError(f"hyperparams.max_evals 必须 >= 1，当前值: {hp['max_evals']}")
 
     valid_metrics = (
-        SUPPORTED_PELT_METRICS if model_type == "PELT" else SUPPORTED_METRICS
+        SUPPORTED_PELT_METRICS
+        if model_type == "PELT"
+        else SUPPORTED_EWMA_METRICS
+        if model_type == "EWMA"
+        else SUPPORTED_METRICS
     )
     if hp["metric"] not in valid_metrics:
         raise ConfigError(
@@ -153,6 +161,28 @@ def validate_required_fields(config: Dict[str, Any]) -> None:
                 f"hyperparams.event_window 必须 >= 0，当前值: {hp['event_window']}"
             )
 
+    if model_type == "EWMA":
+        if hp["use_feature_engineering"]:
+            raise ConfigError("EWMA 模型要求 hyperparams.use_feature_engineering=false")
+
+        if "scale_method" not in hp:
+            raise ConfigError("hyperparams.scale_method 为必填项（EWMA）")
+        if not isinstance(hp["scale_method"], str):
+            raise ConfigError("hyperparams.scale_method 类型错误: 期望 str")
+        if hp["scale_method"] != "rolling_std":
+            raise ConfigError(
+                f"EWMA 当前仅支持 hyperparams.scale_method=rolling_std，当前值: {hp["scale_method"]}"
+            )
+
+        if "severity_cap" not in hp:
+            raise ConfigError("hyperparams.severity_cap 为必填项（EWMA）")
+        if not isinstance(hp["severity_cap"], (int, float)):
+            raise ConfigError("hyperparams.severity_cap 类型错误: 期望数值")
+        if hp["severity_cap"] <= 0:
+            raise ConfigError(
+                f"hyperparams.severity_cap 必须 > 0，当前值: {hp['severity_cap']}"
+            )
+
     # search_space 配置
     ss = hp.get("search_space", {})
     if model_type == "ECOD":
@@ -169,6 +199,21 @@ def validate_required_fields(config: Dict[str, Any]) -> None:
             raise ConfigError("hyperparams.search_space.min_size 必须全部 > 0")
         if "jump" in ss and any(value <= 0 for value in ss["jump"]):
             raise ConfigError("hyperparams.search_space.jump 必须全部 > 0")
+
+    elif model_type == "EWMA":
+        _validate_search_space_list(ss, "alpha", (int, float))
+        _validate_search_space_list(ss, "scale_window", int)
+        _validate_search_space_list(ss, "threshold", (int, float))
+        _validate_search_space_list(ss, "n_consecutive", int)
+
+        if any(not (0 < v < 1) for v in ss["alpha"]):
+            raise ConfigError("hyperparams.search_space.alpha 必须全部在 (0, 1) 之间")
+        if any(v < 2 for v in ss["scale_window"]):
+            raise ConfigError("hyperparams.search_space.scale_window 必须全部 >= 2")
+        if any(v <= 0 for v in ss["threshold"]):
+            raise ConfigError("hyperparams.search_space.threshold 必须全部 > 0")
+        if any(v < 1 for v in ss["n_consecutive"]):
+            raise ConfigError("hyperparams.search_space.n_consecutive 必须全部 >= 1")
 
     # feature_engineering 配置（条件依赖）
     if hp["use_feature_engineering"]:
@@ -378,6 +423,16 @@ class TrainingConfig:
     def cost_model(self) -> Optional[str]:
         """PELT 使用的 ruptures cost model。"""
         return self.config["hyperparams"].get("cost_model")
+
+    @property
+    def scale_method(self) -> Optional[str]:
+        """EWMA 缩放方法。"""
+        return self.config["hyperparams"].get("scale_method")
+
+    @property
+    def severity_cap(self) -> Optional[float]:
+        """EWMA 严重度上限。"""
+        return self.config["hyperparams"].get("severity_cap")
 
     @property
     def search_space(self) -> Dict[str, Any]:

@@ -38,3 +38,4 @@ code-reviews/
 !/enterprise/**
 /web/enterprise
 /web/src/app/**/(enterprise)/
+.env.dev

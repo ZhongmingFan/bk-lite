@@ -1,5 +1,7 @@
 import time
 from datetime import datetime
+from types import SimpleNamespace
+from typing import Optional
 
 import nats_client
 from django.db.models import Count, Q
@@ -9,7 +11,12 @@ from apps.monitor.models import MonitorObject, Metric, MonitorInstance, MonitorA
 from apps.monitor.serializers.monitor_object import MonitorObjectSerializer
 from apps.monitor.serializers.monitor_metrics import MetricSerializer
 from apps.monitor.services.metrics import Metrics
-from apps.core.utils.permission_utils import get_permission_rules, permission_filter
+from apps.core.utils.permission_utils import (
+    check_instance_permission,
+    get_permission_rules,
+    get_permissions_rules,
+    permission_filter,
+)
 from apps.monitor.constants.permission import PermissionConstants
 from apps.monitor.utils.victoriametrics_api import VictoriaMetricsAPI
 from apps.core.logger import nats_logger as logger
@@ -187,7 +194,7 @@ def _build_metric_label_query(metric_query: str, instance_ids=None, dimensions=N
 
 
 def _get_monitor_instance_permission(monitor_obj_id: str, user_info: dict):
-    user = user_info.get("user")
+    user = _normalize_permission_user(user_info.get("user"))
     current_team = user_info.get("team")
     include_children = user_info.get("include_children", False)
 
@@ -202,6 +209,66 @@ def _get_monitor_instance_permission(monitor_obj_id: str, user_info: dict):
         include_children=include_children,
     )
     return permission, None
+
+
+def _normalize_permission_user(user):
+    if hasattr(user, "username") and hasattr(user, "domain"):
+        return user
+    if isinstance(user, str) and user:
+        return SimpleNamespace(username=user, domain="domain.com")
+    return user
+
+
+def _get_global_monitor_instance_permissions(user_info: dict):
+    user = _normalize_permission_user(user_info.get("user"))
+    current_team = user_info.get("team")
+    include_children = user_info.get("include_children", False)
+
+    if not user or not current_team:
+        return None, None, {"result": False, "data": [], "message": "缺少用户或组织信息"}
+
+    permission_result = get_permissions_rules(
+        user,
+        current_team,
+        "monitor",
+        PermissionConstants.INSTANCE_MODULE,
+        include_children=include_children,
+    )
+    if not isinstance(permission_result, dict):
+        return {}, [], None
+    permission_data = permission_result.get("data", {})
+    current_teams = permission_result.get("team", [])
+    if not isinstance(permission_data, dict):
+        permission_data = {}
+    if not isinstance(current_teams, list):
+        current_teams = []
+    return permission_data, current_teams, None
+
+
+def _get_authorized_monitor_instances(user_info: dict, monitor_obj_id: Optional[str] = None):
+    instance_permissions, cur_team, error = _get_global_monitor_instance_permissions(user_info)
+    if error:
+        return {}, error
+
+    instance_queryset = MonitorInstance.objects.filter(is_deleted=False, is_active=True).select_related(
+        "monitor_object"
+    ).prefetch_related("monitorinstanceorganization_set")
+    if monitor_obj_id:
+        instance_queryset = instance_queryset.filter(monitor_object_id=monitor_obj_id)
+
+    authorized_instances = {}
+    for instance in instance_queryset:
+        teams = {org.organization for org in instance.monitorinstanceorganization_set.all()}
+        if check_instance_permission(
+            str(instance.monitor_object_id),
+            instance.id,
+            teams,
+            instance_permissions,
+            cur_team,
+        ):
+            authorized_instances[str(instance.id)] = instance
+
+    return authorized_instances, None
 
 
 def _get_authorized_instance_queryset(permission):
@@ -596,6 +663,105 @@ def query_monitor_alert_segments(query_data: dict, *args, **kwargs):
     return {
         "result": True,
         "data": _paginate_items(items, page, page_size),
+        "message": "",
+    }
+
+
+@nats_client.register
+def query_latest_active_alerts(query_data: Optional[dict] = None, *args, **kwargs):
+    if query_data is None:
+        query_data = {
+            key: value
+            for key, value in kwargs.items()
+            if key not in {"user_info", "_timeout"}
+        }
+    query_data = _normalize_monitor_query_data(query_data)
+    monitor_obj_id = query_data.get("monitor_obj_id")
+    if monitor_obj_id not in (None, ""):
+        monitor_obj_id = str(monitor_obj_id)
+    else:
+        monitor_obj_id = None
+    user_info = kwargs.get("user_info", {})
+
+    try:
+        limit = _normalize_positive_int(query_data.get("limit", 10), "limit", default=10)
+        if limit > 100:
+            raise ValueError("limit 不能大于 100")
+        instance_ids = query_data.get("instance_ids", [])
+        if instance_ids in (None, ""):
+            instance_ids = []
+        if not isinstance(instance_ids, list):
+            raise ValueError("instance_ids 必须是列表")
+        instance_ids = [str(instance_id) for instance_id in instance_ids if instance_id]
+        instance_id = query_data.get("instance_id")
+        if instance_id:
+            instance_ids.append(str(instance_id))
+        level_values = _normalize_filter_values(query_data.get("level"), "level")
+        alert_type_values = _normalize_filter_values(query_data.get("alert_type"), "alert_type")
+    except ValueError as exc:
+        return {"result": False, "data": [], "message": str(exc)}
+
+    if monitor_obj_id:
+        try:
+            MonitorObject.objects.get(id=monitor_obj_id)
+        except MonitorObject.DoesNotExist:
+            return {"result": False, "data": [], "message": "监控对象不存在"}
+
+    if monitor_obj_id:
+        permission, error = _get_monitor_instance_permission(monitor_obj_id, user_info)
+        if error:
+            return error
+        authorized_qs = _get_authorized_instance_queryset(permission).filter(
+            monitor_object_id=monitor_obj_id,
+            is_deleted=False,
+            is_active=True,
+        ).select_related("monitor_object")
+        authorized_instances = {str(instance.id): instance for instance in authorized_qs}
+    else:
+        authorized_instances, error = _get_authorized_monitor_instances(user_info)
+        if error:
+            return error
+
+    if not authorized_instances:
+        return {
+            "result": True,
+            "data": {"count": 0, "items": []},
+            "message": "",
+        }
+
+    authorized_instance_ids = set(authorized_instances.keys())
+    if instance_ids:
+        filtered_instance_ids = [instance for instance in instance_ids if instance in authorized_instance_ids]
+        if not filtered_instance_ids:
+            return {"result": False, "data": [], "message": "没有权限访问指定的实例"}
+        authorized_instance_ids = set(filtered_instance_ids)
+
+    queryset = MonitorAlert.objects.filter(
+        monitor_instance_id__in=authorized_instance_ids,
+        status="new",
+    )
+
+    if level_values:
+        queryset = queryset.filter(level__in=level_values)
+    if alert_type_values:
+        queryset = queryset.filter(alert_type__in=alert_type_values)
+
+    items = []
+    for alert in queryset.order_by("-start_event_time", "-created_at")[:limit]:
+        item = _build_monitor_alert_segment(alert)
+        instance = authorized_instances.get(str(alert.monitor_instance_id))
+        item["monitor_obj_id"] = str(instance.monitor_object_id) if instance else None
+        item["monitor_object_name"] = (
+            instance.monitor_object.display_name or instance.monitor_object.name
+        ) if instance and instance.monitor_object else None
+        item["end_event_time"] = None
+        items.append(item)
+    return {
+        "result": True,
+        "data": {
+            "count": len(items),
+            "items": items,
+        },
         "message": "",
     }
 

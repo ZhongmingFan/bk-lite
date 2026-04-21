@@ -1,4 +1,3 @@
-import ast
 import uuid
 
 from jinja2 import Environment, BaseLoader, DebugUndefined
@@ -6,6 +5,7 @@ from jinja2 import Environment, BaseLoader, DebugUndefined
 from apps.core.logger import monitor_logger as logger
 from apps.monitor.constants.database import DatabaseConstants
 from apps.monitor.models import CollectConfig, MonitorPluginConfigTemplate
+from apps.monitor.utils.dimension import parse_instance_id
 from apps.rpc.node_mgmt import NodeMgmt
 
 
@@ -71,19 +71,19 @@ class Controller:
         """
         _context = {**context}
 
-        # 安全处理 instance_id 解析
+        # 兼容字符串和元组字面量两种 instance_id 表示，统一取首维度值供模板渲染。
         instance_id = _context.get("instance_id")
         if instance_id:
             try:
                 if isinstance(instance_id, str):
-                    parsed_id = ast.literal_eval(instance_id)
-                    if isinstance(parsed_id, (list, tuple)) and len(parsed_id) > 0:
+                    parsed_id = parse_instance_id(instance_id)
+                    if parsed_id:
                         _context.update(instance_id=parsed_id[0])
                     else:
                         logger.warning(f"instance_id 格式异常: {instance_id}")
                 elif isinstance(instance_id, (list, tuple)) and len(instance_id) > 0:
                     _context.update(instance_id=instance_id[0])
-            except (ValueError, SyntaxError) as e:
+            except Exception as e:
                 logger.error(f"解析 instance_id 失败: {instance_id}, 错误: {e}")
                 raise ValueError(f"无效的 instance_id 格式: {instance_id}") from e
 

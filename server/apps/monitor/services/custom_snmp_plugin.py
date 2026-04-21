@@ -235,7 +235,10 @@ class CustomSnmpPluginService:
             if not child_config:
                 raise BaseAppException(f"未找到实例 {config_obj.id} 的已下发采集配置")
             render_context = CustomSnmpPluginService._build_child_render_context(config_obj, child_config)
-            rendered_content = controller.render_template(template_content, render_context)
+            try:
+                rendered_content = controller.render_template(template_content, render_context)
+            except Exception as exc:
+                raise BaseAppException(f"实例 {config_obj.id} 的采集配置渲染失败: {exc}") from exc
             try:
                 ConfigFormat.toml_to_dict(rendered_content)
             except Exception as exc:

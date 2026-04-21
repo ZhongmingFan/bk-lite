@@ -1,0 +1,77 @@
+{
+  "object": "Etcd",
+  "plugin": "Etcd",
+  "templates": [
+    {
+      "name": "Etcd 集群无 Leader",
+      "alert_name": "Etcd ${resource_name} 集群无Leader",
+      "description": "检测 etcd 是否存在 leader，返回0表示当前成员无法观察到 leader，集群可能不可写或处于异常选主状态。",
+      "metric_name": "etcd_server_has_leader_gauge",
+      "algorithm": "last_over_time",
+      "threshold": [
+        {
+          "level": "critical",
+          "value": 1,
+          "method": "!="
+        }
+      ]
+    },
+    {
+      "name": "Etcd Leader 切换频繁",
+      "alert_name": "Etcd ${resource_name} Leader频繁切换",
+      "description": "监控 5 分钟内 leader 切换速率，频繁切换通常意味着网络抖动、时钟漂移或节点负载异常。",
+      "metric_name": "etcd_server_leader_changes_seen_total_counter_rate",
+      "algorithm": "avg",
+      "threshold": [
+        {
+          "level": "critical",
+          "value": 0.1,
+          "method": ">="
+        },
+        {
+          "level": "warning",
+          "value": 0.03,
+          "method": ">="
+        }
+      ]
+    },
+    {
+      "name": "Etcd 提案失败率过高",
+      "alert_name": "Etcd ${resource_name} 提案失败率过高",
+      "description": "监控 raft proposal 失败速率，持续升高说明一致性提交链路存在异常。",
+      "metric_name": "etcd_server_proposals_failed_total_counter_rate",
+      "algorithm": "avg",
+      "threshold": [
+        {
+          "level": "critical",
+          "value": 1,
+          "method": ">="
+        },
+        {
+          "level": "warning",
+          "value": 0.1,
+          "method": ">="
+        }
+      ]
+    },
+    {
+      "name": "Etcd Backend 接近配额",
+      "alert_name": "Etcd ${resource_name} 存储空间接近配额",
+      "description": "监控 etcd 已使用 backend 空间，空间过大容易触发配额限制，需要及时压缩或扩容。",
+      "metric_name": "etcd_mvcc_db_total_size_in_use_in_bytes_gauge",
+      "algorithm": "last_over_time",
+      "threshold": [
+        {
+          "level": "critical",
+          "value": 7516192768,
+          "method": ">="
+        },
+        {
+          "level": "warning",
+          "value": 5368709120,
+          "method": ">="
+        }
+      ]
+    }
+  ]
+}

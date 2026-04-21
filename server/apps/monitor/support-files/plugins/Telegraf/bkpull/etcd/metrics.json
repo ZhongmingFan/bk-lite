@@ -1,0 +1,95 @@
+{
+  "plugin": "Etcd",
+  "plugin_desc": "通过 Pull 方式采集 etcd 关键监控指标，覆盖 Leader 状态、提案处理、存储使用和磁盘延迟等核心场景。",
+  "status_query": "any({instance_type='etcd', collect_type='bkpull'}) by (instance_id)",
+  "name": "Etcd",
+  "icon": "mm-middleware_中间件",
+  "type": "Middleware",
+  "description": "",
+  "default_metric": "any({instance_type='etcd'}) by (instance_id)",
+  "instance_id_keys": ["instance_id"],
+  "supplementary_indicators": [
+    "etcd_server_has_leader_gauge",
+    "etcd_mvcc_db_total_size_in_use_in_bytes_gauge",
+    "etcd_server_proposals_failed_total_counter_rate"
+  ],
+  "metrics": [
+    {
+      "metric_group": "集群健康",
+      "name": "etcd_server_has_leader_gauge",
+      "display_name": "是否存在主节点",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Enum",
+      "unit": "[{\"name\":\"无Leader\",\"id\":0,\"color\":\"#ff4d4f\"},{\"name\":\"有Leader\",\"id\":1,\"color\":\"#1ac44a\"}]",
+      "dimensions": [],
+      "description": "Whether the current etcd member can observe a leader. 1 means the cluster leadership is healthy, 0 means leader election is unavailable.",
+      "query": "etcd_server_has_leader_gauge{__$labels__}"
+    },
+    {
+      "metric_group": "集群健康",
+      "name": "etcd_server_leader_changes_seen_total_counter_rate",
+      "display_name": "主节点切换速率",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "cps",
+      "dimensions": [],
+      "description": "Rate of observed leader changes in the last 5 minutes. Frequent changes often indicate network jitter or cluster instability.",
+      "query": "rate(etcd_server_leader_changes_seen_total_counter{__$labels__}[5m])"
+    },
+    {
+      "metric_group": "请求性能",
+      "name": "etcd_server_proposals_failed_total_counter_rate",
+      "display_name": "提案失败速率",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "cps",
+      "dimensions": [],
+      "description": "Rate of failed raft proposals in the last 5 minutes. Non-zero values indicate write path exceptions or consensus failures.",
+      "query": "rate(etcd_server_proposals_failed_total_counter{__$labels__}[5m])"
+    },
+    {
+      "metric_group": "存储",
+      "name": "etcd_mvcc_db_total_size_in_use_in_bytes_gauge",
+      "display_name": "数据库已使用大小",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "bytes",
+      "dimensions": [],
+      "description": "Actual etcd backend database space used by live data. Good baseline for storage growth tracking.",
+      "query": "etcd_mvcc_db_total_size_in_use_in_bytes_gauge{__$labels__}"
+    },
+    {
+      "metric_group": "请求性能",
+      "name": "etcd_server_client_requests_total_counter_rate",
+      "display_name": "客户端请求速率",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "cps",
+      "dimensions": [],
+      "description": "Rate of all client requests handled by etcd in the last 5 minutes. It reflects the overall request pressure on the node.",
+      "query": "sum(rate(etcd_server_client_requests_total_counter{__$labels__}[5m])) by (instance_id)"
+    },
+    {
+      "metric_group": "网络",
+      "name": "etcd_network_client_grpc_received_bytes_total_counter_rate",
+      "display_name": "客户端接收流量速率",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "Bps",
+      "dimensions": [],
+      "description": "Rate of bytes received from client gRPC requests in the last 5 minutes, reflecting inbound request traffic.",
+      "query": "sum(rate(etcd_network_client_grpc_received_bytes_total_counter{__$labels__}[5m])) by (instance_id)"
+    },
+    {
+      "metric_group": "网络",
+      "name": "etcd_network_client_grpc_sent_bytes_total_counter_rate",
+      "display_name": "客户端发送流量速率",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "Bps",
+      "dimensions": [],
+      "description": "Rate of bytes sent to client gRPC requests in the last 5 minutes, reflecting outbound response traffic.",
+      "query": "sum(rate(etcd_network_client_grpc_sent_bytes_total_counter{__$labels__}[5m])) by (instance_id)"
+    }
+  ]
+}

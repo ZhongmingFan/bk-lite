@@ -608,6 +608,7 @@ const BRANDS: { match: RegExp; label: string; icon?: string }[] = [
   { match: /waystream|asr[0-9]+|ftth/i, label: 'Waystream', icon: 'mm-waystream_waystream' },
   { match: /tsntec|8148sc/i, label: 'TsnTec', icon: 'mm-tsntec_tsntec' },
   { match: /antaira|aaxeon|\blmx\b/i, label: 'Antaira', icon: 'mm-antaira_antaira' },
+  { match: /rubytech|ruby\s*tech|\bigs-?27|\bipgs-?27/i, label: 'RubyTech', icon: 'mm-rubytech_rubytech' },
   { match: /kyland|\bsicom\b|\bkien\b/i, label: 'Kyland', icon: 'mm-kyland_kyland' },
   { match: /lantech/i, label: 'Lantech', icon: 'mm-lantech_lantech' },
   { match: /\bwago\b|852-?1305/i, label: 'WAGO', icon: 'mm-wago_wago' },

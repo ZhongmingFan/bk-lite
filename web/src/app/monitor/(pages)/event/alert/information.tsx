@@ -56,6 +56,24 @@ const Information: React.FC<InformationProps> = ({
     window.open(url, '_blank', 'noopener,noreferrer');
   };
 
+  const linkToStrategyEdit = () => {
+    const policy = formData.policy;
+    if (!policy?.id) return;
+
+    const monitorObj = objects.find(
+      (item: ObjectItem) => item.id === policy.monitor_object
+    );
+    const params = new URLSearchParams({
+      monitorObjId: String(policy.monitor_object),
+      monitorName: monitorObj?.display_name || monitorObj?.name || '',
+      type: 'edit',
+      id: String(policy.id),
+      name: policy.name || ''
+    });
+    const url = `/monitor/event/strategy/detail?${params.toString()}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
   const handleCloseConfirm = async (row: TableDataItem) => {
     setConfirmLoading(true);
     try {
@@ -143,7 +161,26 @@ const Information: React.FC<InformationProps> = ({
           )}
         </Descriptions.Item>
         <Descriptions.Item label={t('monitor.events.strategyName')}>
-          {formData.policy?.name || '--'}
+          <div className="flex justify-between items-center">
+            <span className="flex-1">{formData.policy?.name || '--'}</span>
+            {formData.policy?.id ? (
+              <Permission
+                requiredPermissions={['Edit']}
+                permissionPath="/monitor/event/strategy"
+              >
+                <a
+                  href="#"
+                  className="text-blue-500 ml-2"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    linkToStrategyEdit();
+                  }}
+                >
+                  {t('common.edit')}
+                </a>
+              </Permission>
+            ) : null}
+          </div>
         </Descriptions.Item>
         {formData.status === 'closed' && (
           <Descriptions.Item label={t('monitor.events.alertEndTime')}>

@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 
 import {
   buildBulkApplyPayload,
+  buildCollectionPolicyBulkConfig,
   buildPolicyPreview,
   changeBulkAssetPage,
   clearTemplateSelection,
@@ -19,6 +20,16 @@ import {
   selectTemplateGroup,
   toggleTemplateSelection,
 } from '../src/app/monitor/(pages)/event/template/templateBulkUtils';
+import {
+  COLLECTION_POLICY_FIELD,
+  buildCollectionPolicyApplyPayload,
+  defaultSelectedTemplateKeys,
+  extractCollectInstanceIds,
+  omitCollectionPolicyField,
+  resolvePolicyTemplateList,
+  selectedPolicyTemplates,
+  shouldSkipPolicyCreate,
+} from '../src/app/monitor/(pages)/integration/list/detail/configure/automaticPolicyApply';
 
 const templates = [
   {
@@ -310,6 +321,111 @@ assert.match(
   bulkApplyModalSource,
   /requestId !== assetRequestIdRef\.current/,
   '旧资产请求响应不应覆盖新查询'
+);
+
+const collectionConfig = buildCollectionPolicyBulkConfig();
+assert.deepEqual(collectionConfig.enable_alerts, ['threshold']);
+assert.equal(collectionConfig.no_data_enabled, false);
+assert.equal('no_data' in (collectionConfig.enable_alerts || []), false);
+assert.equal('no_data_level' in collectionConfig, false);
+assert.equal('no_data_period' in collectionConfig, false);
+assert.equal('no_data_recovery_period' in collectionConfig, false);
+assert.equal('no_data_alert_name' in collectionConfig, false);
+assert.equal(collectionConfig.name_prefix, '');
+assert.equal(collectionConfig.notice, false);
+assert.equal(collectionConfig.enable, true);
+assert.deepEqual(collectionConfig.schedule, { type: 'min', value: 5 });
+assert.deepEqual(collectionConfig.period, { type: 'min', value: 5 });
+assert.equal(collectionConfig.trigger_count, 1);
+
+const collectionPayload = buildCollectionPolicyApplyPayload({
+  monitorObjectId: 3,
+  templates: selectedTemplates,
+  instanceIds: ["('host-a',)", "('host-b',)"],
+});
+assert.ok(collectionPayload);
+assert.equal(collectionPayload.monitor_object, 3);
+assert.deepEqual(collectionPayload.template_keys, ['host-remote:0', 'host-remote:1']);
+assert.deepEqual(collectionPayload.asset_ids, ["('host-a',)", "('host-b',)"]);
+assert.deepEqual(collectionPayload.config.enable_alerts, ['threshold']);
+assert.equal(collectionPayload.config.no_data_enabled, false);
+assert.equal('no_data_level' in collectionPayload.config, false);
+assert.equal('no_data_alert_name' in collectionPayload.config, false);
+
+assert.equal(
+  buildCollectionPolicyApplyPayload({
+    monitorObjectId: 3,
+    templates: selectedTemplates,
+    instanceIds: [],
+  }),
+  null
+);
+assert.equal(
+  buildCollectionPolicyApplyPayload({
+    monitorObjectId: 3,
+    templates: [],
+    instanceIds: ["('host-a',)"],
+  }),
+  null
+);
+
+const mixedPluginTemplates = [
+  { template_key: 'builtin:1', name: 'CPU', plugin_id: 12 },
+  { template_key: 'builtin:2', name: 'Memory', plugin_id: 12 },
+  { template_key: 'builtin:3', name: 'Remote CPU', plugin_id: 11 },
+  { name: 'no-key', plugin_id: 12 },
+];
+const pluginTemplates = resolvePolicyTemplateList(mixedPluginTemplates, '12');
+assert.deepEqual(
+  pluginTemplates.map((item) => item.template_key),
+  ['builtin:1', 'builtin:2']
+);
+assert.deepEqual(defaultSelectedTemplateKeys(pluginTemplates), ['builtin:1', 'builtin:2']);
+assert.equal(shouldSkipPolicyCreate([]), true);
+assert.equal(shouldSkipPolicyCreate(undefined), true);
+assert.equal(shouldSkipPolicyCreate(['builtin:1']), false);
+assert.deepEqual(
+  selectedPolicyTemplates(pluginTemplates, ['builtin:2']).map((item) => item.template_key),
+  ['builtin:2']
+);
+assert.deepEqual(
+  extractCollectInstanceIds({ instance_ids: ["('host-1',)"] }, { instances: [{ instance_id: 'host-1' }] }),
+  ["('host-1',)"]
+);
+assert.deepEqual(
+  extractCollectInstanceIds({}, { instances: [{ instance_id: 'plain-id' }] }),
+  ['plain-id']
+);
+assert.equal(
+  COLLECTION_POLICY_FIELD in omitCollectionPolicyField({
+    interval: 60,
+    [COLLECTION_POLICY_FIELD]: ['builtin:1'],
+  }),
+  false
+);
+
+const automaticSource = readFileSync(
+  resolve('src/app/monitor/(pages)/integration/list/detail/configure/automatic.tsx'),
+  'utf8'
+);
+const formItemsPosition = automaticSource.indexOf('{formItems}');
+const policyFieldPosition = automaticSource.indexOf(
+  'name={COLLECTION_POLICY_FIELD}',
+  formItemsPosition
+);
+const basicInfoPosition = automaticSource.indexOf(
+  "t('monitor.integrations.basicInformation')",
+  formItemsPosition
+);
+assert.ok(formItemsPosition >= 0 && formItemsPosition < policyFieldPosition);
+assert.ok(policyFieldPosition < basicInfoPosition);
+assert.match(automaticSource, /mode="multiple"/);
+assert.match(automaticSource, /bulkCreatePoliciesFromTemplates/);
+assert.match(automaticSource, /buildCollectionPolicyApplyPayload/);
+assert.doesNotMatch(
+  automaticSource,
+  /enable_alerts:\s*\[[^\]]*no_data/,
+  '接入页不得为该路径开启无数据告警'
 );
 
 console.log('monitor-template-bulk logic validation passed');

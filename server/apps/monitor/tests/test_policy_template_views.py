@@ -252,3 +252,47 @@ def test_export_then_import_prompts_before_overwrite(api_client, template_permis
     assert overwritten.json()["data"]["imported_count"] == 1
     assert PolicyTemplate.objects.filter(template_type="custom").count() == 1
     assert PolicyTemplate.objects.filter(id=builtin.id, template_type="builtin").exists()
+
+
+def test_list_templates_can_filter_by_plugin_id(api_client, template_permissions):
+    team, _ = template_permissions
+    api_client.cookies["current_team"] = str(team.id)
+    monitor_object = MonitorObject.objects.create(name="TemplatePluginFilterHost", level="base")
+    telegraf = MonitorPlugin.objects.create(name="TemplatePluginFilterTelegraf", collector="Telegraf")
+    remote = MonitorPlugin.objects.create(name="TemplatePluginFilterRemote", collector="HostRemote")
+    telegraf.monitor_object.add(monitor_object)
+    remote.monitor_object.add(monitor_object)
+    telegraf_template = PolicyTemplate.objects.create(
+        key="builtin:telegraf-cpu",
+        scope_key="builtin",
+        template_type="builtin",
+        monitor_object=monitor_object,
+        plugin=telegraf,
+        name="Telegraf CPU",
+        config={"metric_name": "cpu_usage_total"},
+    )
+    PolicyTemplate.objects.create(
+        key="builtin:remote-cpu",
+        scope_key="builtin",
+        template_type="builtin",
+        monitor_object=monitor_object,
+        plugin=remote,
+        name="Remote CPU",
+        config={"metric_name": "cpu_usage_total"},
+    )
+
+    listed = api_client.post(
+        f"{BASE}/template/",
+        {"monitor_object_name": monitor_object.name, "plugin_id": telegraf.id},
+        format="json",
+    )
+    unfiltered = api_client.post(
+        f"{BASE}/template/",
+        {"monitor_object_name": monitor_object.name},
+        format="json",
+    )
+
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["data"]] == [telegraf_template.id]
+    assert {item["plugin_id"] for item in listed.json()["data"]} == {telegraf.id}
+    assert len(unfiltered.json()["data"]) == 2

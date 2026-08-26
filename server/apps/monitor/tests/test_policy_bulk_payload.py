@@ -219,3 +219,37 @@ def test_build_bulk_policy_payloads_prefers_config_trigger_count_then_template_d
         config={},
     )
     assert template_payload[0]["trigger_count"] == 2
+
+
+def test_build_bulk_policy_payloads_collection_onboarding_keeps_no_data_disabled():
+    payloads = build_bulk_policy_payloads(
+        monitor_object_id=3,
+        templates=[
+            {
+                "name": "CPU 使用率过高",
+                "metric_id": 101,
+                "collect_type": 9,
+            }
+        ],
+        assets=[{"instance_id": "('host-a',)", "organizations": [7]}],
+        config={
+            "name_prefix": "",
+            "enable": True,
+            "schedule": {"type": "min", "value": 5},
+            "period": {"type": "min", "value": 5},
+            "trigger_count": 1,
+            "notice": False,
+            "enable_alerts": ["threshold"],
+        },
+    )
+
+    assert len(payloads) == 1
+    assert payloads[0]["name"] == "CPU 使用率过高"
+    assert payloads[0]["enable_alerts"] == ["threshold"]
+    assert "no_data" not in payloads[0]["enable_alerts"]
+    assert "no_data_level" not in payloads[0]
+    assert "no_data_period" not in payloads[0]
+    assert "no_data_recovery_period" not in payloads[0]
+    assert "no_data_alert_name" not in payloads[0]
+    assert payloads[0]["notice"] is False
+    assert payloads[0]["enable"] is True

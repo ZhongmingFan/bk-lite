@@ -211,7 +211,6 @@ const AutomaticConfiguration: React.FC<IntegrationAccessProps> = ({}) => {
       cancelled = true;
     };
     // 模板列表只随当前插件/对象切换；getPolicyTemplate 引用变化不应冲掉用户选择。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoading, pluginId, objectName, form]);
 
   // 获取基础配置（不依赖 dataSource）

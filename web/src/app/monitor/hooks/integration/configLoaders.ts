@@ -59,6 +59,9 @@ const COMMUNITY_OBJECT_CONFIG_LOADERS: Record<string, ObjectConfigLoader> = {
     import('./objects/containerManagement/docker').then((m) => m.useDockerConfig),
   Host: () => import('./objects/os/host').then((m) => m.useHostConfig),
   Process: () => import('./objects/os/process').then((m) => m.useProcessConfig),
+  'Active Directory': () =>
+    import('./objects/os/activeDirectory').then((m) => m.useActiveDirectoryConfig),
+  Exchange: () => import('./objects/os/exchange').then((m) => m.useExchangeConfig),
   Website: () => import('./objects/web/website').then((m) => m.useWebsiteConfig),
   Ping: () => import('./objects/web/ping').then((m) => m.usePingConfig),
   TCPPort: () => import('./objects/web/tcpPort').then((m) => m.useTcpPortConfig),

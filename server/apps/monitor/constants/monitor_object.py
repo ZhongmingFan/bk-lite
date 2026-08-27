@@ -6,7 +6,7 @@ class MonitorObjConstants:
 
     # 对象默认顺序
     DEFAULT_OBJ_ORDER = [
-        {"name_list": ["Host"], "type": "OS"},
+        {"name_list": ["Host", "Active Directory", "Exchange"], "type": "OS"},
         {"name_list": ["Website", "Ping"], "type": "Web"},
         {"name_list": ["ElasticSearch", "InfluxDB", "Mongodb", "Mysql", "Postgres", "Redis", "Oracle"], "type": "Database"},
         {

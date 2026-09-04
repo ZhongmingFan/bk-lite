@@ -270,6 +270,8 @@ class UserViewSet(ViewSetUtils):
             return None if not user.disabled else "user_not_enabled"
         if action == "unlock":
             return None if is_user_locked(user, now=now) else "user_not_locked"
+        if action == "unbind_otp":
+            return None if user.otp_secret else "otp_not_bound"
         return "invalid_action"
 
     @action(detail=False, methods=["GET"])
@@ -315,9 +317,10 @@ class UserViewSet(ViewSetUtils):
         for i in roles:
             role_map[i["id"]] = f"{i['app']}@@{i['name']}"
 
+        otp_user_ids = set(User.objects.filter(id__in=[item["id"] for item in data], otp_secret__isnull=False).exclude(otp_secret="").values_list("id", flat=True))
         for user_data in data:
+            user_data["has_otp"] = user_data["id"] in otp_user_ids
             user_data["roles"] = [role_map.get(role_id, "") for role_id in user_data.get("role_list", [])]
-
         data = self._mask_user_payload_list(data, request)
 
         return JsonResponse({"result": True, "data": {"count": total, "users": data}})
@@ -526,9 +529,9 @@ class UserViewSet(ViewSetUtils):
         rows = request.data.get("users")
         file_name = str(request.data.get("file_name") or "")
         if not isinstance(rows, list) or not rows:
-            return JsonResponse({"result": False, "message": "没有可导入的用户数据"}, status=400)
+            return JsonResponse({"result": False, "message": loader.get("error.import_users_empty")}, status=400)
         if len(rows) > 500:
-            return JsonResponse({"result": False, "message": "单次最多导入 500 名用户"}, status=400)
+            return JsonResponse({"result": False, "message": loader.get("error.import_users_limit")}, status=400)
 
         group_error = _validate_selected_groups([group_id], loader)
         if group_error:
@@ -550,7 +553,7 @@ class UserViewSet(ViewSetUtils):
         initial_password_enabled = settings.get("user_create_initial_password_enabled") == "1"
         initial_password_hash = settings.get("user_create_initial_password_hash", "")
         if initial_password_enabled and not initial_password_hash:
-            return JsonResponse({"result": False, "message": "本地用户初始密码未配置"}, status=400)
+            return JsonResponse({"result": False, "message": loader.get("error.initial_password_not_configured")}, status=400)
 
         failures = []
         successful_usernames = set()
@@ -559,18 +562,18 @@ class UserViewSet(ViewSetUtils):
             username = str(row.get("username", "")).strip() if isinstance(row, dict) else ""
             failure = None
             if not isinstance(row, dict):
-                failure = "数据格式不正确"
+                failure = loader.get("error.import_users_invalid_row")
             elif not all(str(row.get(field, "")).strip() for field in ("username", "lastName", "email")):
-                failure = "缺少必填字段"
+                failure = loader.get("error.import_users_missing_fields")
             elif username in successful_usernames or User.objects.filter(username=username, domain="domain.com").exists():
-                failure = "用户名已存在"
+                failure = loader.get("error.import_users_username_exists")
             elif not self._is_valid_phone(row.get("phone", "")):
-                failure = "手机号格式不正确"
+                failure = loader.get("error.invalid_phone")
             else:
                 try:
                     validate_email(str(row["email"]).strip())
                 except ValidationError:
-                    failure = "邮箱格式不正确"
+                    failure = loader.get("error.import_users_invalid_email")
 
             if failure:
                 failures.append({"row_number": row_number, "username": username, "message": failure})
@@ -590,7 +593,7 @@ class UserViewSet(ViewSetUtils):
                 successful_usernames.add(username)
             except Exception:
                 logger.exception("用户导入失败 username=%s", username)
-                failures.append({"row_number": row_number, "username": username, "message": "创建用户失败"})
+                failures.append({"row_number": row_number, "username": username, "message": loader.get("error.import_users_create_failed")})
 
         result = {
             "total_count": len(rows),
@@ -694,7 +697,7 @@ class UserViewSet(ViewSetUtils):
         if not isinstance(user_ids, list) or not user_ids:
             return JsonResponse({"result": False, "message": self._get_loader(request).get("error.user_ids_list_required")}, status=400)
 
-        if action_name not in {"enable", "disable", "unlock"}:
+        if action_name not in {"enable", "disable", "unlock", "unbind_otp"}:
             return JsonResponse({"result": False, "message": self._get_loader(request).get("error.invalid_user_status_action")}, status=400)
 
         normalized_user_ids, invalid_user_ids = self._normalize_user_ids(user_ids)
@@ -742,6 +745,9 @@ class UserViewSet(ViewSetUtils):
                     user.account_locked_until = None
                     user.password_error_count = 0
                     update_fields = ["account_locked_until", "password_error_count"]
+                elif action_name == "unbind_otp":
+                    user.otp_secret = None
+                    update_fields = ["otp_secret"]
 
                 user.save(update_fields=update_fields)
                 transaction.on_commit(lambda user_id=user.id: cache.delete(f"menus-user:{user_id}"), robust=True)

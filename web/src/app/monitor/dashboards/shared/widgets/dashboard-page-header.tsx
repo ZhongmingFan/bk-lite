@@ -25,6 +25,8 @@ export interface DashboardPageHeaderProps {
   onRefresh: () => void;
   /** 是否在标题行内渲染时间选择器；置 false 时由调用方自行放置（默认 true，保持原行为）。 */
   showTimeSelector?: boolean;
+  /** SNMP / NetFlow / sFlow 跨路由切换（与展示模式 Segmented 并列）。 */
+  viewSwitchSlot?: React.ReactNode;
   styles: DashboardPageHeaderStyles;
 }
 
@@ -43,6 +45,7 @@ export function DashboardPageHeader({
   onFrequenceChange,
   onRefresh,
   showTimeSelector = true,
+  viewSwitchSlot,
   styles
 }: DashboardPageHeaderProps) {
   const router = useRouter();
@@ -66,35 +69,36 @@ export function DashboardPageHeader({
 
   return (
     <div className={styles.pageTitleRow}>
-      <div className={styles.titleBlock}>
-        <Breadcrumb className={styles.breadcrumb} items={returnNavigation.breadcrumbItems} />
+      <Breadcrumb className={styles.breadcrumb} items={returnNavigation.breadcrumbItems} />
+      <div className={styles.titleControlsRow}>
         <h1 className={styles.title}>{title}</h1>
-      </div>
-      <div className={styles.controlsWrap}>
-        <Segmented
-          size="middle"
-          className={styles.modeSegmented}
-          value={displayMode}
-          options={[...DISPLAY_MODE_OPTIONS]}
-          onChange={(value) => onDisplayModeChange(value as 'dashboard' | 'metrics')}
-        />
-        {showTimeSelector ? (
+        <div className={styles.controlsWrap}>
+          {viewSwitchSlot}
+          <Segmented
+            size="middle"
+            className={styles.modeSegmented}
+            value={displayMode}
+            options={[...DISPLAY_MODE_OPTIONS]}
+            onChange={(value) => onDisplayModeChange(value as 'dashboard' | 'metrics')}
+          />
+          {showTimeSelector ? (
             <div className={styles.toolbarTimeSelector}>
-            <TimeSelector
-              appearance="toolbar"
-              defaultValue={timeDefaultValue}
-              customFrequencyList={frequencyList}
-              onChange={onTimeChange}
-              onFrequenceChange={onFrequenceChange}
-              onRefresh={onRefresh}
-            />
-          </div>
-        ) : null}
-        {styles.actionButtons ? (
-          <div className={styles.actionButtons}>{backButton}</div>
-        ) : (
-          backButton
-        )}
+              <TimeSelector
+                appearance="toolbar"
+                defaultValue={timeDefaultValue}
+                customFrequencyList={frequencyList}
+                onChange={onTimeChange}
+                onFrequenceChange={onFrequenceChange}
+                onRefresh={onRefresh}
+              />
+            </div>
+          ) : null}
+          {styles.actionButtons ? (
+            <div className={styles.actionButtons}>{backButton}</div>
+          ) : (
+            backButton
+          )}
+        </div>
       </div>
     </div>
   );

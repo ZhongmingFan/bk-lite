@@ -11,8 +11,8 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
 
 from core.collection.constants import SECRET_KEYS
-from core.collection.enums import LeaseAcquireStatus, RunStatus, SubmissionStatus
-from core.logger import logger
+from core.collection.enums import LeaseAcquireStatus, RunStatus, SubmissionStatus, WorkloadClass
+from core.logger import logger, safe_log_value
 
 # 兼容：历史调用方从 runtime 导入枚举
 __all__ = [
@@ -37,6 +37,7 @@ class CollectionRequest:
     targets: tuple[str, ...]
     credentials: tuple[Mapping[str, Any], ...] = ()
     params: Mapping[str, Any] = field(default_factory=dict)
+    workload_class: WorkloadClass = WorkloadClass.CONFIGURATION
 
     def __post_init__(self) -> None:
         if not str(self.task_id).strip():
@@ -45,6 +46,15 @@ class CollectionRequest:
             raise ValueError("plugin_ref is required")
         if not self.targets:
             raise ValueError("at least one target is required")
+        if not isinstance(self.workload_class, WorkloadClass):
+            object.__setattr__(self, "workload_class", WorkloadClass(self.workload_class))
+
+    @property
+    def ip_precheck_enabled(self) -> bool:
+        value = self.params.get("ip_precheck")
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
     @property
     def digest(self) -> str:
@@ -62,6 +72,7 @@ class CollectionRequest:
             "targets": list(self.targets),
             "credentials": credential_refs,
             "params": _redact_secrets(self.params),
+            "workload_class": self.workload_class.value,
         }
         payload = json.dumps(
             canonical,
@@ -269,10 +280,16 @@ class CollectionRuntime:
         )
         lease = acquisition.lease
         if acquisition.status == LeaseAcquireStatus.DUPLICATE_ACTIVE:
+            fence = lease.fence if lease else 0
+            logger.warning(
+                "event=collection_run_duplicate_skipped task_id=%s status=duplicate_active fence=%s",
+                safe_log_value(request.task_id),
+                fence,
+            )
             return Submission(
                 task_id=request.task_id,
                 status=SubmissionStatus.DUPLICATE_ACTIVE,
-                fence=lease.fence if lease else 0,
+                fence=fence,
             )
         if lease is None:
             raise RuntimeError("state store acquired a run without a lease")
@@ -289,7 +306,7 @@ class CollectionRuntime:
         try:
             task = self._schedule(
                 self._run(request, lease),
-                name=f"collection-run:{request.task_id}:{lease.fence}",
+                name=f"collection-run:{safe_log_value(request.task_id)}:{lease.fence}",
             )
         except Exception:
             await self._release_admission()
@@ -333,7 +350,7 @@ class CollectionRuntime:
         run_task = asyncio.current_task()
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(lease, run_task),
-            name=f"collection-heartbeat:{request.task_id}:{lease.fence}",
+            name=f"collection-heartbeat:{safe_log_value(request.task_id)}:{lease.fence}",
         )
         try:
             if self._settings.run_deadline_seconds:
@@ -365,9 +382,7 @@ class CollectionRuntime:
             await self._state_store.finish(lease, status, summary)
             duration_ms = round((time.monotonic() - run_started_at) * 1000, 2)
             logger.info(
-                "event=collection_run_terminal %s plugin_ref=%s "
-                "model_id=%s status=%s duration_ms=%s | "
-                "任务结束 最终状态=%s 总耗时=%sms 执行批次=%s",
+                "event=collection_run_terminal %s plugin_ref=%s " "model_id=%s status=%s duration_ms=%s | " "任务结束 最终状态=%s 总耗时=%sms 执行批次=%s",
                 _run_log_identity(request),
                 request.plugin_ref,
                 request.params.get("model_id") or "-",

@@ -6,7 +6,7 @@ import type { ColumnsType } from 'antd/es/table';
 import CustomTable from '@/components/custom-table';
 import AlarmLevelIcon from '@/app/alarm/components/alarm-level-icon';
 import EventLevelTag from '@/app/alarm/components/event-level-tag';
-import UserAvatar from '@/components/user-avatar';
+import OperatorWithOrgCell from '@/app/alarm/components/operator-with-org-cell';
 import { useTranslation } from '@/utils/i18n';
 import { useLocalizedTime } from '@/hooks/useLocalizedTime';
 import AlarmAction from '@/app/alarm/components/alarm-action';
@@ -39,6 +39,7 @@ export interface AlarmTableRow extends AlarmActionRowData {
   alert_id?: string | number;
   content?: string;
   created_at?: string | null;
+  closed_at?: string | null;
   duration?: string;
   event_count?: number;
   first_event_time?: string | null;
@@ -47,6 +48,7 @@ export interface AlarmTableRow extends AlarmActionRowData {
   level?: string;
   notify_status?: string | null;
   operator_user?: string;
+  team?: Array<string | number>;
   status?: string;
   title?: string;
   [key: string]: unknown;
@@ -185,6 +187,14 @@ const AlarmTable: React.FC<AlarmTableProps> = ({
         last_event_time ? convertToLocalizedTime(last_event_time) : '--',
     },
     {
+      title: t('alarms.closeTime'),
+      dataIndex: 'closed_at',
+      key: 'closed_at',
+      width: 180,
+      render: (_: unknown, { closed_at }: AlarmTableRow) =>
+        closed_at ? convertToLocalizedTime(closed_at) : '--',
+    },
+    {
       title: t('alarms.alertName'),
       dataIndex: 'title',
       key: 'title',
@@ -226,11 +236,13 @@ const AlarmTable: React.FC<AlarmTableProps> = ({
       title: t('alarmCommon.operator'),
       dataIndex: 'operator_user',
       key: 'operator_user',
-      width: 200,
+      width: 240,
       shouldCellUpdate: (prev: AlarmTableRow, next: AlarmTableRow) =>
-        prev?.operator_user !== next?.operator_user,
-      render: (_: unknown, { operator_user }: AlarmTableRow) =>
-        operator_user ? <UserAvatar userName={operator_user} /> : '--',
+        prev?.operator_user !== next?.operator_user ||
+        JSON.stringify(prev?.team) !== JSON.stringify(next?.team),
+      render: (_: unknown, { operator_user, team }: AlarmTableRow) => (
+        <OperatorWithOrgCell operatorUser={operator_user} team={team} />
+      ),
     },
     {
       title: t('alarms.notificationStatus'),

@@ -56,9 +56,15 @@ STARGAZER_MONITOR_AUTH_PREVIOUS_TOKEN=<previous-token>
 
 ```bash
 MAX_ACTIVE_RUNS=16
-# 配置采集目标并发；设为 0 表示不限制（尽快打满机器、靠监控扩容）
-MAX_ACTIVE_TARGETS=250
-TARGET_TASK_WINDOW=250
+MAX_ACTIVE_TARGETS=160
+CONFIGURATION_MAX_ACTIVE_TARGETS=100
+MONITORING_MAX_ACTIVE_TARGETS=30
+NETWORK_TOPOLOGY_MAX_ACTIVE_TARGETS=30
+TARGET_TASK_WINDOW=160
+SNMP_MAX_IN_FLIGHT=100
+SYNC_SDK_MAX_IN_FLIGHT=16
+REMOTE_JOB_MAX_IN_FLIGHT=20
+DEFAULT_ASYNC_MAX_IN_FLIGHT=160
 REDIS_MAX_CONNECTIONS=2560
 REDIS_POOL_TIMEOUT=2
 # 默认 RESP2，兼容不支持 HELLO 的旧 Redis / 代理；仅在确认服务端支持 RESP3 时设为 3
@@ -76,23 +82,18 @@ EVENT_LOOP_LAG_INTERVAL=1
 CAPACITY_LOG_INTERVAL=180
 OUTBOUND_ALLOWED_CIDRS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7
 OUTBOUND_ALLOWED_DOMAINS=
-# 默认 off：跳过 TCP/TLS 端口短探，CIDR 出站与 Job remote 通道检查仍保留；设为 on 恢复探活
-PREFLIGHT_REACHABILITY=off
 ```
 
-这些值都是部署参数。未设置时默认 `MAX_ACTIVE_TARGETS=250`、
-`TARGET_TASK_WINDOW=250`。二者是单 Pod、跨所有运行共享的配置采集目标并发与任务窗口；
-全局调度器在 Run 之间 round-robin，单个大 Run 不再预占 worker。需要临时去掉目标并发上限时：
-
-```bash
-MAX_ACTIVE_TARGETS=0
-TARGET_TASK_WINDOW=0
-```
+这些值是单 Pod、跨所有 Run 共享的容量。三类软配额必须为正整数，但不要求总和等于 160；
+三类同时积压时按 `100/30/30` 调度，某类无排队目标时，其他类可借满 160。新类别到达后不抢占
+在途目标，而是优先获得后续释放的槽位。`SNMP_MAX_IN_FLIGHT`、`SYNC_SDK_MAX_IN_FLIGHT`
+和 `REMOTE_JOB_MAX_IN_FLIGHT` 是第二维技术资源边界；两维都有容量时才创建目标 Task。配置非法时启动失败，
+不再支持用 `0` 隐式关闭边界。
 
 `MAX_ACTIVE_RUNS` 仍保留 run 级准入；满了返回 busy/429。
 
 `REDIS_MAX_CONNECTIONS` 应不小于目标并发并留租约余量（推荐
-`≳ MAX_ACTIVE_TARGETS`；目标不限制时按机器与 Redis `maxclients` 自行抬高）。多 Pod 时还要保证
+`≳ MAX_ACTIVE_TARGETS`，并按实际辅助请求留出余量）。多 Pod 时还要保证
 `单池峰值 × Pod 数 < Redis maxclients`。池满时会有限等待
 `REDIS_POOL_TIMEOUT` 秒，而不是立刻 `MaxConnectionsError` 打崩整轮 run。
 
@@ -100,8 +101,9 @@ TARGET_TASK_WINDOW=0
 若 Redis 过旧或不支持 `HELLO` 的代理会在启动 `ping` 时直接失败，因此显式钉在 RESP2。
 
 `PREFLIGHT_TIMEOUT` 与 `PROBE_TIMEOUT` 分别控制协议预检和插件 AccessProbe，默认均为 15 秒。
-`PREFLIGHT_REACHABILITY` 默认 `off`：保留 CIDR/SSRF 出站安全检查，但跳过 TCP/TLS、SNMP、
-remote/job 及其他所有采集前探测，直接进入正式采集；设为 `on` 时才执行预检和插件 probe。
+是否执行 IP 预检不再由全局环境变量控制。每个请求仅在 `params.ip_precheck` 为 `true`、`1`、
+`yes` 或 `on` 时执行协议连通性预检及插件 AccessProbe；缺失或为其他值时跳过这些探测，直接进入
+正式采集。CIDR/SSRF 出站安全检查不属于可选预检，无论请求开关如何都必须执行。
 `COLLECTION_TIMEOUT` 是正式采集缺省值 60 秒，插件 YAML executor 的 `timeout` 优先；
 发布阶段拆为三层：`PUBLISH_QUEUE_TIMEOUT` 默认 60 秒，控制等待有界发布队列接纳结果；
 `PUBLISH_DELIVERY_TIMEOUT` 默认 30 秒，控制实际 NATS publish/flush；`PUBLISH_TOTAL_TIMEOUT`
@@ -124,7 +126,7 @@ remote/job 及其他所有采集前探测，直接进入正式采集；设为 `o
 ## 健康与观测
 
 - `/api/health/`：进程存活；
-- `/api/health/ready`：Redis 与统一运行时就绪；
+- `/api/health/ready`：Redis、NATS subscriber，以及 metrics 专用连接、目标 Stream 和 subject 覆盖契约就绪；
 - `/api/health/stats`：活动运行、并发配置和事件循环延迟；
 - `/api/health/metrics`：Prometheus 格式的运行时指标。
 
@@ -133,7 +135,7 @@ remote/job 及其他所有采集前探测，直接进入正式采集；设为 `o
 正文。
 
 运行时默认每 3 分钟输出一次 `event=collection_capacity`，专门记录
-`MAX_ACTIVE_TARGETS`（默认 250）全局异步目标槽位的已用、剩余、利用率和峰值，同时包含待调度
+`MAX_ACTIVE_TARGETS`（默认 160）全局异步目标槽位的已用、剩余、利用率和峰值，同时包含待调度
 目标/Run、发布队列利用率、事件循环 lag、进程 CPU/RSS/线程/FD，以及 cgroup CPU 限额、内存
 利用率和 CPU throttling 增量。可通过 `CAPACITY_LOG_INTERVAL` 调整周期；该日志用于压测后判断
 是否调整 `MAX_ACTIVE_TARGETS`，不代表线程池并发。若 lag P99 持续超过 1 秒、CPU 限额利用率或
@@ -147,8 +149,7 @@ cgroup 内存利用率持续超过 80%、发布队列长期超过 80%，或 thro
 
 ### 配置采集日志约定
 
-配置采集在生产 INFO 级别保留 Run 生命周期；每个失败目标额外保留可检索的终态和安全异常上下文，
-不记录凭据正文：
+配置采集在生产 INFO 级别保留 Run 生命周期和有界失败样本，不记录凭据正文：
 
 - `collection_run_started`：中文“任务开始”，优先记录 `instance_id`，缺失时才回退记录 `task_id`；
   同时包含 `plugin_ref`、`plugin_name`、`model_id`、目标数、凭据数和租约；
@@ -156,10 +157,11 @@ cgroup 内存利用率持续超过 80%、发布队列长期超过 80%，或 thro
   最近完成目标、中文结果和最多 5 个活动目标样本；
 - `target_collection_succeeded`：仅网络设备 SNMP 采集成功时，每个 IP 输出一条 INFO，包含凭据标识和
   单目标采集耗时（不记录凭据内容）；
-- `target_collection_failed`：每个失败目标输出一条；协议无响应会明确记录
-  `stage=access_probe reason=timeout timeout_seconds=10`，不伪装成插件代码异常；
+- `collection_failure_samples`：存在失败时每个 Run 只输出一条 INFO，最多包含 3 个
+  `target|failed_stage|error_code` 样本；协议无响应使用 `access_probe|protocol_no_response`，
+  不伪装成插件代码异常，也不记录错误正文或凭据标识；
 - `collection_run_summary`：中文“任务汇总”，包含总目标、采集成功/失败、不可达、延后处理、跳过、
-  发布统计、总耗时、聚合后的失败类型，以及最多 3 个脱敏失败样本；
+  发布统计、总耗时、Top 8 聚合失败类型（其余合并为 `other`），以及最多 3 个脱敏失败样本；
 - `plugin_exception`：插件执行、协议预检或插件内部捕获到的每个异常均记录，包含 `task_id`、
   `plugin_ref`、`model_id`、`plugin_name`、`target`、`error_type`、脱敏且有长度上限的
   `error_message`，以及有界 `call_chain` / `source_context`；不记录局部变量、请求头或凭据；
@@ -183,7 +185,7 @@ cgroup 内存利用率持续超过 80%、发布队列长期超过 80%，或 thro
 ```bash
 rg 'task_id=<task-id>' stargazer.log
 rg 'event=collection_run_(started|summary|terminal)' stargazer.log
-rg 'event=collection_progress|event=target_collection_failed' stargazer.log
+rg 'event=collection_progress|event=collection_failure_samples' stargazer.log
 rg 'event=plugin_exception' stargazer.log
 rg 'event=snmp_facts_collection_started|target=<ip>' stargazer.log
 rg 'event=collection_capacity' stargazer.log

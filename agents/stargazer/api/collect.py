@@ -8,14 +8,13 @@ import uuid
 from typing import List
 
 from core.collection.application import get_collection_application
+from core.collection.enums import WorkloadClass
 from core.collection.request_builder import build_collection_request, parse_credentials_pool
 from core.collection.request_identity import build_request_task_id_from_request
 from core.collection.runtime import SubmissionStatus
-from core.infra.credential_state_cache import CredentialStateCache
 from core.logger import logger
 from plugins.base_utils import expand_ip_range
 from sanic import Blueprint, response
-from service.collect_credential_result_push_service import CollectCredentialResultPushService
 from tasks.collectors.host_collector import _escape_prometheus_label_value
 
 # 兼容旧测试/调用方私有名
@@ -40,6 +39,7 @@ async def _submit_collection_run(request, task_params: dict, model_id: str):
     collection_request = build_collection_request(
         task_id=_request_task_id(request, task_params),
         params=task_params,
+        workload_class=WorkloadClass.CONFIGURATION,
     )
     submission = await get_collection_application().submit(collection_request)
     http_status = {
@@ -146,25 +146,6 @@ def _parse_hosts(hosts_param: str) -> List[str]:
     return result
 
 
-def _build_credential_results_payload(events: List[dict]) -> dict:
-    return CollectCredentialResultPushService.build_results_payload(events)
-
-
-@collect_router.get("/credential_results")
-async def get_credential_results(request):
-    raw_limit = request.args.get("limit") or 500
-    try:
-        limit = max(1, min(int(raw_limit), 2000))
-    except (TypeError, ValueError):
-        limit = 500
-
-    events = await CredentialStateCache.list_result_events(
-        since=request.args.get("since") or "",
-        limit=limit,
-    )
-    return response.json(_build_credential_results_payload(events))
-
-
 @collect_router.get("/collect_info")
 async def collect(request):
     """
@@ -203,36 +184,11 @@ async def collect(request):
 
     # Sanic 要求请求体被消费（即使是 GET 请求），否则可能出现
     # "<Request ...> body not consumed." 日志告警。
-    # await request.receive_body()
-    #
-    # # 1. 解析参数（兼容旧逻辑）
-    # params = {k.split("cmdb", 1)[-1]: v for k, v in dict(request.headers).items() if k.startswith("cmdb")}
-    # if not params:
-    #     params = {i[0]: i[1] for i in request.query_args}
-
-    params = {
-        "authkey": "",
-        "collect_task_id": "5",
-        "community": "WeOps2024",
-        "credential_id": "cred_4814898bbd9d",
-        "credential_result_subject": "receive_collect_credential_result",
-        "executor_type": "protocol",
-        "has_network_topo": "False",
-        "hosts": "10.10.69.200-10.10.69.250",
-        "integrity": "",
-        "level": "",
-        "min_confidence": "0.0",
-        "model_id": "network",
-        "plugin_name": "snmp_facts",
-        "privacy": "",
-        "privkey": "",
-        "snmp_port": "161",
-        "timeout": "500",
-        "topology_fallback_strategy": "prefer_neighbors_then_fdb_then_arp",
-        "topology_protocols": "lldp,cdp,fdb,arp",
-        "username": "",
-        "version": "v2",
-    }
+    await request.receive_body()
+    # 1. 解析参数（兼容旧逻辑）
+    params = {k.split("cmdb", 1)[-1]: v for k, v in dict(request.headers).items() if k.startswith("cmdb")}
+    if not params:
+        params = {i[0]: i[1] for i in request.query_args}
 
     # 2. 提取 Tags（从 Headers）
     instance_id = request.headers.get("instance_id")

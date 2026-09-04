@@ -12,6 +12,7 @@ export interface PlatformApplication {
   skillId?: string;
   /** 所属智能体名称，用于跨智能体同名渠道消歧 */
   skillName?: string;
+  enableConversationHistory?: boolean;
 }
 
 export interface PlatformSession {
@@ -76,7 +77,7 @@ export function asRecordList(payload: unknown): Record<string, unknown>[] {
     return payload.filter(isRecord);
   }
   if (isRecord(payload)) {
-    for (const key of ['results', 'items', 'data'] as const) {
+    for (const key of ['results', 'items', 'data', 'messages'] as const) {
       const nested = payload[key];
       if (Array.isArray(nested)) {
         return nested.filter(isRecord);
@@ -98,7 +99,14 @@ export function mapPlatformApplications(rows: Record<string, unknown>[]): Platfo
       const skillName = String(item.skill_name ?? '').trim() || undefined;
       const skillId =
         item.skill_id === undefined || item.skill_id === null ? undefined : String(item.skill_id);
-      return { id, channelName, channelId, skillId, skillName };
+      return {
+        id,
+        channelName,
+        channelId,
+        skillId,
+        skillName,
+        enableConversationHistory: item.enable_conversation_history !== false,
+      };
     })
     .filter((item) => item.id && item.channelId);
 
@@ -120,6 +128,7 @@ export function mapPlatformApplications(rows: Record<string, unknown>[]): Platfo
       channelId: item.channelId,
       skillId: item.skillId,
       skillName: item.skillName,
+      enableConversationHistory: item.enableConversationHistory,
     };
   });
 
@@ -327,6 +336,25 @@ export function resolvePlatformSelection(
   return { app, sessionId };
 }
 
+/**
+ * After a published-app refetch: keep the current app if it is still listed
+ * (using the fresh row so names stay current). Otherwise fall back to the
+ * stored selection or the first remaining app.
+ */
+export function mergePlatformCurrentApp(
+  nextApps: PlatformApplication[],
+  currentApp: PlatformApplication | null,
+  stored: PlatformSelection | null
+): PlatformApplication | null {
+  if (currentApp) {
+    const stillThere = nextApps.find((app) => app.id === currentApp.id);
+    if (stillThere) {
+      return stillThere;
+    }
+  }
+  return resolvePlatformSelection(nextApps, [], stored).app;
+}
+
 export function createPlatformSessionId(): string {
   return `session_${Date.now()}`;
 }
@@ -396,4 +424,132 @@ export function isRequiredPlatformContract(
   platform: PlatformContract | undefined
 ): platform is PlatformContract {
   return isPlatformMode({ platform });
+}
+
+/**
+ * Host fires this after publish / disable / platform-channel changes so the
+ * dock can refetch without a full page reload. Keep the string in sync with
+ * `web/src/app/(core)/components/global-webchat/apps-changed.ts`.
+ */
+export const WEBCHAT_APPS_CHANGED_EVENT = 'bk-webchat:apps-changed';
+
+/** Host shell reads this to inset page content while the dock is open. */
+export const WEBCHAT_DOCK_INSET_VAR = '--bk-webchat-dock-width';
+export const PLATFORM_DOCK_CHAT_WIDTH = 380;
+export const PLATFORM_HISTORY_RAIL_DOCK = 176;
+
+/**
+ * Empty published-app list: hide the launcher unless the host says this user
+ * can publish/enable agents (`canManageAgents: true`). `undefined` keeps the
+ * legacy empty-state launcher for embeds that do not pass the flag.
+ */
+export function shouldShowPlatformLauncher(input: {
+  appCount: number;
+  canManageAgents?: boolean;
+}): boolean {
+  return input.appCount > 0 || input.canManageAgents !== false;
+}
+
+/** Width the host should reserve. Fullscreen covers the page, so inset is 0. */
+export function platformDockInsetWidth(input: {
+  visible: boolean;
+  fullscreen?: boolean;
+  historyOpen?: boolean;
+}): number {
+  if (!input.visible || input.fullscreen) {
+    return 0;
+  }
+  return input.historyOpen
+    ? PLATFORM_DOCK_CHAT_WIDTH + PLATFORM_HISTORY_RAIL_DOCK
+    : PLATFORM_DOCK_CHAT_WIDTH;
+}
+
+export const FAB_SIZE = 72;
+export const FAB_MARGIN = 8;
+export const FAB_DRAG_THRESHOLD = 6;
+export const DEFAULT_FAB_POSITION: FabPosition = { right: 12, bottom: 16 };
+
+export interface FabPosition {
+  right: number;
+  bottom: number;
+}
+
+export function fabPositionStorageKey(prefix: string, userId: string, teamId: string): string {
+  return `${prefix}:fab:${userId}:${teamId}`;
+}
+
+export function shouldTreatAsFabDrag(
+  dx: number,
+  dy: number,
+  threshold = FAB_DRAG_THRESHOLD
+): boolean {
+  return dx * dx + dy * dy >= threshold * threshold;
+}
+
+export function clampFabPosition(
+  position: FabPosition,
+  viewport: { width: number; height: number },
+  size = FAB_SIZE,
+  margin = FAB_MARGIN
+): FabPosition {
+  const maxRight = Math.max(margin, viewport.width - size - margin);
+  const maxBottom = Math.max(margin, viewport.height - size - margin);
+  return {
+    right: Math.min(maxRight, Math.max(margin, position.right)),
+    bottom: Math.min(maxBottom, Math.max(margin, position.bottom)),
+  };
+}
+
+export function moveFabPosition(
+  start: FabPosition,
+  delta: { dx: number; dy: number },
+  viewport: { width: number; height: number }
+): FabPosition {
+  return clampFabPosition(
+    {
+      right: start.right - delta.dx,
+      bottom: start.bottom - delta.dy,
+    },
+    viewport
+  );
+}
+
+export function readFabPosition(
+  storage: Pick<Storage, 'getItem'> | null | undefined,
+  key: string
+): FabPosition | null {
+  if (!storage) {
+    return null;
+  }
+  try {
+    const raw = storage.getItem(key);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as { right?: unknown; bottom?: unknown };
+    if (typeof parsed.right !== 'number' || typeof parsed.bottom !== 'number') {
+      return null;
+    }
+    if (!Number.isFinite(parsed.right) || !Number.isFinite(parsed.bottom)) {
+      return null;
+    }
+    return { right: parsed.right, bottom: parsed.bottom };
+  } catch {
+    return null;
+  }
+}
+
+export function writeFabPosition(
+  storage: Pick<Storage, 'setItem'> | null | undefined,
+  key: string,
+  position: FabPosition
+): void {
+  if (!storage) {
+    return;
+  }
+  try {
+    storage.setItem(key, JSON.stringify(position));
+  } catch {
+    // Ignore quota / private-mode failures.
+  }
 }

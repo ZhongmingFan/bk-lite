@@ -3,7 +3,7 @@
 对照 apps/cmdb/tasks/celery_tasks.py：
   - _build_safe_error_message：多来源错误信息回退
   - sync_periodic_update_task_status：超时任务置失败（含 config_file 分流）
-  - sync_collect_credential_results_task：NATS 化后的跳过返回
+  - 凭据运行状态不再通过 Celery 投影到 CMDB
   - sync_cmdb_display_fields_task：成功/异常返回
   - execute_collect_tool_debug_task：成功/异常落库
   - reconcile / full_sync 任务委派服务层
@@ -12,6 +12,7 @@
 
 服务层 / 委派对象在真实边界打桩；任务对 DB 的真实读写副作用被断言。
 """
+
 from datetime import timedelta
 
 import pydantic.root_model  # noqa: F401
@@ -219,13 +220,15 @@ def test_periodic_recovery_clears_force_stopped_execution_claim():
     assert task.execution_claim_token is None
 
 
-# --------------------------------------------------------------------------
-# sync_collect_credential_results_task
-# --------------------------------------------------------------------------
-def test_sync_collect_credential_results_task_skips():
-    out = ct.sync_collect_credential_results_task()
-    assert out["skipped"] is True
-    assert out["result"] is True
+def test_cmdb_does_not_schedule_or_sync_stargazer_credential_projection():
+    from pathlib import Path
+
+    from apps.cmdb.config import CELERY_BEAT_SCHEDULE
+
+    cmdb_root = Path(__file__).parents[1]
+    assert "sync_collect_credential_results_task" not in CELERY_BEAT_SCHEDULE
+    assert not hasattr(ct, "sync_collect_credential_results_task")
+    assert not (cmdb_root / "services" / "credential_projection_sync.py").exists()
 
 
 # --------------------------------------------------------------------------
@@ -355,6 +358,7 @@ def test_sync_cmdb_display_fields_enters_global_lock_before_refreshing_authorita
 
 def test_sync_cmdb_display_fields_returns_compatible_failure_when_lock_fails(monkeypatch):
     from contextlib import contextmanager
+
     from celery.exceptions import Retry
 
     retry_calls = []
@@ -1275,3 +1279,50 @@ def test_config_file_pending不能覆盖同execution回调终态(monkeypatch):
     assert task.collect_data == {"owner": "callback"}
     assert task.collect_digest == {"owner": "callback"}
     assert task.execution_claim_token is None
+
+
+@pytest.mark.django_db
+def test_sync_collect_tasks_gate_skips_node_mgmt_pull_collect(monkeypatch):
+    node_mgmt = CollectModels.objects.create(
+        name="节点管理主机自动采集-default",
+        task_type=CollectPluginTypes.HOST,
+        model_id="host",
+        driver_type="job",
+        cycle_value_type="cycle",
+        team=[],
+        instances=[{"ip_addr": "10.0.0.1"}],
+        is_system=True,
+        is_interval=True,
+        system_code="node_mgmt_sync_host_collect_1",
+        exec_status=CollectRunStatusType.ERROR,
+        collect_digest={},
+    )
+    user_task = CollectModels.objects.create(
+        name="user-host-collect",
+        task_type=CollectPluginTypes.HOST,
+        model_id="host",
+        driver_type="job",
+        cycle_value_type="cycle",
+        team=[1],
+        instances=[{"ip_addr": "10.0.0.2"}],
+        is_system=False,
+        exec_status=CollectRunStatusType.SUCCESS,
+        collect_digest={"last_synced_round": 100},
+    )
+    monkeypatch.setattr(ct, "query_latest_round_ts", lambda *_a, **_k: 200)
+    monkeypatch.setattr(ct, "has_instance_vm_data", lambda *_a, **_k: False)
+    monkeypatch.setattr(ct, "_purge_legacy_vm_sync_beats", lambda: 0)
+
+    dispatched = []
+
+    class _Delay:
+        @staticmethod
+        def delay(*args, **kwargs):
+            dispatched.append(args[0] if args else kwargs.get("instance_id"))
+
+    monkeypatch.setattr(ct, "sync_collect_task", _Delay)
+
+    ct.sync_collect_tasks_gate()
+
+    assert user_task.id in dispatched
+    assert node_mgmt.id not in dispatched

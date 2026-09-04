@@ -8,20 +8,36 @@ import {
   fillUrlTemplate,
   formatSessionTime,
   isPersistedPlatformSession,
+  isPlatformDraftSession,
   isPlatformMode,
   lastSessionStorageKey,
+  mergePlatformCurrentApp,
+  PLATFORM_DOCK_CHAT_WIDTH,
+  PLATFORM_HISTORY_RAIL_DOCK,
+  platformDockInsetWidth,
+  clampFabPosition,
+  DEFAULT_FAB_POSITION,
+  fabPositionStorageKey,
+  moveFabPosition,
+  readFabPosition,
+  shouldTreatAsFabDrag,
+  writeFabPosition,
   readLastSelection,
   removePlatformSession,
   resolvePlatformSelection,
   sessionTitleFromUserContent,
   shouldFetchPlatformMessages,
   shouldRefreshPlatformSessions,
+  shouldShowPlatformLauncher,
+  WEBCHAT_APPS_CHANGED_EVENT,
+  WEBCHAT_DOCK_INSET_VAR,
   writeLastSelection,
   type Message,
   type PlatformApplication,
   type PlatformContract,
   type PlatformSession,
   type ChatState,
+  type LlmContextUsage,
 } from '@webchat/core';
 import type { ChatProps } from './chatProps';
 import { WC } from './chrome';
@@ -39,8 +55,6 @@ const Chat = React.lazy(async () => {
   return { default: mod.Chat };
 });
 
-const DOCK_CHAT_WIDTH = 380;
-const HISTORY_RAIL_DOCK = 176;
 const HISTORY_RAIL_FULL = 240;
 
 export interface PlatformChatProps extends ChatProps {
@@ -48,6 +62,10 @@ export interface PlatformChatProps extends ChatProps {
   userId?: string;
   teamId?: string;
   onAccessDenied?: () => void;
+  /** Super-admin (or equivalent) may see an empty-state guide. Non-managers hide the FAB. */
+  canManageAgents?: boolean;
+  /** Host console path for publishing agents. WebChat does not hardcode this. */
+  manageAgentsUrl?: string;
 }
 
 const QuietIcon: React.FC<{
@@ -126,7 +144,7 @@ const HistoryRail: React.FC<{
     <aside
       className="flex h-full min-h-0 flex-shrink-0 flex-col"
       style={{
-        width: wide ? HISTORY_RAIL_FULL : HISTORY_RAIL_DOCK,
+        width: wide ? HISTORY_RAIL_FULL : PLATFORM_HISTORY_RAIL_DOCK,
         background: WC.historyRail,
         borderRight: `1px solid ${WC.botBorder}`,
       }}
@@ -273,25 +291,154 @@ function webchatAssetUrl(fileName: string): string {
   return url.toString();
 }
 
-const FabLauncher: React.FC<{ onOpen: () => void }> = ({ onOpen }) => {
-  const gifSrc = webchatAssetUrl('fab-dolphin.gif');
-  const pngSrc = webchatAssetUrl('fab-dolphin.png');
+function currentViewport(): { width: number; height: number } {
+  if (typeof window === 'undefined') {
+    return { width: 1280, height: 800 };
+  }
+  return { width: window.innerWidth, height: window.innerHeight };
+}
+
+const FabLauncher = React.forwardRef<
+  HTMLDivElement,
+  {
+    onOpen: () => void;
+    storage?: Pick<Storage, 'getItem' | 'setItem'> | null;
+    storageKey: string;
+  }
+>(({ onOpen, storage, storageKey }, ref) => {
+  const webpSrc = webchatAssetUrl('fab-whaledou.webp');
+  const pngSrc = webchatAssetUrl('fab-whaledou.png');
+  const [position, setPosition] = useState(() =>
+    clampFabPosition(readFabPosition(storage, storageKey) ?? DEFAULT_FAB_POSITION, currentViewport())
+  );
+  const [dragging, setDragging] = useState(false);
+  const positionRef = useRef(position);
+  positionRef.current = position;
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    start: { right: number; bottom: number };
+    moved: boolean;
+  } | null>(null);
+  const ignoreClickRef = useRef(false);
+
+  useEffect(() => {
+    setPosition(
+      clampFabPosition(readFabPosition(storage, storageKey) ?? DEFAULT_FAB_POSITION, currentViewport())
+    );
+  }, [storage, storageKey]);
+
+  useEffect(() => {
+    const onResize = () => {
+      setPosition((current) => clampFabPosition(current, currentViewport()));
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  useEffect(() => {
+    const applyMove = (clientX: number, clientY: number) => {
+      const drag = dragRef.current;
+      if (!drag) {
+        return;
+      }
+      const dx = clientX - drag.startX;
+      const dy = clientY - drag.startY;
+      if (!drag.moved && !shouldTreatAsFabDrag(dx, dy)) {
+        return;
+      }
+      drag.moved = true;
+      setDragging(true);
+      const next = moveFabPosition(drag.start, { dx, dy }, currentViewport());
+      positionRef.current = next;
+      setPosition(next);
+    };
+    const finishDrag = () => {
+      const drag = dragRef.current;
+      if (!drag) {
+        return;
+      }
+      dragRef.current = null;
+      if (drag.moved) {
+        ignoreClickRef.current = true;
+        setDragging(false);
+        writeFabPosition(storage, storageKey, positionRef.current);
+      }
+    };
+    const onMove = (event: PointerEvent | MouseEvent) => {
+      applyMove(event.clientX, event.clientY);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('pointerup', finishDrag);
+    window.addEventListener('mouseup', finishDrag);
+    window.addEventListener('pointercancel', finishDrag);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('pointerup', finishDrag);
+      window.removeEventListener('mouseup', finishDrag);
+      window.removeEventListener('pointercancel', finishDrag);
+    };
+  }, [storage, storageKey]);
+
+  const beginDrag = (clientX: number, clientY: number) => {
+    ignoreClickRef.current = false;
+    dragRef.current = {
+      startX: clientX,
+      startY: clientY,
+      start: positionRef.current,
+      moved: false,
+    };
+  };
+
+  const onPointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) {
+      return;
+    }
+    beginDrag(event.clientX, event.clientY);
+  };
+
+  const onMouseDown = (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (event.button !== 0 || dragRef.current) {
+      return;
+    }
+    beginDrag(event.clientX, event.clientY);
+  };
+
+  const onClick = (event: React.MouseEvent<HTMLButtonElement>) => {
+    if (ignoreClickRef.current) {
+      event.preventDefault();
+      ignoreClickRef.current = false;
+      return;
+    }
+    onOpen();
+  };
 
   return (
-    <button
-      type="button"
-      title="打开对话"
-      aria-label="打开对话"
-      onClick={onOpen}
-      className="wc-fab-launcher"
+    <div
+      ref={ref}
+      className="fixed z-[1200] select-none"
+      style={{ right: position.right, bottom: position.bottom }}
     >
-      <picture>
-        <source srcSet={gifSrc} type="image/gif" media="(prefers-reduced-motion: no-preference)" />
-        <img src={pngSrc} alt="" width={56} height={56} draggable={false} />
-      </picture>
-    </button>
+      <button
+        type="button"
+        title="打开对话，按住可拖动"
+        aria-label="打开对话"
+        onClick={onClick}
+        onPointerDown={onPointerDown}
+        onMouseDown={onMouseDown}
+        className={`wc-fab-launcher${dragging ? ' is-dragging' : ''}`}
+      >
+        <picture>
+          <source srcSet={webpSrc} type="image/webp" media="(prefers-reduced-motion: no-preference)" />
+          <img src={pngSrc} alt="" width={72} height={72} draggable={false} />
+        </picture>
+      </button>
+    </div>
   );
-};
+});
+FabLauncher.displayName = 'FabLauncher';
 
 export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, PlatformChatProps>((props, ref) => {
   const {
@@ -299,6 +446,8 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
     userId = 'anonymous',
     teamId = 'default',
     onAccessDenied,
+    canManageAgents,
+    manageAgentsUrl,
     apiKey,
     credentials,
     requestHeaders,
@@ -331,6 +480,7 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
   const [currentApp, setCurrentApp] = useState<PlatformApplication | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [sessionUsage, setSessionUsage] = useState<LlmContextUsage | null>(null);
   const [messagesLoading, setMessagesLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [forbidden, setForbidden] = useState(false);
@@ -345,6 +495,7 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
   const chatStateRef = useRef<ChatState>('idle');
   const menuRef = useRef<HTMLDivElement>(null);
   const loadedSessionIdRef = useRef<string | null>(null);
+  const appsLoadGenerationRef = useRef(0);
   const onAccessDeniedRef = useRef(onAccessDenied);
   onAccessDeniedRef.current = onAccessDenied;
 
@@ -355,35 +506,59 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
     [storage, storageKey]
   );
 
-  useEffect(() => {
-    let cancelled = false;
-    async function loadApps() {
-      setLoading(true);
+  const reloadApps = useCallback(
+    async (options?: { showLoading?: boolean }) => {
+      const generation = ++appsLoadGenerationRef.current;
+      if (options?.showLoading) {
+        setLoading(true);
+      }
       try {
         const nextApps = await fetchPlatformApplications(platform, requestInit);
-        if (cancelled) return;
+        if (generation !== appsLoadGenerationRef.current) return;
         setApps(nextApps);
         const stored = readLastSelection(storage, storageKey);
-        const resolved = resolvePlatformSelection(nextApps, [], stored);
-        setCurrentApp((prev) => (prev?.id === resolved.app?.id ? prev : resolved.app));
+        setCurrentApp((prev) => mergePlatformCurrentApp(nextApps, prev, stored));
+        setForbidden(false);
       } catch (error) {
-        if (cancelled) return;
+        if (generation !== appsLoadGenerationRef.current) return;
         if (error instanceof PlatformAccessDeniedError) {
           setForbidden(true);
           onAccessDeniedRef.current?.();
-        } else {
+        } else if (options?.showLoading) {
           setApps([]);
           setCurrentApp(null);
         }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (generation === appsLoadGenerationRef.current) {
+          setLoading(false);
+        }
       }
-    }
-    void loadApps();
-    return () => {
-      cancelled = true;
+    },
+    [platform, requestInit, storage, storageKey]
+  );
+  const reloadAppsRef = useRef(reloadApps);
+  reloadAppsRef.current = reloadApps;
+
+  useEffect(() => {
+    void reloadApps({ showLoading: true });
+  }, [reloadApps]);
+
+  useEffect(() => {
+    const refresh = () => {
+      void reloadAppsRef.current({ showLoading: false });
     };
-  }, [platform, requestInit, storage, storageKey]);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        refresh();
+      }
+    };
+    window.addEventListener(WEBCHAT_APPS_CHANGED_EVENT, refresh);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener(WEBCHAT_APPS_CHANGED_EVENT, refresh);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, []);
 
   const currentAppId = currentApp?.id;
   const currentChannelId = currentApp?.channelId;
@@ -395,6 +570,7 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
         setSessions([]);
         setSessionId(null);
         setMessages([]);
+        setSessionUsage(null);
         return;
       }
       try {
@@ -438,9 +614,16 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
       if (!sessionId) {
         loadedSessionIdRef.current = null;
         setMessages([]);
+        setSessionUsage(null);
         if (!currentAppId) {
           setMessagesLoading(false);
         }
+        return;
+      }
+      if (isPlatformDraftSession(sessionId, sessions)) {
+        loadedSessionIdRef.current = sessionId;
+        setMessagesLoading(false);
+        setSessionUsage(null);
         return;
       }
       if (
@@ -456,15 +639,17 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
       }
       setMessagesLoading(true);
       try {
-        const nextMessages = await fetchPlatformMessages(platform, sessionId, requestInit);
+        const next = await fetchPlatformMessages(platform, sessionId, requestInit);
         if (!cancelled) {
           loadedSessionIdRef.current = sessionId;
-          setMessages(nextMessages);
+          setMessages(next.messages);
+          setSessionUsage(next.usage);
         }
       } catch {
         if (!cancelled) {
           loadedSessionIdRef.current = sessionId;
           setMessages([]);
+          setSessionUsage(null);
         }
       } finally {
         if (!cancelled) {
@@ -501,6 +686,7 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
     setDraftTitle('新会话');
     setSessionId(nextSessionId);
     setMessages([]);
+    setSessionUsage(null);
     setMessagesLoading(false);
     persistSelection(currentAppId, nextSessionId);
   }, [currentAppId, persistSelection]);
@@ -514,6 +700,7 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
     setDraftTitle('新会话');
     setSessionId(null);
     setMessages([]);
+    setSessionUsage(null);
     setMessagesLoading(true);
   }, [currentAppId]);
 
@@ -524,6 +711,7 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
     setDraftTitle('新会话');
     setSessionId(id);
     setMessages([]);
+    setSessionUsage(null);
     setMessagesLoading(
       shouldFetchPlatformMessages({
         sessionId: id,
@@ -561,6 +749,7 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
       setDraftTitle('新会话');
       setSessionId(nextSessionId);
       setMessages([]);
+      setSessionUsage(null);
       setMessagesLoading(false);
       persistSelection(currentAppId, nextSessionId);
     },
@@ -626,7 +815,8 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
   const handleOpen = useCallback(() => {
     setHasOpened(true);
     setCollapsed(false);
-  }, []);
+    void reloadApps({ showLoading: false });
+  }, [reloadApps]);
 
   useEffect(() => {
     if (collapsed || !isFullscreen) return undefined;
@@ -644,11 +834,28 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
     [sessionId]
   );
 
-  if (forbidden) {
+  const showLauncher = shouldShowPlatformLauncher({
+    appCount: apps.length,
+    canManageAgents,
+  });
+  const emptyApps = !loading && apps.length === 0;
+
+  useEffect(() => {
+    const width = platformDockInsetWidth({
+      visible: showLauncher && !forbidden && hasOpened && !collapsed,
+      fullscreen: isFullscreen,
+      historyOpen,
+    });
+    document.documentElement.style.setProperty(WEBCHAT_DOCK_INSET_VAR, `${width}px`);
+    return () => {
+      document.documentElement.style.setProperty(WEBCHAT_DOCK_INSET_VAR, '0px');
+    };
+  }, [showLauncher, forbidden, hasOpened, collapsed, isFullscreen, historyOpen]);
+
+  if (forbidden || !showLauncher) {
     return null;
   }
 
-  const emptyApps = !loading && apps.length === 0;
   const headerTitle = emptyApps ? '会话' : currentApp?.name || '平台助手';
   const listItems: PlatformSession[] =
     isDraftSession && sessionId ? [{ id: sessionId, title: draftTitle || '新会话' }, ...sessions] : sessions;
@@ -656,9 +863,12 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
   return (
     <>
       {collapsed ? (
-        <div ref={!hasOpened ? ref : undefined} className="fixed bottom-4 right-3 z-[1200]">
-          <FabLauncher onOpen={handleOpen} />
-        </div>
+        <FabLauncher
+          ref={!hasOpened ? ref : undefined}
+          onOpen={handleOpen}
+          storage={storage}
+          storageKey={fabPositionStorageKey(storagePrefix, userId, teamId)}
+        />
       ) : null}
       {hasOpened ? (
         <div
@@ -666,17 +876,16 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
           className={
             isFullscreen
               ? 'fixed inset-0 z-[2000] flex h-full w-full flex-col overflow-hidden font-sans'
-              : 'fixed bottom-0 right-0 top-0 z-[1200] flex flex-col overflow-hidden font-sans'
+              : 'fixed bottom-0 right-0 top-0 z-[1200] flex flex-col overflow-hidden font-sans transition-[width] duration-200 ease-out'
           }
           style={{
             width: isFullscreen
               ? undefined
               : historyOpen
-                ? DOCK_CHAT_WIDTH + HISTORY_RAIL_DOCK
-                : DOCK_CHAT_WIDTH,
+                ? PLATFORM_DOCK_CHAT_WIDTH + PLATFORM_HISTORY_RAIL_DOCK
+                : PLATFORM_DOCK_CHAT_WIDTH,
             background: WC.white,
             borderLeft: isFullscreen ? undefined : `1px solid ${WC.dockEdge}`,
-            boxShadow: isFullscreen ? undefined : WC.dockShadow,
             display: collapsed ? 'none' : undefined,
           }}
           aria-hidden={collapsed}
@@ -735,7 +944,7 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
               </QuietIcon>
             </>
           )}
-          {showFullscreenButton && (
+          {showFullscreenButton && !emptyApps && (
             <QuietIcon
               title={isFullscreen ? '退出全屏' : '全屏'}
               onClick={handleToggleFullscreen}
@@ -793,11 +1002,20 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
           style={{ background: WC.stage, color: WC.muted }}
         >
           <p className="text-sm font-medium" style={{ color: WC.botText }}>
-            当前团队还没有可对话的智能体
+            还没有可对话的智能体
           </p>
           <p className="mt-2 text-xs leading-[18px]">
-            需要在智能体详情开通并启用「平台」渠道，且当前组织在使用组织内。
+            请先发布智能体，并在详情中开通「平台」渠道。开通后即可在这里对话。
           </p>
+          {manageAgentsUrl ? (
+            <a
+              href={manageAgentsUrl}
+              className="mt-4 inline-flex h-8 cursor-pointer items-center justify-center rounded-md px-3 text-sm font-medium no-underline hover:opacity-90"
+              style={{ background: WC.indigo, color: WC.onPrimary }}
+            >
+              前往智能体列表
+            </a>
+          ) : null}
         </div>
       ) : (
         <div className="flex min-h-0 flex-1">
@@ -830,6 +1048,8 @@ export const PlatformChat = React.memo(React.forwardRef<HTMLDivElement, Platform
                   {...chatProps}
                   sseUrl={chatUrl}
                   showHeader={false}
+                  conversationHistoryEnabled={currentApp.enableConversationHistory !== false}
+                  initialContextUsage={sessionUsage}
                   enableStorage={false}
                   apiKey={apiKey}
                   credentials={requestInit.credentials}

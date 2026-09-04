@@ -4,6 +4,7 @@ from unittest import mock
 
 import pytest
 
+from apps.cmdb.collection.round_sync import SNAPSHOT_CONTRACT_LABEL, SNAPSHOT_CONTRACT_VERSION, CompletedRound
 from apps.cmdb.constants.constants import CollectPluginTypes, CollectRunStatusType
 from apps.cmdb.models.collect_model import (
     COLLECTION_ROLE_DEVICE,
@@ -130,11 +131,11 @@ def test_expected_network_node_configs_returns_two_when_enabled(monkeypatch):
 def test_reconcile_delete_clears_both_configs(monkeypatch):
     from apps.cmdb.services import network_collection_reconcile as reconcile
 
-    deleted = []
+    delete_calls = []
 
     class FakeNodeMgmt:
         def delete_child_configs(self, payload):
-            deleted.extend(payload)
+            delete_calls.append(list(payload))
 
         def batch_add_node_child_config(self, nodes):
             raise AssertionError("delete path must not push")
@@ -142,12 +143,195 @@ def test_reconcile_delete_clears_both_configs(monkeypatch):
     monkeypatch.setattr(reconcile, "NodeMgmt", FakeNodeMgmt)
     result = reconcile.reconcile_network_collection_configs(_network_instance(), delete=True)
     assert result["deleted"] == ["cmdb_42", "cmdb_42_topology"]
-    assert deleted == [{"id": "cmdb_42"}, {"id": "cmdb_42_topology"}]
+    assert delete_calls == [["cmdb_42", "cmdb_42_topology"]]
+
+
+def test_reconcile_edit_deletes_existing_configs_before_recreate(monkeypatch):
+    from apps.cmdb.services import network_collection_reconcile as reconcile
+
+    existing_ids = {"cmdb_42", "cmdb_42_topology"}
+
+    class FakeNodeMgmt:
+        def delete_child_configs(self, config_ids):
+            existing_ids.difference_update(config_id for config_id in config_ids if isinstance(config_id, str))
+
+        def batch_add_node_child_config(self, nodes):
+            pushed_ids = {node["id"] for node in nodes}
+            duplicate_ids = sorted(existing_ids & pushed_ids)
+            if duplicate_ids:
+                raise RuntimeError(f"duplicate child config ids: {duplicate_ids}")
+            existing_ids.update(pushed_ids)
+
+    monkeypatch.setattr(reconcile, "NodeMgmt", FakeNodeMgmt)
+    monkeypatch.setattr(NetworkNodeParams, "render_template", lambda self, context: "device-content")
+    monkeypatch.setattr(NetworkTopoNodeParams, "render_template", lambda self, context: "topo-content")
+
+    instance = _network_instance()
+    reconcile.reconcile_network_collection_configs(instance, delete=True)
+    reconcile.reconcile_network_collection_configs(instance, delete=False)
+
+    assert existing_ids == {"cmdb_42", "cmdb_42_topology"}
+
+
+def test_reconcile_delete_propagates_node_mgmt_failure_without_leaking_error(monkeypatch, caplog):
+    from apps.cmdb.services import network_collection_reconcile as reconcile
+
+    sensitive_sentinel = "SECRET_NETWORK_DELETE_PAYLOAD"
+    original_error = RuntimeError(sensitive_sentinel)
+
+    class FailingNodeMgmt:
+        def delete_child_configs(self, config_ids):
+            raise original_error
+
+    monkeypatch.setattr(reconcile, "NodeMgmt", FailingNodeMgmt)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        reconcile.reconcile_network_collection_configs(_network_instance(), delete=True)
+
+    assert exc_info.value is original_error
+    warning_records = [record for record in caplog.records if record.msg.startswith("[NetworkReconcile] 删除节点配置失败")]
+    assert len(warning_records) == 1
+    warning_record = warning_records[0]
+    assert warning_record.msg == "[NetworkReconcile] 删除节点配置失败 task_id=%s config_ids=%s error_type=%s"
+    assert warning_record.args == (42, ["cmdb_42", "cmdb_42_topology"], "RuntimeError")
+    assert warning_record.getMessage() == (
+        "[NetworkReconcile] 删除节点配置失败 task_id=42 " "config_ids=['cmdb_42', 'cmdb_42_topology'] error_type=RuntimeError"
+    )
+    assert sensitive_sentinel not in warning_record.getMessage()
+    assert warning_record.exc_info is None
+
+
+def test_reconcile_without_topology_deletes_only_topology_config(monkeypatch):
+    from apps.cmdb.services import network_collection_reconcile as reconcile
+
+    delete_calls = []
+    pushed_ids = []
+
+    class FakeNodeMgmt:
+        def delete_child_configs(self, config_ids):
+            delete_calls.append(list(config_ids))
+
+        def batch_add_node_child_config(self, nodes):
+            pushed_ids.extend(node["id"] for node in nodes)
+
+    monkeypatch.setattr(reconcile, "NodeMgmt", FakeNodeMgmt)
+    monkeypatch.setattr(NetworkNodeParams, "render_template", lambda self, context: "device-content")
+
+    instance = _network_instance(params={"has_network_topo": False})
+    result = reconcile.reconcile_network_collection_configs(instance, delete=False)
+
+    assert delete_calls == [["cmdb_42_topology"]]
+    assert result["deleted"] == ["cmdb_42_topology"]
+    assert pushed_ids == ["cmdb_42"]
+
+
+def test_reconcile_without_topology_propagates_cleanup_failure_without_push(monkeypatch, caplog):
+    from apps.cmdb.services import network_collection_reconcile as reconcile
+
+    sensitive_sentinel = "SECRET_TOPOLOGY_DELETE_PAYLOAD"
+    original_error = RuntimeError(sensitive_sentinel)
+
+    class FailingNodeMgmt:
+        def delete_child_configs(self, config_ids):
+            assert config_ids == ["cmdb_42_topology"]
+            raise original_error
+
+        def batch_add_node_child_config(self, nodes):
+            raise AssertionError("cleanup failure must stop config push")
+
+    monkeypatch.setattr(reconcile, "NodeMgmt", FailingNodeMgmt)
+
+    instance = _network_instance(params={"has_network_topo": False})
+    with pytest.raises(RuntimeError) as exc_info:
+        reconcile.reconcile_network_collection_configs(instance, delete=False)
+
+    assert exc_info.value is original_error
+    warning_records = [record for record in caplog.records if record.msg.startswith("[NetworkReconcile] 清理拓扑配置失败")]
+    assert len(warning_records) == 1
+    warning_record = warning_records[0]
+    assert warning_record.msg == "[NetworkReconcile] 清理拓扑配置失败 task_id=%s config_id=%s error_type=%s"
+    assert warning_record.args == (42, "cmdb_42_topology", "RuntimeError")
+    assert warning_record.getMessage() == ("[NetworkReconcile] 清理拓扑配置失败 task_id=42 config_id=cmdb_42_topology error_type=RuntimeError")
+    assert sensitive_sentinel not in warning_record.getMessage()
+    assert warning_record.exc_info is None
 
 
 def test_get_last_synced_topology_round():
     assert get_last_synced_topology_round(None) is None
     assert get_last_synced_topology_round({LAST_SYNCED_TOPOLOGY_ROUND_KEY: "9"}) == 9
+
+
+def test_query_role_round_marker_ignores_legacy_attempt_labels():
+    from apps.cmdb.services.topology_replay_service import query_role_round_marker
+
+    class FakeCollection:
+        def query(self, _sql, **_kwargs):
+            return {
+                "data": {
+                    "result": [
+                        {
+                            "metric": {
+                                "__name__": "cmdb_round_complete_gauge",
+                                "instance_id": "cmdb_42",
+                                "collection_role": COLLECTION_ROLE_TOPOLOGY,
+                                "channel_config_version": "1",
+                                "run_attempt_id": "legacy-attempt",
+                                "collection_run_attempt_id": "legacy-attempt",
+                            },
+                            "value": [100, "100"],
+                        },
+                        {
+                            "metric": {
+                                "__name__": "cmdb_round_complete_gauge",
+                                "instance_id": "cmdb_42",
+                                "collection_role": COLLECTION_ROLE_TOPOLOGY,
+                                "channel_config_version": "2",
+                            },
+                            "value": [200, "200"],
+                        },
+                    ]
+                }
+            }
+
+        def query_sample_timestamps(self, _sql, **_kwargs):
+            return {
+                "data": {
+                    "result": [
+                        {
+                            "metric": {
+                                "__name__": "cmdb_round_complete_gauge",
+                                "instance_id": "cmdb_42",
+                                "collection_role": COLLECTION_ROLE_TOPOLOGY,
+                                "channel_config_version": "1",
+                                "run_attempt_id": "legacy-attempt",
+                                "collection_run_attempt_id": "legacy-attempt",
+                            },
+                            "value": [200, "150.25"],
+                        },
+                        {
+                            "metric": {
+                                "__name__": "cmdb_round_complete_gauge",
+                                "instance_id": "cmdb_42",
+                                "collection_role": COLLECTION_ROLE_TOPOLOGY,
+                                "channel_config_version": "2",
+                            },
+                            "value": [200, "250.5"],
+                        },
+                    ]
+                }
+            }
+
+    marker = query_role_round_marker(
+        "cmdb_42",
+        collection_role=COLLECTION_ROLE_TOPOLOGY,
+        collection=FakeCollection(),
+    )
+
+    assert marker == {
+        "round_ts": 200,
+        "round_completed_at": 250.5,
+        "channel_config_version": "2",
+    }
 
 
 def test_replay_stale_when_version_mismatch(monkeypatch):
@@ -173,7 +357,7 @@ def test_replay_stale_when_version_mismatch(monkeypatch):
     )
     status = replay.replay_topology_for_task(
         7,
-        marker={"round_ts": 100, "channel_config_version": "4", "run_attempt_id": "a"},
+        marker={"round_ts": 100, "channel_config_version": "4"},
     )
     assert status == "stale"
 
@@ -216,7 +400,10 @@ def test_replay_pending_when_interfaces_missing(monkeypatch):
         marker={"round_ts": 200, "channel_config_version": "1", "run_attempt_id": "b"},
     )
     assert status == "pending"
-    assert any(PENDING_TOPOLOGY_REPLAY_KEY in (u.get("params") or {}) for u in updates)
+    pending_updates = [
+        (u.get("params") or {})[PENDING_TOPOLOGY_REPLAY_KEY] for u in updates if PENDING_TOPOLOGY_REPLAY_KEY in (u.get("params") or {})
+    ]
+    assert pending_updates == [{"round_ts": 200, "channel_config_version": "1"}]
 
 
 # import after defining usage
@@ -243,9 +430,54 @@ def test_replay_idempotent_same_round(monkeypatch):
     )
     status = replay.replay_topology_for_task(
         9,
-        marker={"round_ts": 300, "channel_config_version": "1", "run_attempt_id": "c"},
+        marker={"round_ts": 300, "channel_config_version": "1"},
     )
     assert status == "skipped"
+
+
+def test_replay_legacy_pending_without_completion_proof_never_deletes(monkeypatch):
+    from apps.cmdb.services import topology_replay_service as replay
+
+    task = mock.Mock(
+        id=10,
+        model_id="network",
+        task_type=CollectPluginTypes.SNMP,
+        params={"has_network_topo": True, "topology_channel_config_version": 1},
+        collect_digest={},
+        format_data={"__raw_data__": [{"__name__": "network_interfaces_info_gauge"}]},
+        team=[1],
+        data_cleanup_strategy="delete",
+    )
+
+    class QS:
+        def first(self):
+            return task
+
+        def values_list(self, *_args, **_kwargs):
+            return mock.Mock(first=lambda: {})
+
+        def update(self, **_kwargs):
+            return 1
+
+    monkeypatch.setattr(replay.CollectModels._default_manager, "filter", lambda *a, **k: QS())
+    observed = {}
+
+    class FakeCannula:
+        def __init__(self, **kwargs):
+            observed.update(kwargs)
+
+        def collect_controller(self):
+            return None
+
+    monkeypatch.setattr(replay, "MetricsCannula", FakeCannula)
+
+    status = replay.replay_topology_for_task(
+        10,
+        marker={"round_ts": 200, "channel_config_version": "1"},
+    )
+
+    assert status == "played"
+    assert observed["plugin_kwargs"]["snapshot_complete"] is False
 
 
 def test_replay_missing_when_task_deleted(monkeypatch):
@@ -267,9 +499,12 @@ def test_gate_triggers_topology_replay_for_network(monkeypatch):
             "id": 31,
             "exec_status": CollectRunStatusType.SUCCESS,
             "collect_digest": {"last_synced_round": 100},
-            "params": {"has_network_topo": True},
+            "params": {"has_network_topo": True, "topology_interval_minutes": 2400},
             "model_id": "network",
             "task_type": CollectPluginTypes.SNMP,
+            "is_interval": True,
+            "cycle_value_type": "cycle",
+            "cycle_value": "480",
         },
     ]
 
@@ -302,8 +537,30 @@ def test_gate_triggers_topology_replay_for_network(monkeypatch):
     _QS._pages = 0
     monkeypatch.setattr(ct.CollectModels._default_manager, "filter", lambda *a, **k: _QS(rows))
     monkeypatch.setattr(ct, "_purge_legacy_vm_sync_beats", lambda: 0)
-    monkeypatch.setattr(ct, "query_latest_round_ts", lambda *_a, **_k: 100)
-    monkeypatch.setattr(ct, "has_instance_vm_data", lambda *_a, **_k: False)
+    observed_lookbacks = []
+
+    def fake_completed_rounds(instance_ids, **kwargs):
+        observed_lookbacks.append((kwargs.get("collection_role"), kwargs["lookback_seconds"]))
+        if kwargs.get("collection_role") == "topology":
+            return {
+                "cmdb_31": CompletedRound(
+                    started_at=200,
+                    completed_at=260.5,
+                    labels={
+                        "channel_config_version": "1",
+                        SNAPSHOT_CONTRACT_LABEL: SNAPSHOT_CONTRACT_VERSION,
+                    },
+                )
+            }
+        return {
+            "cmdb_31": CompletedRound(
+                started_at=100,
+                completed_at=160.5,
+                labels={SNAPSHOT_CONTRACT_LABEL: SNAPSHOT_CONTRACT_VERSION},
+            )
+        }
+
+    monkeypatch.setattr(ct, "query_latest_completed_rounds", fake_completed_rounds)
 
     class _Delay:
         @staticmethod
@@ -313,8 +570,8 @@ def test_gate_triggers_topology_replay_for_network(monkeypatch):
     monkeypatch.setattr(ct, "sync_collect_task", _Delay)
     called = []
 
-    def fake_replay(task_id, params, digest):
-        called.append((task_id, params.get("has_network_topo"), digest.get("last_synced_round")))
+    def fake_replay(task_id, params, digest, *, marker):
+        called.append((task_id, params.get("has_network_topo"), digest.get("last_synced_round"), marker))
         return "played"
 
     monkeypatch.setattr(
@@ -322,6 +579,19 @@ def test_gate_triggers_topology_replay_for_network(monkeypatch):
         fake_replay,
     )
     result = ct.sync_collect_tasks_gate()
-    assert called == [(31, True, 100)]
+    assert called == [
+        (
+            31,
+            True,
+            100,
+            {
+                "round_ts": 200,
+                "round_completed_at": 260.5,
+                "channel_config_version": "1",
+                SNAPSHOT_CONTRACT_LABEL: SNAPSHOT_CONTRACT_VERSION,
+            },
+        )
+    ]
+    assert observed_lookbacks == [("device", 115_620), ("topology", 230_820)]
     assert result["topo_replayed"] == 1
     assert result["skipped"] == 1

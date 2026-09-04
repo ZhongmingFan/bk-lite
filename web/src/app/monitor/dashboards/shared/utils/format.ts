@@ -83,6 +83,22 @@ const formatTimeValue = (value: number, unit: MetricUnit) => {
     }
   }
 
+  // Scale down sub-unit values (e.g. 0.009s → 9ms) so small latencies are not rounded to 0s.
+  const downscaleFactor: Record<number, number> = {
+    1: 1000, // µs → ns
+    2: 1000, // ms → µs
+    3: 1000, // s → ms
+    4: 60, // m → s
+    5: 60, // h → m
+    6: 24, // d → h
+  };
+  while (index > 0 && Math.abs(next) > 0 && Math.abs(next) < 1) {
+    const factor = downscaleFactor[index];
+    if (!factor) break;
+    next *= factor;
+    index -= 1;
+  }
+
   return {
     value: formatScaledValue(next),
     unit: TIME_LABELS[TIME_UNITS[index]]
@@ -98,6 +114,17 @@ const formatCountRate = (value: number): { value: string; unit: string } => {
   return { value: `${scaled.value}${scaled.unit}`, unit: '/s' };
 };
 
+export const formatSamplingRate = (value: number): { value: string; unit: string } => {
+  if (!Number.isFinite(value) || value <= 0) {
+    return { value: '--', unit: '' };
+  }
+  const rounded = Math.round(value);
+  return {
+    value: `1:${rounded.toLocaleString(undefined, { maximumFractionDigits: 0 })}`,
+    unit: '',
+  };
+};
+
 export const formatMetricValue = (value: number, unit: MetricUnit): { value: string; unit: string } => {
   if (!Number.isFinite(value)) {
     return { value: '--', unit: '' };
@@ -106,8 +133,12 @@ export const formatMetricValue = (value: number, unit: MetricUnit): { value: str
   const normalizedUnit = unit === 'Bps' ? 'byteps' : unit;
 
   if (normalizedUnit === 'percent') return { value: value.toFixed(1), unit: '%' };
+  if (normalizedUnit === 'percentunit') {
+    return { value: (value * 100).toFixed(1), unit: '%' };
+  }
   if (normalizedUnit === 'msps') return { value: value >= 100 ? value.toFixed(0) : value.toFixed(1), unit: 'ms/s' };
-  if (normalizedUnit === 'cps') return formatCountRate(value);
+  if (normalizedUnit === 'cps' || normalizedUnit === 'pps') return formatCountRate(value);
+  if (normalizedUnit === 'tpm') return { value: formatScaledValue(value), unit: 'tpm' };
   if (COUNT_UNITS.includes(normalizedUnit)) return formatAutoScaled(value, normalizedUnit, COUNT_UNITS, COUNT_LABELS, 1000);
   if (DATA_BITS_UNITS.includes(normalizedUnit)) return formatAutoScaled(value, normalizedUnit, DATA_BITS_UNITS, DATA_BITS_LABELS, 1000);
   if (DATA_BYTES_UNITS.includes(normalizedUnit)) return formatAutoScaled(value, normalizedUnit, DATA_BYTES_UNITS, DATA_BYTES_LABELS, 1024);

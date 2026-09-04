@@ -1,10 +1,10 @@
 import asyncio
-import errno
 import socket
 import ssl
 
 import pytest
 from core.collection.contracts import PreflightStatus
+from core.collection.enums import FailureStage
 from core.collection.preflight import AsyncProtocolPreflight
 from core.collection.runtime import CollectionRequest
 from core.infra.outbound_policy import OutboundTargetPolicy, OutboundTargetRejected
@@ -35,10 +35,10 @@ async def test_tcp_preflight_uses_protocol_port_and_closes_connection(monkeypatc
         task_id="probe-mysql",
         plugin_ref="mysql.config",
         targets=("10.10.24.10",),
-        params={"port": "3306", "preflight_kind": "tcp"},
+        params={"port": "3306", "preflight_kind": "tcp", "ip_precheck": True},
     )
 
-    result = await AsyncProtocolPreflight(reachability_enabled=True).check("10.10.24.10", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight().check("10.10.24.10", request, timeout_seconds=5)
 
     assert result.status == PreflightStatus.REACHABLE
     assert calls == [("10.10.24.10", 3306, {})]
@@ -68,10 +68,11 @@ async def test_http_preflight_uses_base_url_scheme_and_port(monkeypatch):
         params={
             "base_url": "http://api.example.test:8080/v1",
             "preflight_kind": "https",
+            "ip_precheck": True,
         },
     )
 
-    result = await AsyncProtocolPreflight(policy=Policy(), reachability_enabled=True).check("api.example.test", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight(policy=Policy()).check("api.example.test", request, timeout_seconds=5)
 
     assert result.status == PreflightStatus.REACHABLE
     assert calls == [("api.example.test", 8080, {})]
@@ -96,10 +97,10 @@ async def test_https_preflight_uses_configured_port_for_bare_target(monkeypatch)
         task_id="probe-hci-custom-port",
         plugin_ref="sangforhci.config",
         targets=("192.0.2.17",),
-        params={"port": 8443, "preflight_kind": "https"},
+        params={"port": 8443, "preflight_kind": "https", "ip_precheck": True},
     )
 
-    result = await AsyncProtocolPreflight(policy=Policy(), reachability_enabled=True).check("192.0.2.17", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight(policy=Policy()).check("192.0.2.17", request, timeout_seconds=5)
 
     assert result.status == PreflightStatus.REACHABLE
     assert calls[0] == ("policy", "192.0.2.17", 8443)
@@ -123,7 +124,7 @@ async def test_https_certificate_failure_still_reachable(monkeypatch):
         params={"preflight_kind": "https", "ip_precheck": True},
     )
 
-    result = await AsyncProtocolPreflight(policy=Policy(), reachability_enabled=True).check("api.example.test", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight(policy=Policy()).check("api.example.test", request, timeout_seconds=5)
 
     assert result.status == PreflightStatus.REACHABLE
     assert result.detail == "tls certificate deferred: SSLCertVerificationError"
@@ -225,7 +226,7 @@ async def test_non_dial_preflight_modes_still_enforce_outbound_policy(kind):
     )
     policy = OutboundTargetPolicy(allowed_cidrs=("10.0.0.0/8",))
 
-    result = await AsyncProtocolPreflight(policy=policy, reachability_enabled=False).check("8.8.8.8", request, timeout_seconds=1)
+    result = await AsyncProtocolPreflight(policy=policy).check("8.8.8.8", request, timeout_seconds=1)
 
     assert result.status == PreflightStatus.UNREACHABLE
     assert result.error_code == "outbound_target_rejected"
@@ -270,14 +271,15 @@ async def test_tcp_preflight_returns_stable_unreachable_error(monkeypatch):
         task_id="probe-refused",
         plugin_ref="mysql.config",
         targets=("10.10.24.30",),
-        params={"port": 3306, "preflight_kind": "tcp"},
+        params={"port": 3306, "preflight_kind": "tcp", "ip_precheck": True},
     )
 
-    result = await AsyncProtocolPreflight(reachability_enabled=True).check("10.10.24.30", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight().check("10.10.24.30", request, timeout_seconds=5)
 
     assert result.status == PreflightStatus.UNREACHABLE
     assert result.error_code == "tcp_connection_refused"
     assert result.detail == "ConnectionRefusedError"
+    assert result.failed_stage == FailureStage.IP_PRECHECK
 
 
 @pytest.mark.asyncio
@@ -300,6 +302,7 @@ async def test_outbound_rejected_target_is_logged(monkeypatch):
 
     assert result.status == PreflightStatus.UNREACHABLE
     assert result.error_code == "outbound_target_rejected"
+    assert result.failed_stage == FailureStage.OUTBOUND_POLICY
     assert any("event=outbound_target_skipped" in item for item in logged)
     assert any("target=8.8.8.8" in item for item in logged)
     assert any("task_id=outbound-skip-log" in item for item in logged)
@@ -377,10 +380,11 @@ async def test_remote_preflight_dials_ssh_port_when_reachability_enabled(monkeyp
             "ansible_node_id": "executor-region-a",
             "port": 22,
             "executor_node_ip": "10.0.0.1",
+            "ip_precheck": True,
         },
     )
 
-    result = await AsyncProtocolPreflight(reachability_enabled=True).check("10.10.24.10", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight().check("10.10.24.10", request, timeout_seconds=5)
 
     assert connected == [("10.10.24.10", 22)]
     assert result.status == PreflightStatus.UNREACHABLE
@@ -400,7 +404,7 @@ async def test_tcp_reachability_off_skips_dial_after_cidr(monkeypatch):
         params={"port": 3306, "preflight_kind": "tcp"},
     )
 
-    result = await AsyncProtocolPreflight(reachability_enabled=False).check("10.10.24.10", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight().check("10.10.24.10", request, timeout_seconds=5)
 
     assert result.status == PreflightStatus.UNKNOWN
     assert "tcp reachability disabled" in (result.detail or "")
@@ -416,7 +420,7 @@ async def test_tcp_reachability_off_still_rejects_cidr():
     )
     policy = OutboundTargetPolicy(allowed_cidrs=("10.0.0.0/8",))
 
-    result = await AsyncProtocolPreflight(policy=policy, reachability_enabled=False).check("8.8.8.8", request, timeout_seconds=1)
+    result = await AsyncProtocolPreflight(policy=policy).check("8.8.8.8", request, timeout_seconds=1)
 
     assert result.status == PreflightStatus.UNREACHABLE
     assert result.error_code == "outbound_target_rejected"
@@ -440,24 +444,38 @@ async def test_remote_skips_responder_but_keeps_outbound_policy_when_reachabilit
         },
     )
 
-    result = await AsyncProtocolPreflight(remote_probe=probe, reachability_enabled=False).check("10.10.24.10", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight(remote_probe=probe).check("10.10.24.10", request, timeout_seconds=5)
 
     assert calls == []
     assert result.status == PreflightStatus.UNKNOWN
     assert result.error_code == ""
 
 
-def test_reachability_defaults_off(monkeypatch):
-    monkeypatch.delenv("PREFLIGHT_REACHABILITY", raising=False)
-    from core.collection.preflight import reachability_enabled_from_env
-
-    assert reachability_enabled_from_env() is False
+@pytest.mark.asyncio
+async def test_environment_cannot_override_request_ip_precheck_off(monkeypatch):
     monkeypatch.setenv("PREFLIGHT_REACHABILITY", "on")
-    assert reachability_enabled_from_env() is True
+    calls = []
+
+    async def fake_open_connection(*args, **kwargs):
+        calls.append((args, kwargs))
+        return object(), FakeWriter()
+
+    monkeypatch.setattr("core.collection.preflight.asyncio.open_connection", fake_open_connection)
+    request = CollectionRequest(
+        task_id="request-precheck-off",
+        plugin_ref="mysql.info",
+        targets=("10.10.24.10",),
+        params={"port": 3306, "preflight_kind": "tcp", "ip_precheck": False},
+    )
+
+    result = await AsyncProtocolPreflight().check("10.10.24.10", request, timeout_seconds=5)
+
+    assert result.status == PreflightStatus.UNKNOWN
+    assert calls == []
 
 
 @pytest.mark.asyncio
-async def test_ip_precheck_enables_tcp_dial_when_env_off(monkeypatch):
+async def test_ip_precheck_enables_tcp_dial_for_current_request(monkeypatch):
     connected = []
 
     async def fake_open_connection(host, port, **kwargs):
@@ -479,7 +497,7 @@ async def test_ip_precheck_enables_tcp_dial_when_env_off(monkeypatch):
         targets=("10.10.24.10",),
         params={"port": 3306, "preflight_kind": "tcp", "ip_precheck": True},
     )
-    result = await AsyncProtocolPreflight(reachability_enabled=False).check("10.10.24.10", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight().check("10.10.24.10", request, timeout_seconds=5)
     assert result.status == PreflightStatus.REACHABLE
     assert connected == [("10.10.24.10", 3306)]
 
@@ -496,7 +514,7 @@ async def test_ip_precheck_off_skips_tcp_dial(monkeypatch):
         targets=("10.10.24.10",),
         params={"port": 3306, "preflight_kind": "tcp", "ip_precheck": False},
     )
-    result = await AsyncProtocolPreflight(reachability_enabled=False).check("10.10.24.10", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight().check("10.10.24.10", request, timeout_seconds=5)
     assert result.status == PreflightStatus.UNKNOWN
 
 
@@ -517,7 +535,7 @@ async def test_remote_ip_precheck_skips_when_target_is_executor_node(monkeypatch
             "port": 22,
         },
     )
-    result = await AsyncProtocolPreflight(reachability_enabled=False).check("10.0.0.8", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight().check("10.0.0.8", request, timeout_seconds=5)
     assert result.status == PreflightStatus.REACHABLE
 
 
@@ -549,7 +567,7 @@ async def test_remote_ip_precheck_dials_ssh_port(monkeypatch):
             "port": 22,
         },
     )
-    result = await AsyncProtocolPreflight(reachability_enabled=False).check("10.10.24.20", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight().check("10.10.24.20", request, timeout_seconds=5)
     assert result.status == PreflightStatus.REACHABLE
     assert connected == [("10.10.24.20", 22)]
 
@@ -566,88 +584,50 @@ async def test_snmp_ip_precheck_off_still_skips_udp_probe(monkeypatch):
         targets=("10.10.24.1",),
         params={"preflight_kind": "snmp", "ip_precheck": False, "port": 161},
     )
-    result = await AsyncProtocolPreflight(reachability_enabled=False).check("10.10.24.1", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight().check("10.10.24.1", request, timeout_seconds=5)
     assert result.status == PreflightStatus.UNKNOWN
 
 
 @pytest.mark.asyncio
-async def test_snmp_ip_precheck_timeout_defers_to_credentials(monkeypatch):
-    sent = []
-    loop = asyncio.get_running_loop()
+async def test_snmp_ip_precheck_on_defers_to_credential_probe_without_raw_udp(monkeypatch):
+    async def fail_sendall(*args, **kwargs):
+        raise AssertionError("SNMP target policy must not send a credential-free UDP probe")
 
-    async def fake_sendall(sock, data):
-        sent.append((sock.getpeername(), data))
-
-    async def fake_recv(sock, nbytes):
-        raise TimeoutError()
-
-    monkeypatch.setattr(loop, "sock_sendall", fake_sendall)
-    monkeypatch.setattr(loop, "sock_recv", fake_recv)
+    monkeypatch.setattr(asyncio.get_running_loop(), "sock_sendall", fail_sendall)
     request = CollectionRequest(
-        task_id="snmp-timeout-pass",
+        task_id="snmp-precheck-on",
         plugin_ref="network.config",
         targets=("10.10.24.1",),
         params={"preflight_kind": "snmp", "ip_precheck": True, "port": 161},
     )
-    result = await AsyncProtocolPreflight(reachability_enabled=False).check("10.10.24.1", request, timeout_seconds=1)
+    result = await AsyncProtocolPreflight().check("10.10.24.1", request, timeout_seconds=1)
     assert result.status == PreflightStatus.UNKNOWN
-    assert "deferred to credential-aware probe" in (result.detail or "")
-    assert sent
-
-
-@pytest.mark.asyncio
-async def test_snmp_ip_precheck_port_unreachable_is_hard_fail(monkeypatch):
-    loop = asyncio.get_running_loop()
-
-    async def fake_sendall(sock, data):
-        return None
-
-    async def fake_recv(sock, nbytes):
-        raise ConnectionRefusedError("ICMP port unreachable")
-
-    monkeypatch.setattr(loop, "sock_sendall", fake_sendall)
-    monkeypatch.setattr(loop, "sock_recv", fake_recv)
-    request = CollectionRequest(
-        task_id="snmp-port-unreachable",
-        plugin_ref="network.config",
-        targets=("10.10.24.1",),
-        params={"preflight_kind": "snmp", "ip_precheck": True, "port": 161},
-    )
-    result = await AsyncProtocolPreflight(reachability_enabled=False).check("10.10.24.1", request, timeout_seconds=1)
-    assert result.status == PreflightStatus.UNREACHABLE
-    assert result.error_code == "udp_port_unreachable"
-
-
-@pytest.mark.asyncio
-async def test_snmp_ip_precheck_network_unreachable_is_hard_fail(monkeypatch):
-    class BoomSocket(socket.socket):
-        def connect(self, address):  # noqa: ANN001
-            raise OSError(errno.ENETUNREACH, "Network is unreachable")
-
-    monkeypatch.setattr("core.collection.preflight.socket.socket", BoomSocket)
-    request = CollectionRequest(
-        task_id="snmp-net-unreachable",
-        plugin_ref="network.config",
-        targets=("10.10.24.1",),
-        params={"preflight_kind": "udp", "ip_precheck": True, "port": 161},
-    )
-    result = await AsyncProtocolPreflight(reachability_enabled=False).check("10.10.24.1", request, timeout_seconds=1)
-    assert result.status == PreflightStatus.UNREACHABLE
-    assert result.error_code == "udp_network_unreachable"
+    assert "credential-aware probe" in (result.detail or "")
 
 
 @pytest.mark.asyncio
 async def test_preflight_component_failure_passes(monkeypatch):
+    secret = "preflight-" + "component-secret-sentinel"
+    warning_calls = []
+
     async def boom(*args, **kwargs):
-        raise RuntimeError("probe library crashed")
+        raise RuntimeError("password=" + secret)
 
     monkeypatch.setattr("core.collection.preflight.asyncio.open_connection", boom)
+    monkeypatch.setattr(
+        "core.collection.preflight.logger.warning",
+        lambda message, *args: warning_calls.append((message, args)),
+    )
     request = CollectionRequest(
         task_id="preflight-crash",
         plugin_ref="mysql.info",
         targets=("10.10.24.10",),
         params={"port": 3306, "preflight_kind": "tcp", "ip_precheck": True},
     )
-    result = await AsyncProtocolPreflight(reachability_enabled=False).check("10.10.24.10", request, timeout_seconds=5)
+    result = await AsyncProtocolPreflight().check("10.10.24.10", request, timeout_seconds=5)
     assert result.status == PreflightStatus.UNKNOWN
     assert "preflight component failed" in (result.detail or "")
+    rendered = [template % args for template, args in warning_calls]
+    assert len(rendered) == 1
+    assert "error_type=RuntimeError" in rendered[0]
+    assert secret not in rendered[0]

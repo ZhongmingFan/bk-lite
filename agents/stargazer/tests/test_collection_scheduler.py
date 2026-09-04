@@ -1,7 +1,92 @@
 import asyncio
+import time
 
 import pytest
+from core.collection.metrics import CollectionMetrics
 from core.collection.scheduler import CollectionScheduler
+
+
+@pytest.mark.asyncio
+async def test_scheduler_yields_between_blocking_target_starts():
+    scheduler = CollectionScheduler(max_in_flight=20)
+    release = asyncio.Event()
+    stop_heartbeat = asyncio.Event()
+    heartbeat_gaps = []
+
+    async def handle(item):
+        # 模拟 Collector 在第一次真正 await 前的同步初始化切片。
+        time.sleep(0.01)
+        await release.wait()
+        return item
+
+    async def heartbeat():
+        previous = time.monotonic()
+        while not stop_heartbeat.is_set():
+            await asyncio.sleep(0)
+            current = time.monotonic()
+            heartbeat_gaps.append(current - previous)
+            previous = current
+
+    heartbeat_task = asyncio.create_task(heartbeat())
+    run = asyncio.create_task(scheduler.execute("responsive", range(20), handle))
+    try:
+        deadline = time.monotonic() + 2
+        while scheduler.active < 20 and time.monotonic() < deadline:
+            await asyncio.sleep(0.001)
+
+        assert scheduler.active == 20
+        assert heartbeat_gaps
+        assert max(heartbeat_gaps) < 0.08
+    finally:
+        release.set()
+        await run
+        stop_heartbeat.set()
+        await heartbeat_task
+        await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_exposes_target_wait_and_dispatch_yield_metrics():
+    metrics = CollectionMetrics()
+    scheduler = CollectionScheduler(max_in_flight=1, metrics=metrics)
+
+    async def handler(item):
+        await asyncio.sleep(0.01)
+        return item
+
+    assert await scheduler.execute("metrics-run", (1, 2), handler) == (1, 2)
+    snapshot = metrics.snapshot()
+
+    assert snapshot["scheduler_dispatch_total"] == 2
+    assert snapshot["scheduler_yield_total"] == 2
+    assert snapshot["target_schedule_wait_seconds_p99"] >= 0
+    assert snapshot["target_dispatch_to_started_seconds_p99"] >= 0
+
+    await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_dispatch_quantum_is_fixed_to_one():
+    metrics = CollectionMetrics()
+    scheduler = CollectionScheduler(max_in_flight=4, metrics=metrics)
+    release = asyncio.Event()
+
+    async def handler(item):
+        await release.wait()
+        return item
+
+    run = asyncio.create_task(scheduler.execute("quantum-two", range(4), handler))
+    deadline = time.monotonic() + 1
+    while scheduler.active < 4 and time.monotonic() < deadline:
+        await asyncio.sleep(0)
+
+    assert scheduler.active == 4
+    assert metrics.snapshot()["scheduler_dispatch_total"] == 4
+    assert metrics.snapshot()["scheduler_yield_total"] == 4
+
+    release.set()
+    assert await run == (0, 1, 2, 3)
+    await scheduler.shutdown()
 
 
 @pytest.mark.asyncio
@@ -98,7 +183,9 @@ async def test_three_thousand_targets_remain_bounded_by_one_hundred_fifty_window
         return item
 
     run = asyncio.create_task(scheduler.execute("three-thousand", range(3000), handle))
-    await asyncio.sleep(0.05)
+    deadline = time.monotonic() + 2
+    while scheduler.active < 160 and time.monotonic() < deadline:
+        await asyncio.sleep(0)
 
     assert scheduler.active == 150
     assert scheduler.peak == 150
@@ -147,7 +234,7 @@ async def test_scheduler_reports_waiting_running_and_completed_target_counts():
 
 
 @pytest.mark.asyncio
-async def test_network_topology_never_exceeds_its_hard_cap():
+async def test_network_topology_borrows_all_idle_capacity():
     scheduler = CollectionScheduler(max_in_flight=10, topology_max_in_flight=3)
     release = asyncio.Event()
 
@@ -165,11 +252,98 @@ async def test_network_topology_never_exceeds_its_hard_cap():
     )
     await asyncio.sleep(0.01)
 
-    assert scheduler.active == 3
-    assert scheduler.topology_active == 3
+    assert scheduler.active == 10
+    assert scheduler.topology_active == 10
 
     release.set()
     assert await run == tuple(range(20))
+    await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_three_workloads_hold_weighted_share_while_all_are_waiting():
+    scheduler = CollectionScheduler(
+        max_in_flight=10,
+        workload_weights={
+            "configuration": 6,
+            "monitoring": 2,
+            "network_topology": 2,
+        },
+    )
+    release = asyncio.Event()
+
+    async def handle(item):
+        await release.wait()
+        return item
+
+    runs = (
+        asyncio.create_task(scheduler.execute("configuration", range(20), handle)),
+        asyncio.create_task(scheduler.execute("monitoring", range(20), handle, workload="monitoring")),
+        asyncio.create_task(scheduler.execute("topology", range(20), handle, workload="network_topology")),
+    )
+    await asyncio.sleep(0.01)
+
+    assert scheduler.active == 10
+    assert scheduler.active_by_workload["configuration"] == 6
+    assert scheduler.active_by_workload["monitoring"] == 2
+    assert scheduler.topology_active == 2
+
+    release.set()
+    await asyncio.gather(*runs)
+    await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_general_arrival_stops_new_topology_borrowing_without_preemption():
+    scheduler = CollectionScheduler(max_in_flight=10, topology_max_in_flight=3)
+    topology_releases = [asyncio.Event() for _ in range(20)]
+    general_release = asyncio.Event()
+    started = []
+
+    async def handle(item):
+        started.append(item)
+        if str(item).startswith("t"):
+            await topology_releases[int(str(item)[1:])].wait()
+        else:
+            await general_release.wait()
+        return item
+
+    topology = asyncio.create_task(
+        scheduler.execute(
+            "topology",
+            tuple(f"t{index}" for index in range(20)),
+            handle,
+            workload="network_topology",
+        )
+    )
+    await asyncio.sleep(0.01)
+    assert sum(item.startswith("t") for item in started) == 10
+
+    general = asyncio.create_task(
+        scheduler.execute(
+            "general",
+            tuple(f"g{index}" for index in range(20)),
+            handle,
+        )
+    )
+    await asyncio.sleep(0.01)
+
+    # 已借用的拓扑目标不被抢占。
+    assert scheduler.active == 10
+    assert scheduler.topology_active == 10
+    assert sum(item.startswith("g") for item in started) == 0
+
+    topology_releases[0].set()
+    await asyncio.sleep(0.01)
+
+    # 新类别到达后，借槽方停止新派发，第一个释放槽位归还给新类别。
+    assert sum(item.startswith("t") for item in started) == 10
+    assert sum(item.startswith("g") for item in started) == 1
+
+    for release in topology_releases:
+        release.set()
+    general_release.set()
+    await asyncio.gather(topology, general)
     await scheduler.shutdown()
 
 
@@ -278,4 +452,115 @@ async def test_topology_arrival_does_not_preempt_running_general_targets():
         release.set()
     topology_release.set()
     await asyncio.gather(general, topology)
+    await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_production_workload_weights_reach_100_30_30():
+    scheduler = CollectionScheduler(
+        max_in_flight=160,
+        workload_weights={
+            "configuration": 100,
+            "monitoring": 30,
+            "network_topology": 30,
+        },
+    )
+    release = asyncio.Event()
+
+    async def handle(item):
+        await release.wait()
+        return item
+
+    runs = (
+        asyncio.create_task(scheduler.execute("configuration", range(300), handle)),
+        asyncio.create_task(scheduler.execute("monitoring", range(100), handle, workload="monitoring")),
+        asyncio.create_task(scheduler.execute("topology", range(100), handle, workload="network_topology")),
+    )
+    deadline = time.monotonic() + 2
+    while scheduler.active < 160 and time.monotonic() < deadline:
+        await asyncio.sleep(0)
+
+    assert scheduler.active == 160
+    assert scheduler.active_by_workload["configuration"] == 100
+    assert scheduler.active_by_workload["monitoring"] == 30
+    assert scheduler.active_by_workload["network_topology"] == 30
+
+    release.set()
+    await asyncio.gather(*runs)
+    await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_100_20_20_offer_leaves_real_idle_slots_then_configuration_borrows_them():
+    scheduler = CollectionScheduler(
+        max_in_flight=160,
+        workload_weights={
+            "configuration": 100,
+            "monitoring": 30,
+            "network_topology": 30,
+        },
+    )
+    release = asyncio.Event()
+
+    async def handle(item):
+        await release.wait()
+        return item
+
+    runs = [
+        asyncio.create_task(scheduler.execute("configuration", range(100), handle)),
+        asyncio.create_task(scheduler.execute("monitoring", range(20), handle, workload="monitoring")),
+        asyncio.create_task(scheduler.execute("topology", range(20), handle, workload="network_topology")),
+    ]
+    deadline = time.monotonic() + 2
+    while scheduler.active < 140 and time.monotonic() < deadline:
+        await asyncio.sleep(0)
+    assert scheduler.active == 140
+
+    runs.append(asyncio.create_task(scheduler.execute("configuration-extra", range(20), handle)))
+    deadline = time.monotonic() + 2
+    while scheduler.active < 160 and time.monotonic() < deadline:
+        await asyncio.sleep(0)
+    assert scheduler.active == 160
+    assert scheduler.active_by_workload["configuration"] == 120
+    assert scheduler.active_by_workload["monitoring"] == 20
+    assert scheduler.active_by_workload["network_topology"] == 20
+    assert scheduler.borrowed_by_workload["configuration"] == 20
+    assert scheduler.borrowed_by_workload["monitoring"] == 0
+    assert scheduler.pending_by_workload["configuration"] == 0
+
+    release.set()
+    await asyncio.gather(*runs)
+    await scheduler.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_capacity_group_limit_is_acquired_before_target_task_creation():
+    scheduler = CollectionScheduler(
+        max_in_flight=160,
+        workload_weights={"configuration": 100},
+        capacity_group_limits={"sync_sdk": 16},
+    )
+    release = asyncio.Event()
+
+    async def handle(item):
+        await release.wait()
+        return item
+
+    run = asyncio.create_task(
+        scheduler.execute(
+            "sync-sdk",
+            range(100),
+            handle,
+            capacity_group="sync_sdk",
+        )
+    )
+    deadline = time.monotonic() + 2
+    while scheduler.active < 16 and time.monotonic() < deadline:
+        await asyncio.sleep(0)
+
+    assert scheduler.active == 16
+    assert scheduler.active_by_capacity_group == {"sync_sdk": 16}
+
+    release.set()
+    await run
     await scheduler.shutdown()

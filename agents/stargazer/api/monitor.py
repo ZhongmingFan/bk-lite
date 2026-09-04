@@ -4,6 +4,7 @@ import time
 from typing import Any, Callable
 
 from core.collection.application import get_collection_application
+from core.collection.enums import WorkloadClass
 from core.collection.request_builder import build_collection_request
 from core.collection.request_identity import build_request_task_id_from_request
 from core.logger import logger
@@ -40,19 +41,10 @@ async def authenticate_monitor_request(request):
     mode = os.getenv("STARGAZER_MONITOR_AUTH_MODE", "legacy").strip().lower()
     configured_tokens = _configured_monitor_tokens()
     provided_token = _bearer_token(request)
-    token_matches = bool(provided_token) and any(
-        secrets.compare_digest(provided_token, token)
-        for token in configured_tokens
-    )
+    token_matches = bool(provided_token) and any(secrets.compare_digest(provided_token, token) for token in configured_tokens)
 
     if mode == "legacy":
-        auth_status = (
-            "valid"
-            if token_matches
-            else "invalid"
-            if provided_token and configured_tokens
-            else "missing"
-        )
+        auth_status = "valid" if token_matches else "invalid" if provided_token and configured_tokens else "missing"
         logger.warning(
             "event=monitor_auth_legacy_request auth_status=%s path=%s",
             auth_status,
@@ -96,6 +88,7 @@ async def _submit_monitor_request(request, task_params: dict) -> dict:
         collection_request = build_collection_request(
             task_id=task_id,
             params=task_params,
+            workload_class=WorkloadClass.MONITORING,
         )
     except ValueError as error:
         raise SanicException(str(error), status_code=400) from error
@@ -133,9 +126,7 @@ def _monitor_error_response(
     **extra_labels: Any,
 ):
     current_timestamp = int(time.time() * 1000)
-    labels = _prometheus_labels(
-        monitor_type=monitor_type, error=error, **extra_labels
-    )
+    labels = _prometheus_labels(monitor_type=monitor_type, error=error, **extra_labels)
     error_lines = [
         "# HELP monitor_request_error Monitor request error",
         "# TYPE monitor_request_error gauge",
@@ -187,18 +178,10 @@ def _standard_tags(request, *, defaults: dict[str, str] | None = None) -> dict:
     defaults = defaults or {}
     return {
         "agent_id": request.headers.get("agent_id", defaults.get("agent_id", "")),
-        "instance_id": request.headers.get(
-            "instance_id", defaults.get("instance_id")
-        ),
-        "instance_type": request.headers.get(
-            "instance_type", defaults.get("instance_type")
-        ),
-        "collect_type": request.headers.get(
-            "collect_type", defaults.get("collect_type")
-        ),
-        "config_type": request.headers.get(
-            "config_type", defaults.get("config_type")
-        ),
+        "instance_id": request.headers.get("instance_id", defaults.get("instance_id")),
+        "instance_type": request.headers.get("instance_type", defaults.get("instance_type")),
+        "collect_type": request.headers.get("collect_type", defaults.get("collect_type")),
+        "config_type": request.headers.get("config_type", defaults.get("config_type")),
     }
 
 
@@ -227,13 +210,9 @@ async def _run_monitor_handler(
     except SanicException:
         raise
     except Exception as error:
-        logger.error(
-            "Error queuing %s metrics task: %s", display, error, exc_info=True
-        )
+        logger.error("Error queuing %s metrics task: %s", display, error, exc_info=True)
         labels = error_labels() if error_labels else {}
-        return _monitor_error_response(
-            monitor_type, str(error), status=500, **labels
-        )
+        return _monitor_error_response(monitor_type, str(error), status=500, **labels)
 
 
 @monitor_router.get("/vmware/metrics")
@@ -279,12 +258,8 @@ async def qcloud_metrics(request):
         request,
         monitor_type="qcloud",
         build_params=build_params,
-        accept_labels=lambda params: {
-            "username": _mask_credential(params.get("username") or "")
-        },
-        error_labels=lambda: {
-            "username": _mask_credential(request.headers.get("username") or "")
-        },
+        accept_labels=lambda params: {"username": _mask_credential(params.get("username") or "")},
+        error_labels=lambda: {"username": _mask_credential(request.headers.get("username") or "")},
         log_name="QCloud",
     )
 
@@ -344,9 +319,7 @@ async def windows_wmi_metrics(request):
         )
 
     namespace = request.headers.get("namespace", "root\\cimv2")
-    metrics_modules = request.headers.get(
-        "metrics_modules", "cpu,mem,disk,diskio,net,processes,system"
-    )
+    metrics_modules = request.headers.get("metrics_modules", "cpu,mem,disk,diskio,net,processes,system")
     disk_include_fstypes = request.headers.get("disk_include_fstypes", "")
     disk_exclude_fstypes = request.headers.get(
         "disk_exclude_fstypes",
@@ -402,10 +375,8 @@ async def host_metrics(request):
     private_key_content = request.headers.get("private_key_content", "")
     private_key_passphrase = request.headers.get("private_key_passphrase", "")
     credential_encoding = request.headers.get("credential_encoding", "url")
-    port = request.headers.get("port", "22" if os_type == "linux" else "5986")
-    metrics_modules = request.headers.get(
-        "metrics_modules", "cpu,mem,disk,diskio,net,processes,system"
-    )
+    port = request.headers.get("port", "5986" if str(os_type or "").strip().lower() == "windows" else "22")
+    metrics_modules = request.headers.get("metrics_modules", "cpu,mem,disk,diskio,net,processes,system")
     disk_include_fstypes = request.headers.get("disk_include_fstypes", "")
     disk_exclude_fstypes = request.headers.get(
         "disk_exclude_fstypes",
@@ -485,4 +456,63 @@ async def host_metrics(request):
         accept_labels=lambda params: {"host": params.get("host")},
         error_labels=lambda: {"host": host},
         log_name="Host",
+    )
+
+
+def _aix_os_monitor_params(request, *, config_type: str) -> dict:
+    host = request.headers.get("host")
+    username = request.headers.get("username")
+    password = request.headers.get("password")
+    auth_type = request.headers.get("auth_type", "password")
+    private_key_content = request.headers.get("private_key_content", "")
+    private_key_passphrase = request.headers.get("private_key_passphrase", "")
+    credential_encoding = request.headers.get("credential_encoding", "url")
+    port = request.headers.get("port", "22")
+    ansible_node_id = request.headers.get("ansible_node_id", "")
+    if not host or not username:
+        raise ValueError("missing required headers: host, username")
+    if auth_type == "private_key":
+        if not private_key_content:
+            raise ValueError("missing required headers: private_key_content")
+    elif not password:
+        raise ValueError("missing required headers: host, username, password")
+    if not ansible_node_id:
+        raise ValueError("missing ansible_node_id header")
+    logger.info("event=aix_os_monitor_request host=%s config_type=%s monitor_type=host", host, config_type)
+    return {
+        "monitor_type": "host",
+        "host": host,
+        "os_type": "aix",
+        "username": username,
+        "password": password,
+        "port": port,
+        "ansible_node_id": ansible_node_id,
+        "auth_type": auth_type,
+        "private_key_content": private_key_content,
+        "private_key_passphrase": private_key_passphrase,
+        "credential_encoding": credential_encoding,
+        "tags": _standard_tags(
+            request,
+            defaults={
+                "instance_type": "os",
+                "collect_type": "http",
+                "config_type": config_type,
+            },
+        ),
+    }
+
+
+@monitor_router.get("/host_aix_remote/metrics")
+async def host_aix_remote_metrics(request):
+    try:
+        params = _aix_os_monitor_params(request, config_type="host_aix_remote")
+    except ValueError as error:
+        return _monitor_error_response("host", str(error), status=400, host=request.headers.get("host"))
+    return await _run_monitor_handler(
+        request,
+        monitor_type="host",
+        build_params=lambda _req: params,
+        accept_labels=lambda task_params: {"host": task_params.get("host")},
+        error_labels=lambda: {"host": request.headers.get("host")},
+        log_name="HostAIXRemote",
     )

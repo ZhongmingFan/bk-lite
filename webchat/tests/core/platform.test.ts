@@ -10,6 +10,19 @@ import {
   isPlatformMode,
   lastSessionStorageKey,
   mapPlatformApplications,
+  mergePlatformCurrentApp,
+  PLATFORM_DOCK_CHAT_WIDTH,
+  PLATFORM_HISTORY_RAIL_DOCK,
+  platformDockInsetWidth,
+  shouldShowPlatformLauncher,
+  DEFAULT_FAB_POSITION,
+  FAB_SIZE,
+  clampFabPosition,
+  fabPositionStorageKey,
+  moveFabPosition,
+  readFabPosition,
+  shouldTreatAsFabDrag,
+  writeFabPosition,
   mapPlatformMessages,
   mapPlatformSessions,
   readDockCollapsed,
@@ -19,6 +32,7 @@ import {
   shouldFetchPlatformMessages,
   shouldRefreshPlatformSessions,
   unwrapPlatformPayload,
+  WEBCHAT_APPS_CHANGED_EVENT,
   writeDockCollapsed,
 } from '../../packages/webchat-core/src/platform';
 import { isSilentCustomEvent } from '../../packages/webchat-core/src/aguiHistoryText';
@@ -74,6 +88,27 @@ test('unwraps gateway envelopes and paginated lists', () => {
   );
   assert.deepEqual(asRecordList({ results: [{ id: 1 }] }), [{ id: 1 }]);
   assert.deepEqual(asRecordList({ items: [{ id: 2 }] }), [{ id: 2 }]);
+  assert.deepEqual(asRecordList({ messages: [{ id: 3 }] }), [{ id: 3 }]);
+});
+
+test('session history envelope maps bubbles without turning usage into a message', () => {
+  const unwrapped = unwrapPlatformPayload({
+    result: true,
+    data: {
+      messages: [{ id: 1, conversation_role: 'user', conversation_content: 'hello' }],
+      llm_context_usage: {
+        packet_tokens: 80,
+        input_working_tokens: 6800,
+        window_tokens: 8000,
+        compaction_threshold_tokens: 5100,
+        compacted: false,
+        segments: [],
+      },
+    },
+  });
+  const messages = mapPlatformMessages(asRecordList(unwrapped));
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].content, 'hello');
 });
 
 test('maps published platform skill channels and restores last selection', () => {
@@ -117,6 +152,7 @@ test('maps published platform skill channels and restores last selection', () =>
     channelId: '2',
     skillId: '20',
     skillName: 'cfg-skill',
+    enableConversationHistory: true,
   });
   assert.deepEqual(apps[1], {
     id: '1',
@@ -124,6 +160,7 @@ test('maps published platform skill channels and restores last selection', () =>
     channelId: '1',
     skillId: '10',
     skillName: 'K8s RCA',
+    enableConversationHistory: true,
   });
   assert.equal(apps[2].name, '我来测试的（智能体A）');
   assert.equal(apps[3].name, '我来测试的（智能体B）');
@@ -142,6 +179,57 @@ test('maps published platform skill channels and restores last selection', () =>
     resolvePlatformSelection([apps[0]], sessions, { appId: '1', sessionId: 's-old' }),
     { app: apps[0], sessionId: 's-new' }
   );
+});
+
+test('maps enable_conversation_history only hiding the ring when the skill saved false', () => {
+  const apps = mapPlatformApplications([
+    { id: 1, skill_id: 10, skill_name: 'on' },
+    { id: 2, skill_id: 20, skill_name: 'off', enable_conversation_history: false },
+    { id: 3, skill_id: 30, skill_name: 'explicit-on', enable_conversation_history: true },
+  ]);
+  assert.equal(apps[0].enableConversationHistory, true);
+  assert.equal(apps[1].enableConversationHistory, false);
+  assert.equal(apps[2].enableConversationHistory, true);
+});
+
+test('published-app refetch keeps the current app, or falls back when it was disabled', () => {
+  const remaining = {
+    id: '2',
+    name: '配置检查',
+    channelId: '2',
+    skillId: '20',
+    skillName: 'cfg-skill',
+  };
+  const current = {
+    id: '1',
+    name: 'K8s RCA',
+    channelId: '1',
+    skillId: '10',
+    skillName: 'K8s RCA',
+  };
+  const renamed = { ...current, name: '值班助手（已改名）' };
+  assert.deepEqual(
+    mergePlatformCurrentApp([remaining, renamed], current, {
+      appId: current.id,
+      sessionId: 's-old',
+    }),
+    renamed
+  );
+  assert.deepEqual(
+    mergePlatformCurrentApp([remaining], current, {
+      appId: current.id,
+      sessionId: 's-old',
+    }),
+    remaining
+  );
+  assert.equal(
+    mergePlatformCurrentApp([], current, { appId: current.id, sessionId: 's-old' }),
+    null
+  );
+});
+
+test('host and webchat share the published-app refresh event name', () => {
+  assert.equal(WEBCHAT_APPS_CHANGED_EVENT, 'bk-webchat:apps-changed');
 });
 
 test('draft sessions do not refetch history; clicking the current session does not either', () => {
@@ -298,6 +386,7 @@ test('planned execution CUSTOM events stay out of chat bubbles', () => {
   assert.equal(isSilentCustomEvent('planned_execution_status'), true);
   assert.equal(isSilentCustomEvent('planned_execution_step'), true);
   assert.equal(isSilentCustomEvent('wiki_citations'), true);
+  assert.equal(isSilentCustomEvent('llm_context_usage'), true);
   assert.equal(isSilentCustomEvent('approval_request'), false);
   assert.equal(isSilentCustomEvent('config_analysis_report'), false);
 
@@ -364,4 +453,58 @@ test('dock collapsed helpers default to collapsed when storage is empty', () => 
   writeDockCollapsed(storage, key, false);
   assert.equal(readDockCollapsed(storage, key), false);
   assert.equal(readDockCollapsed({ getItem: () => null }, key), true);
+});
+
+test('hides the launcher when the published app list is empty and the host is not a manager', () => {
+  assert.equal(shouldShowPlatformLauncher({ appCount: 2, canManageAgents: false }), true);
+  assert.equal(shouldShowPlatformLauncher({ appCount: 0, canManageAgents: false }), false);
+  assert.equal(shouldShowPlatformLauncher({ appCount: 0, canManageAgents: true }), true);
+  assert.equal(shouldShowPlatformLauncher({ appCount: 0 }), true);
+});
+
+test('dock inset matches the open pane and drops to zero when collapsed or fullscreen', () => {
+  assert.equal(
+    platformDockInsetWidth({ visible: true }),
+    PLATFORM_DOCK_CHAT_WIDTH,
+  );
+  assert.equal(
+    platformDockInsetWidth({ visible: true, historyOpen: true }),
+    PLATFORM_DOCK_CHAT_WIDTH + PLATFORM_HISTORY_RAIL_DOCK,
+  );
+  assert.equal(platformDockInsetWidth({ visible: false }), 0);
+  assert.equal(platformDockInsetWidth({ visible: true, fullscreen: true }), 0);
+  assert.equal(
+    platformDockInsetWidth({ visible: true, fullscreen: true, historyOpen: true }),
+    0,
+  );
+});
+
+test('fab drag ignores jitter and clamps to the viewport', () => {
+  assert.equal(shouldTreatAsFabDrag(3, 3), false);
+  assert.equal(shouldTreatAsFabDrag(6, 0), true);
+  const viewport = { width: 400, height: 300 };
+  assert.deepEqual(
+    clampFabPosition({ right: -40, bottom: 900 }, viewport),
+    { right: 8, bottom: 300 - FAB_SIZE - 8 },
+  );
+  assert.deepEqual(
+    moveFabPosition({ right: 12, bottom: 16 }, { dx: 20, dy: -30 }, viewport),
+    { right: 8, bottom: 46 },
+  );
+});
+
+test('fab position persists per user and team', () => {
+  const store = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      store.set(key, value);
+    },
+  };
+  const key = fabPositionStorageKey('webchat:platform', 'alice', '7');
+  assert.equal(key, 'webchat:platform:fab:alice:7');
+  assert.equal(readFabPosition(storage, key), null);
+  writeFabPosition(storage, key, { right: 40, bottom: 80 });
+  assert.deepEqual(readFabPosition(storage, key), { right: 40, bottom: 80 });
+  assert.deepEqual(DEFAULT_FAB_POSITION, { right: 12, bottom: 16 });
 });

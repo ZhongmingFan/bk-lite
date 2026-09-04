@@ -1,11 +1,11 @@
 'use client';
 
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import CustomTable from '@/components/custom-table';
 import AlarmAction from './alarmAction';
 import AlertDetail from './alarmDetail';
 import LevelIcon from '@/app/alarm/components/levelIcon';
-import UserAvatar from '@/components/user-avatar';
+import OperatorWithOrgCell from '@/app/alarm/components/operator-with-org-cell';
 import type { ColumnsType } from 'antd/es/table';
 import { Tag, Button } from 'antd';
 import { AlarmTableProps } from '@/app/alarm/types/alarms';
@@ -17,6 +17,14 @@ import { ModalRef } from '@/app/alarm/types/types';
 import { useStateMap } from '@/app/alarm/constants/alarm';
 import { useCommon } from '@/app/alarm/context/common';
 import NotificationStatusTooltip from './notificationStatusTooltip';
+import type { ColumnItem } from '@/types/index';
+import {
+  ALARM_TABLE_ACTION_COLUMN_KEY,
+  getAlarmTableChoosableColumns,
+  readAlarmDisplayFieldKeys,
+  resolveAlarmTableColumns,
+  saveAlarmDisplayFieldKeys,
+} from '@/app/alarm/utils/alarmTableColumns';
 
 const AlarmTable: React.FC<AlarmTableProps> = ({
   dataSource,
@@ -35,6 +43,9 @@ const AlarmTable: React.FC<AlarmTableProps> = ({
   const { levelList, levelMap } = useCommon();
   const STATE_MAP = useStateMap();
   const detailRef = useRef<ModalRef>(null);
+  const [displayFieldKeys, setDisplayFieldKeys] = useState<string[] | null>(
+    () => (typeof window === 'undefined' ? null : readAlarmDisplayFieldKeys(window.localStorage))
+  );
 
   const columns: ColumnsType<AlarmTableDataItem> = [
     {
@@ -72,6 +83,14 @@ const AlarmTable: React.FC<AlarmTableProps> = ({
       width: 180,
       render: (_: any, { last_event_time }: AlarmTableDataItem) =>
         last_event_time ? convertToLocalizedTime(last_event_time) : '--',
+    },
+    {
+      title: t('alarms.closeTime'),
+      dataIndex: 'closed_at',
+      key: 'closed_at',
+      width: 180,
+      render: (_: any, { closed_at }: AlarmTableDataItem) =>
+        closed_at ? convertToLocalizedTime(closed_at) : '--',
     },
     {
       title: t('alarms.alertName'),
@@ -121,11 +140,13 @@ const AlarmTable: React.FC<AlarmTableProps> = ({
       title: t('alarmCommon.operator'),
       dataIndex: 'operator_user',
       key: 'operator_user',
-      width: 200,
+      width: 240,
       shouldCellUpdate: (prev: AlarmTableDataItem, next: AlarmTableDataItem) =>
-        prev?.operator_user !== next?.operator_user,
-      render: (_: any, { operator_user }: AlarmTableDataItem) =>
-        operator_user ? <UserAvatar userName={operator_user} /> : '--',
+        prev?.operator_user !== next?.operator_user ||
+        JSON.stringify(prev?.team) !== JSON.stringify(next?.team),
+      render: (_: any, { operator_user, team }: AlarmTableDataItem) => (
+        <OperatorWithOrgCell operatorUser={operator_user} team={team} />
+      ),
     },
     {
       title: t('alarms.notificationStatus'),
@@ -156,7 +177,7 @@ const AlarmTable: React.FC<AlarmTableProps> = ({
     },
     {
       title: t('alarmCommon.action'),
-      key: 'action',
+      key: ALARM_TABLE_ACTION_COLUMN_KEY,
       fixed: 'right',
       width: readonly ? 110 : 220,
       render: (_: any, record: AlarmTableDataItem) => (
@@ -187,16 +208,32 @@ const AlarmTable: React.FC<AlarmTableProps> = ({
     });
   };
 
+  const choosableFields = getAlarmTableChoosableColumns(columns) as ColumnItem[];
+  const resolvedDisplayFieldKeys =
+    displayFieldKeys ?? choosableFields.map((column) => String(column.key));
+  const currentColumns = resolveAlarmTableColumns(columns, displayFieldKeys);
+
+  const onSelectFields = (fields: string[]) => {
+    setDisplayFieldKeys(fields);
+    saveAlarmDisplayFieldKeys(fields, window.localStorage);
+  };
+
   return (
     <>
       <CustomTable
         scroll={{ y: tableScrollY, x: 'calc(100vw - 320px)' }}
-        columns={columns as ColumnsType<TableDataItem>}
+        columns={currentColumns as ColumnsType<TableDataItem>}
         dataSource={dataSource}
         pagination={pagination}
         loading={loading}
         rowKey="id"
         onChange={onChange}
+        fieldSetting={{
+          showSetting: true,
+          displayFieldKeys: resolvedDisplayFieldKeys,
+          choosableFields,
+        }}
+        onSelectFields={onSelectFields}
         rowSelection={
           readonly
             ? undefined

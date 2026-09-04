@@ -11,27 +11,32 @@ from dataclasses import dataclass
 from core.collection.capacity_observer import CapacityUsageReporter, with_capacity_utilization
 from core.collection.constants import (
     DEFAULT_COLLECTION_REDIS_PREFIX,
+    DEFAULT_CONFIGURATION_MAX_ACTIVE_TARGETS,
     DEFAULT_MAX_ACTIVE_TARGETS,
+    DEFAULT_MONITORING_MAX_ACTIVE_TARGETS,
     DEFAULT_NETWORK_TOPOLOGY_MAX_ACTIVE_TARGETS,
     DEFAULT_TARGET_TASK_WINDOW,
 )
 from core.collection.contracts import TargetExecutorSettings
 from core.collection.credential_policy import CredentialPolicy
+from core.collection.enums import WorkloadClass
 from core.collection.execution_plan import ExecutionPlanResolver, TimeoutDefaults
 from core.collection.executor import TargetActivityTracker, TargetCollectionExecutor
 from core.collection.metrics import CollectionMetrics
 from core.collection.plugins import UnifiedPluginFactory
-from core.collection.preflight import AsyncProtocolPreflight, reachability_enabled_from_env
+from core.collection.preflight import AsyncProtocolPreflight
 from core.collection.redis_state import RedisCredentialStateStore, RedisRunStateStore
 from core.collection.result_publisher import BufferedResultPublisher, NatsResultPublisher
+from core.collection.round_metadata import RedisRoundMetadataStore
 from core.collection.runtime import CollectionRequest, CollectionRuntime, CollectionRuntimeSettings, RunLease, Submission
 from core.collection.scheduler import CollectionScheduler
-from core.collection.yaml_target_policy import apply_yaml_target_policy
+from core.collection.yaml_target_policy import apply_executor_target_policy, apply_yaml_target_policy_async
 from core.infra.event_loop_monitor import EventLoopLagMonitor
-from core.infra.nats_utils import close_shared_nats, nats_metrics_connection_stats
+from core.infra.nats import subscriber_transport_ready
+from core.infra.nats_utils import close_shared_nats, metrics_transport_ready, nats_metrics_connection_stats
 from core.infra.process_resources import ProcessResourceSampler
 from core.infra.redis_client import get_redis_client
-from core.logger import logger
+from core.logger import logger, safe_exception_info, safe_log_value
 
 
 def concurrency_limit_from_env(name: str, default: int) -> int:
@@ -57,10 +62,15 @@ def _open_file_descriptor_count() -> int:
 @dataclass(frozen=True)
 class CollectionApplicationSettings:
     max_active_runs: int = 16
-    # 0 = 不限制；默认见 DEFAULT_*，运行时由 from_env() 读环境变量
     max_active_targets: int = DEFAULT_MAX_ACTIVE_TARGETS
+    configuration_max_active_targets: int = DEFAULT_CONFIGURATION_MAX_ACTIVE_TARGETS
+    monitoring_max_active_targets: int = DEFAULT_MONITORING_MAX_ACTIVE_TARGETS
     network_topology_max_active_targets: int = DEFAULT_NETWORK_TOPOLOGY_MAX_ACTIVE_TARGETS
     target_task_window: int = DEFAULT_TARGET_TASK_WINDOW
+    snmp_max_in_flight: int = 100
+    sync_sdk_max_in_flight: int = 16
+    remote_job_max_in_flight: int = 20
+    default_async_max_in_flight: int = 160
     connect_timeout_seconds: float = 15.0
     probe_timeout_seconds: float = 15.0
     plugin_timeout_seconds: float = 60.0
@@ -73,24 +83,38 @@ class CollectionApplicationSettings:
     run_deadline_seconds: float = 0.0
     max_no_response_attempts: int = 3
     publish_max_attempts: int = 2
-    access_probe_enabled: bool = True
+    publish_worker_count: int = 1
+    metrics_encode_workers: int = 2
+    metrics_jetstream_enabled: bool = True
     capacity_log_interval_seconds: float = 180.0
 
     def __post_init__(self) -> None:
         if self.max_active_runs <= 0:
             raise ValueError("max_active_runs must be greater than zero")
-        if self.max_active_targets < 0:
-            raise ValueError("max_active_targets must be >= 0 (0 means unlimited)")
-        if (
-            isinstance(self.network_topology_max_active_targets, bool)
-            or not isinstance(self.network_topology_max_active_targets, int)
-            or not 1 <= self.network_topology_max_active_targets <= 100
+        if self.max_active_targets <= 0:
+            raise ValueError("MAX_ACTIVE_TARGETS must be greater than zero")
+        workload_limits = (
+            self.configuration_max_active_targets,
+            self.monitoring_max_active_targets,
+            self.network_topology_max_active_targets,
+        )
+        if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in workload_limits):
+            raise ValueError("workload target limits must be positive integers")
+        # 三个值是活跃工作负载之间的软配额权重，不是三把独立信号量。
+        # 它们允许小于全局窗口（例如 100/20/20 + 全局 160），剩余槽位
+        # 由有积压的工作负载借用；也允许测试或临时缩容时按比例归一化。
+        if self.target_task_window <= 0:
+            raise ValueError("TARGET_TASK_WINDOW must be greater than zero")
+        if any(
+            value <= 0
+            for value in (
+                self.snmp_max_in_flight,
+                self.sync_sdk_max_in_flight,
+                self.remote_job_max_in_flight,
+                self.default_async_max_in_flight,
+            )
         ):
-            raise ValueError("NETWORK_TOPOLOGY_MAX_ACTIVE_TARGETS must be an integer between 1 and 100")
-        if self.max_active_targets > 0 and self.network_topology_max_active_targets >= self.max_active_targets:
-            raise ValueError("NETWORK_TOPOLOGY_MAX_ACTIVE_TARGETS must be less than MAX_ACTIVE_TARGETS")
-        if self.target_task_window < 0:
-            raise ValueError("target_task_window must be >= 0 (0 means unlimited)")
+            raise ValueError("capacity group limits must be greater than zero")
         if self.publish_timeout_seconds <= 0:
             raise ValueError("publish_timeout_seconds must be greater than zero")
         if self.publish_queue_timeout_seconds <= 0:
@@ -99,10 +123,17 @@ class CollectionApplicationSettings:
             raise ValueError("publish_total_timeout_seconds must be greater than zero")
         if self.capacity_log_interval_seconds <= 0:
             raise ValueError("capacity_log_interval_seconds must be greater than zero")
+        if self.publish_worker_count <= 0:
+            raise ValueError("publish_worker_count must be greater than zero")
+        if self.metrics_encode_workers <= 0:
+            raise ValueError("METRICS_ENCODE_WORKERS must be greater than zero")
+        if not self.metrics_jetstream_enabled:
+            raise ValueError("metrics JetStream must be enabled; production Core NATS fallback is forbidden")
 
     @classmethod
     def from_env(cls) -> CollectionApplicationSettings:
         max_active_targets = concurrency_limit_from_env("MAX_ACTIVE_TARGETS", DEFAULT_MAX_ACTIVE_TARGETS)
+        jetstream_publish_enabled = str(os.getenv("NATS_METRICS_JETSTREAM_ENABLED", "true")).strip().lower() in {"1", "true", "yes", "on"}
         topology_raw = os.getenv("NETWORK_TOPOLOGY_MAX_ACTIVE_TARGETS")
         if topology_raw is None or not str(topology_raw).strip():
             network_topology_max_active_targets = DEFAULT_NETWORK_TOPOLOGY_MAX_ACTIVE_TARGETS
@@ -114,8 +145,20 @@ class CollectionApplicationSettings:
         return cls(
             max_active_runs=int(os.getenv("MAX_ACTIVE_RUNS", "16")),
             max_active_targets=max_active_targets,
+            configuration_max_active_targets=concurrency_limit_from_env(
+                "CONFIGURATION_MAX_ACTIVE_TARGETS",
+                DEFAULT_CONFIGURATION_MAX_ACTIVE_TARGETS,
+            ),
+            monitoring_max_active_targets=concurrency_limit_from_env(
+                "MONITORING_MAX_ACTIVE_TARGETS",
+                DEFAULT_MONITORING_MAX_ACTIVE_TARGETS,
+            ),
             network_topology_max_active_targets=network_topology_max_active_targets,
             target_task_window=concurrency_limit_from_env("TARGET_TASK_WINDOW", DEFAULT_TARGET_TASK_WINDOW),
+            snmp_max_in_flight=int(os.getenv("SNMP_MAX_IN_FLIGHT", "100")),
+            sync_sdk_max_in_flight=int(os.getenv("SYNC_SDK_MAX_IN_FLIGHT", "16")),
+            remote_job_max_in_flight=int(os.getenv("REMOTE_JOB_MAX_IN_FLIGHT", "20")),
+            default_async_max_in_flight=int(os.getenv("DEFAULT_ASYNC_MAX_IN_FLIGHT", "160")),
             connect_timeout_seconds=float(os.getenv("PREFLIGHT_TIMEOUT", os.getenv("CONNECT_TIMEOUT", "15"))),
             probe_timeout_seconds=float(os.getenv("PROBE_TIMEOUT", os.getenv("CONNECT_TIMEOUT", "15"))),
             plugin_timeout_seconds=float(os.getenv("COLLECTION_TIMEOUT", os.getenv("PLUGIN_TIMEOUT", "60"))),
@@ -128,7 +171,9 @@ class CollectionApplicationSettings:
             run_deadline_seconds=float(os.getenv("RUN_DEADLINE", "0")),
             max_no_response_attempts=int(os.getenv("MAX_NO_RESPONSE_ATTEMPTS", "3")),
             publish_max_attempts=int(os.getenv("PUBLISH_MAX_ATTEMPTS", "2")),
-            access_probe_enabled=reachability_enabled_from_env(),
+            publish_worker_count=int(os.getenv("PUBLISH_WORKERS", "4") if jetstream_publish_enabled else "1"),
+            metrics_encode_workers=int(os.getenv("METRICS_ENCODE_WORKERS", "2")),
+            metrics_jetstream_enabled=jetstream_publish_enabled,
             capacity_log_interval_seconds=float(os.getenv("CAPACITY_LOG_INTERVAL", "180")),
         )
 
@@ -162,18 +207,20 @@ class CollectionApplication:
         self._plugin_factory = plugin_factory
         self._preflight = preflight or AsyncProtocolPreflight()
         if publisher is None:
-            from core.infra.credential_state_cache import CredentialStateCache
-
             publisher = NatsResultPublisher(
-                result_event_sink=CredentialStateCache.append_result_event,
+                round_metadata_store=RedisRoundMetadataStore(redis_client),
                 metrics=self._metrics,
-                event_max_attempts=self.settings.publish_max_attempts,
             )
         publish_capacity = self.settings.target_task_window or self.settings.max_active_targets or DEFAULT_TARGET_TASK_WINDOW
         self._publisher = (
             publisher
             if isinstance(publisher, BufferedResultPublisher)
-            else BufferedResultPublisher(publisher, capacity=publish_capacity, metrics=self._metrics)
+            else BufferedResultPublisher(
+                publisher,
+                capacity=publish_capacity,
+                worker_count=self.settings.publish_worker_count,
+                metrics=self._metrics,
+            )
         )
         self._execution_plan_resolver = execution_plan_resolver or ExecutionPlanResolver(
             defaults=TimeoutDefaults(
@@ -182,20 +229,26 @@ class CollectionApplication:
                 collection_seconds=self.settings.plugin_timeout_seconds,
                 publish_seconds=self.settings.publish_timeout_seconds,
             ),
-            preflight_enabled=self.settings.access_probe_enabled,
+            metrics=self._metrics,
         )
         self._target_activity = TargetActivityTracker()
-        scheduler_limits = tuple(
-            limit
-            for limit in (
-                self.settings.max_active_targets,
-                self.settings.target_task_window,
-            )
-            if limit > 0
+        scheduler_limit = min(
+            self.settings.max_active_targets,
+            self.settings.target_task_window,
         )
         self._scheduler = CollectionScheduler(
-            max_in_flight=min(scheduler_limits) if scheduler_limits else 1_000_000,
-            topology_max_in_flight=self.settings.network_topology_max_active_targets,
+            max_in_flight=scheduler_limit,
+            workload_weights={
+                WorkloadClass.CONFIGURATION: self.settings.configuration_max_active_targets,
+                WorkloadClass.MONITORING: self.settings.monitoring_max_active_targets,
+                WorkloadClass.NETWORK_TOPOLOGY: self.settings.network_topology_max_active_targets,
+            },
+            capacity_group_limits={
+                "snmp": self.settings.snmp_max_in_flight,
+                "sync_sdk": self.settings.sync_sdk_max_in_flight,
+                "remote_job": self.settings.remote_job_max_in_flight,
+                "default": self.settings.default_async_max_in_flight,
+            },
             metrics=self._metrics,
         )
         self._submission_counts: dict[str, int] = {}
@@ -219,7 +272,6 @@ class CollectionApplication:
             publish_total_timeout_seconds=self.settings.publish_total_timeout_seconds,
             max_no_response_attempts=self.settings.max_no_response_attempts,
             publish_max_attempts=self.settings.publish_max_attempts,
-            access_probe_enabled=self.settings.access_probe_enabled,
         )
         self.runtime = CollectionRuntime(
             state_store=RedisRunStateStore(redis_client, key_prefix=prefix),
@@ -262,16 +314,30 @@ class CollectionApplication:
         """返回 MAX_ACTIVE_TARGETS 全局异步槽位及发布背压的即时使用情况。"""
         metric_snapshot = self._metrics.snapshot()
         resource_snapshot = self._resource_sampler.sample()
+        workload_pending = self._scheduler.pending_by_workload
+        workload_borrowed = self._scheduler.borrowed_by_workload
+        group_pending = self._scheduler.pending_by_capacity_group
+        group_limits = self._scheduler.capacity_group_limits
         return with_capacity_utilization(
             {
                 "active_runs": self.active_runs,
                 "target_slots_used": self._scheduler.active,
                 "target_slots_capacity": self._scheduler.capacity,
                 "configured_max_active_targets": self.settings.max_active_targets,
+                "configured_configuration_max_active_targets": self.settings.configuration_max_active_targets,
+                "configured_monitoring_max_active_targets": self.settings.monitoring_max_active_targets,
                 "configured_network_topology_max_active_targets": self.settings.network_topology_max_active_targets,
                 "configured_target_task_window": self.settings.target_task_window,
                 "target_slots_peak": self._scheduler.peak,
                 "network_topology_active_targets": self._scheduler.topology_active,
+                "configuration_active_targets": self._scheduler.active_by_workload[WorkloadClass.CONFIGURATION],
+                "monitoring_active_targets": self._scheduler.active_by_workload[WorkloadClass.MONITORING],
+                **{f"workload_{workload.value}_active": self._scheduler.active_by_workload[workload] for workload in WorkloadClass},
+                **{f"workload_{workload.value}_pending": workload_pending[workload] for workload in WorkloadClass},
+                **{f"workload_{workload.value}_borrowed": workload_borrowed[workload] for workload in WorkloadClass},
+                **{f"capacity_group_{group}_active": active for group, active in self._scheduler.active_by_capacity_group.items()},
+                **{f"capacity_group_{group}_pending": pending for group, pending in group_pending.items()},
+                **{f"capacity_group_{group}_limit": limit for group, limit in group_limits.items()},
                 "active_targets": self._target_activity.active,
                 "pending_targets": self._scheduler.pending,
                 "completed_targets": self._scheduler.completed,
@@ -339,10 +405,22 @@ class CollectionApplication:
         )
 
     async def _execute(self, request: CollectionRequest, lease: RunLease):
-        # 一次 run 用 yaml target_policy 覆盖预检；显式 preflight_kind 仍优先
-        request = apply_yaml_target_policy(request)
         plugin = self._plugin_factory.resolve(request)
-        plan = self._execution_plan_resolver.resolve(request)
+        prepare_plugin = getattr(plugin, "prepare", None)
+        if callable(prepare_plugin):
+            await prepare_plugin(request)
+        prepared_executor_config = getattr(plugin, "prepared_executor_config", None)
+        if prepared_executor_config is None:
+            # 非配置采集插件仍按 YAML 解析策略与执行计划。
+            request = await apply_yaml_target_policy_async(request)
+            plan = self._execution_plan_resolver.resolve(request)
+        else:
+            # Enterprise Collector 加载失败时，策略与计划必须跟随最终 OSS 配置。
+            request = apply_executor_target_policy(request, prepared_executor_config)
+            plan = self._execution_plan_resolver.resolve(
+                request,
+                executor_config=prepared_executor_config,
+            )
         # 有 probe 且未显式关闭时启用廉价 AccessProbe；否则 CredentialAttempt=collect
         access_probe = None
         if callable(getattr(plugin, "probe", None)) and getattr(plugin, "supports_access_probe", True):
@@ -366,11 +444,12 @@ class CollectionApplication:
             if callable(close_plugin):
                 try:
                     await close_plugin()
-                except Exception:  # noqa: BLE001 - 清理失败不覆盖 Run 原始结果
+                except Exception as exc:  # noqa: BLE001 - 清理失败不覆盖 Run 原始结果
                     logger.exception(
-                        "event=collection_plugin_close_failed task_id=%s plugin_ref=%s",
-                        request.task_id,
-                        request.plugin_ref,
+                        "event=collection_plugin_close_failed task_id=%s plugin_ref=%s " "failed_stage=plugin_close error_type=PluginCloseFailure",
+                        safe_log_value(request.task_id),
+                        safe_log_value(request.plugin_ref),
+                        exc_info=safe_exception_info(exc),
                     )
 
     async def stats(self) -> dict:
@@ -393,6 +472,8 @@ class CollectionApplication:
             "publish_queue_capacity": self._publisher.capacity,
             "max_active_runs": self.settings.max_active_runs,
             "max_active_targets": self.settings.max_active_targets,
+            "configuration_max_active_targets": self.settings.configuration_max_active_targets,
+            "monitoring_max_active_targets": self.settings.monitoring_max_active_targets,
             "network_topology_max_active_targets": self.settings.network_topology_max_active_targets,
             "target_task_window": self.settings.target_task_window,
             **capacity,
@@ -406,6 +487,20 @@ class CollectionApplication:
             "redis_pool_exhaustion_total": float(getattr(self._redis, "pool_exhaustion_total", 0) or 0),
             **nats_metrics_connection_stats(),
             **self._metrics.snapshot(),
+        }
+
+    async def readiness(self) -> dict[str, bool]:
+        """关键依赖就绪状态；metrics 检查只使用专用连接。"""
+
+        redis_ready = False
+        try:
+            redis_ready = bool(await self._redis.ping())
+        except Exception:
+            pass
+        return {
+            "redis": redis_ready,
+            "metrics_jetstream": await metrics_transport_ready(),
+            "nats_subscriber": subscriber_transport_ready(),
         }
 
 

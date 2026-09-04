@@ -1,6 +1,6 @@
 """告警源视图集覆盖测试。
 
-对照 specs/capabilities/legacy-prd-告警中心-集成.md：告警源增删改查、对接指引、组织密钥管理、事件统计。
+对照当前集成页面契约：告警源只读查询、对接指引、组织密钥管理、事件统计。
 """
 
 import json
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from rest_framework import status
-from rest_framework.test import APIRequestFactory, force_authenticate
+from rest_framework.test import APIClient, APIRequestFactory, force_authenticate
 
 from apps.alerts.models.alert_source import AlertSource
 from apps.alerts.models.models import Level
@@ -19,6 +19,13 @@ from apps.alerts.views.alert_source import AlertSourceModelViewSet
 @pytest.fixture
 def superuser(authenticated_user):
     authenticated_user.is_superuser = True
+    return authenticated_user
+
+
+@pytest.fixture
+def permission_user(authenticated_user):
+    authenticated_user.is_superuser = False
+    authenticated_user.permission = {}
     return authenticated_user
 
 
@@ -49,13 +56,17 @@ def _make_source(source_id="s1", source_type="restful", **over):
 
 
 # --------------------------------------------------------------------------
-# CRUD
+# read-only interface and permissions
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.django_db
 def test_alert_source_list(superuser):
-    _make_source("s1")
+    _make_source(
+        "s1",
+        config={"url": "/receiver", "auth": {"token": "CONFIG-TOKEN-SENTINEL"}},
+        team_secrets={"1": "TEAM-SECRET-SENTINEL"},
+    )
     _make_source("s2")
     request = _request("get", "/alert_source/", superuser)
     response = AlertSourceModelViewSet.as_view({"get": "list"})(request)
@@ -64,28 +75,227 @@ def test_alert_source_list(superuser):
     data = payload["data"]
     items = data["items"] if isinstance(data, dict) else data
     assert len(items) == 2
+    assert all("config" not in item for item in items)
+    assert "CONFIG-TOKEN-SENTINEL" not in json.dumps(payload)
+    assert "TEAM-SECRET-SENTINEL" not in json.dumps(payload)
 
 
 @pytest.mark.django_db
 def test_alert_source_retrieve(superuser):
-    src = _make_source("s1")
+    src = _make_source(
+        "s1",
+        secret="SOURCE-SECRET-SENTINEL",
+        team_secrets={"1": "TEAM-SECRET-SENTINEL"},
+        config={
+            "url": "/receiver",
+            "method": "POST",
+            "auth": {"password": "CONFIG-PASSWORD-SENTINEL"},
+            "headers": {"SECRET": "SOURCE-SECRET-SENTINEL", "Content-Type": "application/json"},
+            "examples": {"CURL": "curl -H 'SECRET: SOURCE-SECRET-SENTINEL'"},
+        },
+    )
     request = _request("get", f"/alert_source/{src.id}/", superuser)
     response = AlertSourceModelViewSet.as_view({"get": "retrieve"})(request, pk=str(src.id))
     payload = _render(response)
     assert response.status_code == status.HTTP_200_OK
     assert payload["data"]["source_id"] == "s1"
+    assert payload["data"]["config"]["headers"] == {"Content-Type": "application/json"}
+    assert "{{TEAM_SECRET}}" in payload["data"]["config"]["examples"]["CURL"]
+    serialized = json.dumps(payload)
+    assert "SOURCE-SECRET-SENTINEL" not in serialized
+    assert "TEAM-SECRET-SENTINEL" not in serialized
+    assert "CONFIG-PASSWORD-SENTINEL" not in serialized
 
 
 @pytest.mark.django_db
 def test_alert_source_integration_guide(superuser, event_level):
-    # 仅 zabbix adapter 的 get_integration_guide 接受 language 参数；
-    # restful/prometheus adapter 不接受，视图调用会报错（已知问题）。
-    src = _make_source("s1", source_type="zabbix")
+    src = _make_source("s1", source_type="zabbix", secret="SOURCE-SECRET-SENTINEL")
     request = _request("get", f"/alert_source/{src.id}/integration-guide/", superuser)
     response = AlertSourceModelViewSet.as_view({"get": "integration_guide"})(request, pk=str(src.id))
     payload = _render(response)
     assert response.status_code == status.HTTP_200_OK
     assert payload["data"]["source_id"] == "s1"
+    assert payload["data"]["headers"]["SECRET"] == "{{TEAM_SECRET}}"
+    assert "SOURCE-SECRET-SENTINEL" not in json.dumps(payload)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "permission",
+    [
+        "Integration-View",
+        "Alarms-View",
+        "alert_assign-View",
+        "shield_strategy-View",
+        "alert_enrichment-View",
+        "correlation_rules-View",
+        "action_rules-View",
+    ],
+)
+def test_alert_source_options_allow_cross_page_view_without_exposing_config(permission_user, permission):
+    _make_source("s1", config={"auth": {"token": "CONFIG-TOKEN-SENTINEL"}})
+    permission_user.permission = {"alarm": {permission}}
+
+    response = AlertSourceModelViewSet.as_view({"get": "options"})(_request("get", "/alert_source/options/", permission_user))
+    payload = _render(response)
+
+    assert response.status_code == status.HTTP_200_OK
+    data = payload["data"]
+    items = data["items"] if isinstance(data, dict) else data
+    assert items == [{"id": items[0]["id"], "name": "源1", "source_id": "s1", "source_type": "restful"}]
+    assert "CONFIG-TOKEN-SENTINEL" not in json.dumps(payload)
+
+
+@pytest.mark.django_db
+def test_alert_source_options_reject_user_without_calling_page_permission(permission_user):
+    _make_source("s1")
+    response = AlertSourceModelViewSet.as_view({"get": "options"})(_request("get", "/alert_source/options/", permission_user))
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+def test_api_token_permission_context_uses_same_alert_source_matrix(permission_user):
+    src = _make_source("s1")
+    permission_user.permission = {"alarm": {"Alarms-View"}}
+    options_request = _request("get", "/alert_source/options/", permission_user)
+    options_request.api_pass = True
+    detail_request = _request("get", f"/alert_source/{src.id}/", permission_user)
+    detail_request.api_pass = True
+
+    options_response = AlertSourceModelViewSet.as_view({"get": "options"})(options_request)
+    detail_response = AlertSourceModelViewSet.as_view({"get": "retrieve"})(detail_request, pk=str(src.id))
+
+    assert options_response.status_code == status.HTTP_200_OK
+    assert detail_response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+def test_integration_view_only_allows_overview_queries(permission_user, event_level):
+    src = _make_source("s1", source_type="zabbix")
+    permission_user.permission = {"alarm": {"Integration-View"}}
+
+    list_response = AlertSourceModelViewSet.as_view({"get": "list"})(_request("get", "/alert_source/", permission_user))
+    stats_response = AlertSourceModelViewSet.as_view({"get": "daily_event_stats"})(
+        _request("get", "/alert_source/daily_event_stats/", permission_user)
+    )
+    retrieve_response = AlertSourceModelViewSet.as_view({"get": "retrieve"})(
+        _request("get", f"/alert_source/{src.id}/", permission_user),
+        pk=str(src.id),
+    )
+    guide_response = AlertSourceModelViewSet.as_view({"get": "integration_guide"})(
+        _request("get", f"/alert_source/{src.id}/integration-guide/", permission_user),
+        pk=str(src.id),
+    )
+
+    assert list_response.status_code == status.HTTP_200_OK
+    assert stats_response.status_code == status.HTTP_200_OK
+    assert retrieve_response.status_code == status.HTTP_403_FORBIDDEN
+    assert guide_response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+def test_integration_detail_allows_detail_and_guide(permission_user, event_level):
+    src = _make_source("s1", source_type="zabbix")
+    permission_user.permission = {"alarm": {"Integration-Detail"}}
+
+    retrieve_response = AlertSourceModelViewSet.as_view({"get": "retrieve"})(
+        _request("get", f"/alert_source/{src.id}/", permission_user),
+        pk=str(src.id),
+    )
+    guide_response = AlertSourceModelViewSet.as_view({"get": "integration_guide"})(
+        _request("get", f"/alert_source/{src.id}/integration-guide/", permission_user),
+        pk=str(src.id),
+    )
+
+    assert retrieve_response.status_code == status.HTTP_200_OK
+    assert guide_response.status_code == status.HTTP_200_OK
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("method", "action", "path", "kwargs"),
+    [
+        ("get", "list", "/alert_source/", {}),
+        ("get", "retrieve", "/alert_source/{id}/", {"pk": "{id}"}),
+        ("get", "integration_guide", "/alert_source/{id}/integration-guide/", {"pk": "{id}"}),
+        ("get", "daily_event_stats", "/alert_source/daily_event_stats/", {}),
+    ],
+)
+def test_alert_source_queries_reject_user_without_integration_permission(
+    permission_user,
+    event_level,
+    method,
+    action,
+    path,
+    kwargs,
+):
+    src = _make_source("s1", source_type="zabbix")
+    path = path.format(id=src.id)
+    kwargs = {key: value.format(id=src.id) for key, value in kwargs.items()}
+    response = AlertSourceModelViewSet.as_view({method: action})(
+        _request(method, path, permission_user),
+        **kwargs,
+    )
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("method", "action", "path", "data", "kwargs"),
+    [
+        ("get", "k8s_meta", "/alert_source/k8s_meta/", None, {}),
+        ("post", "snmp_trap_nodes", "/alert_source/snmp_trap_nodes/", {"page": 1}, {}),
+        ("post", "k8s_render", "/alert_source/k8s_render/", {}, {}),
+        ("post", "k8s_install_command", "/alert_source/k8s_install_command/", {}, {}),
+        (
+            "post",
+            "k8s_download",
+            "/alert_source/k8s_download/deploy_yaml/",
+            {},
+            {"file_key": "deploy_yaml"},
+        ),
+    ],
+)
+def test_integration_view_cannot_call_detail_guide_actions(
+    permission_user,
+    method,
+    action,
+    path,
+    data,
+    kwargs,
+):
+    permission_user.permission = {"alarm": {"Integration-View"}}
+    response = AlertSourceModelViewSet.as_view({method: action})(
+        _request(method, path, permission_user, data=data),
+        **kwargs,
+    )
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("method", "path", "data"),
+    [
+        ("post", "/alert_source/", {"name": "new", "source_id": "new", "source_type": "restful"}),
+        ("put", "/alert_source/{id}/", {"name": "updated"}),
+        ("patch", "/alert_source/{id}/", {"name": "patched"}),
+        ("delete", "/alert_source/{id}/", None),
+    ],
+)
+def test_alert_source_default_write_methods_are_not_exposed(superuser, method, path, data):
+    src = _make_source("s1")
+    path = f"/api/v1/alerts/api{path.format(id=src.id)}"
+    client = APIClient()
+    client.force_authenticate(user=superuser)
+    request_method = getattr(client, method)
+    response = request_method(path) if data is None else request_method(path, data=data, format="json")
+
+    assert response.status_code == status.HTTP_405_METHOD_NOT_ALLOWED
+    assert not AlertSource.objects.filter(source_id="new").exists()
+    src.refresh_from_db()
+    assert src.name == "源1"
 
 
 # --------------------------------------------------------------------------
@@ -109,6 +319,8 @@ def test_team_secret_add_list_remove(superuser):
     resp_list = AlertSourceModelViewSet.as_view({"get": "list_team_secrets"})(req_list, pk=str(src.id))
     payload_list = _render(resp_list)
     assert len(payload_list["data"]) == 1
+    assert payload_list["data"][0] == {"team_id": "5", "team_name": "", "has_secret": True}
+    assert payload_add["data"]["secret"] not in json.dumps(payload_list)
 
     # remove
     req_rm = _request("post", f"/alert_source/{src.id}/team_secrets/remove/", superuser, data={"team_id": 5})
@@ -119,41 +331,162 @@ def test_team_secret_add_list_remove(superuser):
     assert src.team_secrets == {}
 
 
-class _StubRequest:
-    """承载 .data dict 的最小请求壳，模拟 DRF Request。"""
+@pytest.mark.django_db
+def test_integration_detail_allows_team_secret_operations(permission_user):
+    src = _make_source("s1")
+    permission_user.permission = {"alarm": {"Integration-Detail"}}
 
-    def __init__(self, data):
-        self.data = data
+    add_response = AlertSourceModelViewSet.as_view({"post": "add_team_secret"})(
+        _request("post", f"/alert_source/{src.id}/team_secrets/add/", permission_user, data={"team_id": 1}),
+        pk=str(src.id),
+    )
+    list_response = AlertSourceModelViewSet.as_view({"get": "list_team_secrets"})(
+        _request("get", f"/alert_source/{src.id}/team_secrets/", permission_user),
+        pk=str(src.id),
+    )
+    regenerate_response = AlertSourceModelViewSet.as_view({"post": "regenerate_team_secret"})(
+        _request("post", f"/alert_source/{src.id}/team_secrets/regenerate/", permission_user, data={"team_id": 1}),
+        pk=str(src.id),
+    )
+    remove_response = AlertSourceModelViewSet.as_view({"post": "remove_team_secret"})(
+        _request("post", f"/alert_source/{src.id}/team_secrets/remove/", permission_user, data={"team_id": 1}),
+        pk=str(src.id),
+    )
+
+    assert add_response.status_code == status.HTTP_200_OK
+    assert list_response.status_code == status.HTTP_200_OK
+    assert regenerate_response.status_code == status.HTTP_200_OK
+    assert remove_response.status_code == status.HTTP_200_OK
+    src.refresh_from_db()
+    assert src.team_secrets == {}
 
 
 @pytest.mark.django_db
-def test_resolve_k8s_team_secret_requires_team_secret():
-    """K8s 接入必须显式传 team_secret；未传 → BaseAppException。"""
-    from apps.core.exceptions.base_app_exception import BaseAppException
+def test_team_secret_mutation_locks_source_and_does_not_log_secret(permission_user, mocker, caplog):
+    src = _make_source("s1")
+    permission_user.permission = {"alarm": {"Integration-Detail"}}
+    lock_spy = mocker.spy(AlertSource.objects, "select_for_update")
 
-    src = _make_source("k8s", team_secrets={"5": "team-secret-token"})
-    request = _StubRequest({"server_url": "https://h:8000", "cluster_name": "c"})
-    with pytest.raises(BaseAppException):
-        AlertSourceModelViewSet._resolve_k8s_team_secret(request, src)
+    response = AlertSourceModelViewSet.as_view({"post": "add_team_secret"})(
+        _request(
+            "post",
+            f"/alert_source/{src.id}/team_secrets/add/",
+            permission_user,
+            data={"team_id": 1},
+        ),
+        pk=str(src.id),
+    )
+    payload = _render(response)
+
+    assert response.status_code == status.HTTP_200_OK
+    lock_spy.assert_called_once_with()
+    assert payload["data"]["secret"] not in caplog.text
+    audit_records = [record for record in caplog.records if record.msg.startswith("event=alert_source_team_secret_")]
+    assert len(audit_records) == 1
+    assert audit_records[0].msg == "event=alert_source_team_secret_%s actor=%s source_id=%s team_id=%s"
+    assert audit_records[0].args == ("added", "testuser", "s1", "1")
 
 
 @pytest.mark.django_db
-def test_resolve_k8s_team_secret_rejects_unknown_token():
-    """K8s 接入传了 team_secret 但不在 source.team_secrets 里 → 拒绝。"""
-    from apps.core.exceptions.base_app_exception import BaseAppException
+def test_team_secret_scope_filters_list_and_rejects_foreign_team(permission_user):
+    src = _make_source("s1", team_secrets={"1": "team-secret-1", "5": "team-secret-5"})
+    permission_user.permission = {"alarm": {"Integration-Detail"}}
 
-    src = _make_source("k8s", team_secrets={"5": "team-secret-token"})
-    request = _StubRequest({"team_secret": "forged-token"})
-    with pytest.raises(BaseAppException):
-        AlertSourceModelViewSet._resolve_k8s_team_secret(request, src)
+    list_response = AlertSourceModelViewSet.as_view({"get": "list_team_secrets"})(
+        _request("get", f"/alert_source/{src.id}/team_secrets/", permission_user),
+        pk=str(src.id),
+    )
+    reveal_response = AlertSourceModelViewSet.as_view({"post": "reveal_team_secret"})(
+        _request(
+            "post",
+            f"/alert_source/{src.id}/team_secrets/reveal/",
+            permission_user,
+            data={"team_id": 1},
+        ),
+        pk=str(src.id),
+    )
+    foreign_response = AlertSourceModelViewSet.as_view({"post": "regenerate_team_secret"})(
+        _request(
+            "post",
+            f"/alert_source/{src.id}/team_secrets/regenerate/",
+            permission_user,
+            data={"team_id": 5},
+        ),
+        pk=str(src.id),
+    )
+
+    list_payload = _render(list_response)
+    reveal_payload = _render(reveal_response)
+    assert list_payload["data"] == [{"team_id": "1", "team_name": "Default Team", "has_secret": True}]
+    assert "team-secret-1" not in json.dumps(list_payload)
+    assert "team-secret-5" not in json.dumps(list_payload)
+    assert reveal_payload["data"] == {"team_id": "1", "secret": "team-secret-1"}
+    assert foreign_response.status_code == status.HTTP_403_FORBIDDEN
+    src.refresh_from_db()
+    assert src.team_secrets == {"1": "team-secret-1", "5": "team-secret-5"}
 
 
 @pytest.mark.django_db
-def test_resolve_k8s_team_secret_accepts_valid_token():
-    """K8s 接入传入合法 team_secret → 返回该 secret。"""
-    src = _make_source("k8s", team_secrets={"5": "team-secret-token"})
-    request = _StubRequest({"team_secret": "team-secret-token"})
-    assert AlertSourceModelViewSet._resolve_k8s_team_secret(request, src) == "team-secret-token"
+def test_integration_material_only_contains_authorized_team_secret(permission_user, event_level):
+    src = _make_source(
+        "s1",
+        source_type="zabbix",
+        secret="SOURCE-SECRET-SENTINEL",
+        team_secrets={"1": "team-secret-1", "5": "team-secret-5"},
+    )
+    permission_user.permission = {"alarm": {"Integration-Detail"}}
+
+    response = AlertSourceModelViewSet.as_view({"post": "integration_material"})(
+        _request(
+            "post",
+            f"/alert_source/{src.id}/integration-material/",
+            permission_user,
+            data={"team_id": 1},
+        ),
+        pk=str(src.id),
+    )
+    payload = _render(response)
+
+    assert response.status_code == status.HTTP_200_OK
+    assert payload["data"]["headers"]["SECRET"] == "team-secret-1"
+    serialized = json.dumps(payload)
+    assert "SOURCE-SECRET-SENTINEL" not in serialized
+    assert "team-secret-5" not in serialized
+
+
+@pytest.mark.django_db
+def test_snmp_integration_material_uses_source_secret_only_for_default_team(permission_user, event_level):
+    src = _make_source("snmp_trap", secret="SNMP-SOURCE-SECRET-SENTINEL")
+    permission_user.permission = {"alarm": {"Integration-Detail"}}
+
+    response = AlertSourceModelViewSet.as_view({"post": "integration_material"})(
+        _request(
+            "post",
+            f"/alert_source/{src.id}/integration-material/",
+            permission_user,
+            data={"team_id": 1},
+        ),
+        pk=str(src.id),
+    )
+    payload = _render(response)
+
+    assert response.status_code == status.HTTP_200_OK
+    assert payload["data"]["headers"]["SECRET"] == "SNMP-SOURCE-SECRET-SENTINEL"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("permission", ["Integration-View", "Integration-Edit"])
+def test_team_secret_operations_reject_non_detail_permissions(permission_user, permission):
+    src = _make_source("s1")
+    permission_user.permission = {"alarm": {permission}}
+    response = AlertSourceModelViewSet.as_view({"post": "add_team_secret"})(
+        _request("post", f"/alert_source/{src.id}/team_secrets/add/", permission_user, data={"team_id": 5}),
+        pk=str(src.id),
+    )
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    src.refresh_from_db()
+    assert src.team_secrets == {}
 
 
 def test_k8s_deploy_yaml_skips_tls_only_when_flag_set():
@@ -373,40 +706,7 @@ def test_team_secret_remove_missing(superuser):
 
 
 @pytest.mark.django_db
-def test_alert_source_create(superuser):
-    data = {"name": "新源", "source_id": "new-src", "source_type": "restful"}
-    request = _request("post", "/alert_source/", superuser, data=data)
-    response = AlertSourceModelViewSet.as_view({"post": "create"})(request)
-    _render(response)
-    assert response.status_code == status.HTTP_201_CREATED
-    src = AlertSource.objects.get(source_id="new-src")
-    # 序列化器 validate 会基于 source_type 构建默认 config
-    assert isinstance(src.config, dict)
-
-
-@pytest.mark.django_db
-def test_alert_source_update(superuser):
-    src = _make_source("s1")
-    data = {"name": "改名", "source_id": "s1", "source_type": "restful"}
-    request = _request("put", f"/alert_source/{src.id}/", superuser, data=data)
-    response = AlertSourceModelViewSet.as_view({"put": "update"})(request, pk=str(src.id))
-    _render(response)
-    assert response.status_code == status.HTTP_200_OK
-    src.refresh_from_db()
-    assert src.name == "改名"
-
-
-@pytest.mark.django_db
-def test_alert_source_destroy(superuser):
-    src = _make_source("s1")
-    request = _request("delete", f"/alert_source/{src.id}/", superuser)
-    response = AlertSourceModelViewSet.as_view({"delete": "destroy"})(request, pk=str(src.id))
-    _render(response)
-    assert response.status_code == status.HTTP_200_OK
-
-
-@pytest.mark.django_db
-def test_snmp_trap_nodes(superuser, monkeypatch):
+def test_snmp_trap_nodes(permission_user, monkeypatch):
     from apps.alerts.views import alert_source as as_mod
 
     class FakeNodeMgmt:
@@ -414,7 +714,8 @@ def test_snmp_trap_nodes(superuser, monkeypatch):
             return {"count": 1, "nodes": [{"id": "n1"}]}
 
     monkeypatch.setattr(as_mod, "NodeMgmt", FakeNodeMgmt)
-    request = _request("post", "/alert_source/snmp_trap_nodes/", superuser, data={"page": 1})
+    permission_user.permission = {"alarm": {"Integration-Detail"}}
+    request = _request("post", "/alert_source/snmp_trap_nodes/", permission_user, data={"page": 1})
     request.COOKIES["current_team"] = "1"
     response = AlertSourceModelViewSet.as_view({"post": "snmp_trap_nodes"})(request)
     payload = _render(response)
@@ -423,14 +724,17 @@ def test_snmp_trap_nodes(superuser, monkeypatch):
 
 
 @pytest.mark.django_db
-def test_k8s_install_command(superuser):
-    # K8s 接入强制走组织密钥路径：source 需配 team_secrets，请求需带合法 team_secret。
+def test_k8s_install_command(permission_user):
+    # K8s 接入只接收组织 ID，由服务端在授权后解析组织密钥。
     _make_source(
-        "k8s", source_type="webhook", config={"url": "/recv"},
+        "k8s",
+        source_type="webhook",
+        config={"url": "/recv"},
         team_secrets={"1": "team-sec-1"},
     )
-    data = {"server_url": "https://host:8000", "cluster_name": "prod", "team_secret": "team-sec-1"}
-    request = _request("post", "/alert_source/k8s_install_command/", superuser, data=data)
+    permission_user.permission = {"alarm": {"Integration-Detail"}}
+    data = {"server_url": "https://host:8000", "cluster_name": "prod", "team_id": 1}
+    request = _request("post", "/alert_source/k8s_install_command/", permission_user, data=data)
     response = AlertSourceModelViewSet.as_view({"post": "k8s_install_command"})(request)
     payload = _render(response)
     assert response.status_code == status.HTTP_200_OK
@@ -439,32 +743,53 @@ def test_k8s_install_command(superuser):
 
 
 @pytest.mark.django_db
-def test_k8s_install_command_requires_team_secret(superuser):
-    """K8s 接入强制要求 team_secret(组织密钥),缺失应被拒。"""
-    from apps.core.exceptions.base_app_exception import BaseAppException
-
+def test_k8s_install_command_requires_team_id(permission_user):
     _make_source(
-        "k8s", source_type="webhook", config={"url": "/recv"},
+        "k8s",
+        source_type="webhook",
+        config={"url": "/recv"},
         team_secrets={"1": "team-sec-1"},
     )
-    data = {"server_url": "https://host:8000", "cluster_name": "prod"}  # 故意不传 team_secret
-    request = _request("post", "/alert_source/k8s_install_command/", superuser, data=data)
-    with pytest.raises(BaseAppException):
-        AlertSourceModelViewSet.as_view({"post": "k8s_install_command"})(request)
+    permission_user.permission = {"alarm": {"Integration-Detail"}}
+    data = {"server_url": "https://host:8000", "cluster_name": "prod"}
+    request = _request("post", "/alert_source/k8s_install_command/", permission_user, data=data)
+    response = AlertSourceModelViewSet.as_view({"post": "k8s_install_command"})(request)
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
 
 
 @pytest.mark.django_db
-def test_k8s_meta_not_found(superuser):
-    request = _request("get", "/alert_source/k8s_meta/", superuser)
+def test_k8s_install_command_rejects_foreign_team(permission_user):
+    _make_source(
+        "k8s",
+        source_type="webhook",
+        config={"url": "/recv"},
+        team_secrets={"5": "team-sec-5"},
+    )
+    permission_user.permission = {"alarm": {"Integration-Detail"}}
+    request = _request(
+        "post",
+        "/alert_source/k8s_install_command/",
+        permission_user,
+        data={"server_url": "https://host:8000", "cluster_name": "prod", "team_id": 5},
+    )
+    response = AlertSourceModelViewSet.as_view({"post": "k8s_install_command"})(request)
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.django_db
+def test_k8s_meta_not_found(permission_user):
+    permission_user.permission = {"alarm": {"Integration-Detail"}}
+    request = _request("get", "/alert_source/k8s_meta/", permission_user)
     response = AlertSourceModelViewSet.as_view({"get": "k8s_meta"})(request)
     _render(response)
     assert response.status_code == status.HTTP_404_NOT_FOUND
 
 
 @pytest.mark.django_db
-def test_k8s_meta_found(superuser):
+def test_k8s_meta_found(permission_user):
     _make_source("k8s", source_type="webhook", config={"url": "/recv", "method": "POST"})
-    request = _request("get", "/alert_source/k8s_meta/", superuser)
+    permission_user.permission = {"alarm": {"Integration-Detail"}}
+    request = _request("get", "/alert_source/k8s_meta/", permission_user)
     response = AlertSourceModelViewSet.as_view({"get": "k8s_meta"})(request)
     payload = _render(response)
     assert response.status_code == status.HTTP_200_OK
@@ -494,9 +819,10 @@ def test_daily_event_stats_user_timezone_day_boundary(superuser):
     UTC+8 用户在本地 7-25 00:35 查询时，该事件应计入"今日"（7-25），
     而非按 UTC 日界计入"昨日"（7-24）。
     """
-    from django.utils import timezone as dj_timezone
     import zoneinfo
     from unittest.mock import patch
+
+    from django.utils import timezone as dj_timezone
 
     from apps.alerts.models.models import Event
 
@@ -520,6 +846,4 @@ def test_daily_event_stats_user_timezone_day_boundary(superuser):
 
     assert response.status_code == status.HTTP_200_OK
     # 按用户时区日界，UTC 7-24 16:30 属于 Asia/Shanghai 7-25（今日），today_count >= 1
-    assert payload["data"]["today_count"] >= 1, (
-        f"按用户时区日界，事件应计入今日，实际 today_count={payload['data']['today_count']}"
-    )
+    assert payload["data"]["today_count"] >= 1, f"按用户时区日界，事件应计入今日，实际 today_count={payload['data']['today_count']}"

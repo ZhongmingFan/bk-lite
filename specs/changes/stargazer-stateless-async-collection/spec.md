@@ -2,15 +2,29 @@
 
 Status: approved for implementation (COMPLETE-PLAN-2026-08-06.md); code converging from superseding digest/fencing/AccessProbe workspace
 
+2026-08-28 结果发布方案 B 补充锁定：结果消息使用 JetStream 异步 `PubAck`、稳定
+`Nats-Msg-Id`、消息数/字节数双窗口和结果间公平轮转，实施、灰度、回滚与 5000 设备/深信服
+压测口径以同目录 `jetstream-async-publish-window-plan-2026-08-28.md` 为准。该文档在
+`NATS_METRICS_JETSTREAM_ENABLED=true` 时替代 2026-08-17 文档中的 Core NATS 单 writer 发布路径；
+关闭开关时旧路径只作为灰度回退保留。
+生产部署和回滚操作以同目录
+`jetstream-production-deployment-guide-2026-08-28.md` 为准。
+2026-08-28 实施范围进一步锁定：本阶段只保证 Stargazer 到 JetStream 的生产端 PubAck，不修改
+Telegraf ACK 语义、不新增 Metric Ingester，也不得把 PubAck 表述为 VictoriaMetrics 同步完成。
+
 2026-08-14 补充锁定：以同目录
-`collection-failure-remediation-plan-2026-08-14.md` 为准。关闭
-`PREFLIGHT_REACHABILITY` 时跳过全部采集前探测但保留出站安全检查；全局容量默认
+`collection-failure-remediation-plan-2026-08-14.md` 为准。请求未开启 `params.ip_precheck` 时跳过
+全部采集前探测但保留出站安全检查；全局容量默认
 `MAX_ACTIVE_RUNS=16`、`MAX_ACTIVE_TARGETS=250`、`TARGET_TASK_WINDOW=250`；单目标发布失败不得取消
 同 Run 其他目标，Run 汇总为 `completed_with_errors`。
 
 2026-08-20 容量补充锁定：单 Pod 默认目标并发与任务窗口由 `150/150` 提升为 `250/250`；
 `collection_capacity` 同步记录进程 CPU/RSS/线程/FD 与 cgroup CPU、内存、throttling，供压测后
 判断是否继续扩容。下文保留的 `150` 仅为既有验证示例，不代表当前默认值。
+
+2026-08-26 workload 容量补充锁定：网络拓扑基础配额默认 50；普通目标既未运行也未排队时，
+拓扑可借用普通容量的一半，默认动态上限为 150。普通目标到达后停止新增借槽但不抢占在途目标，
+单 Pod 总目标并发仍受 `MAX_ACTIVE_TARGETS` 与 `TARGET_TASK_WINDOW` 的较小非零值约束。
 
 2026-08-17 结果发布补充锁定：发布状态、成功/失败结果微批、超时拆分、NATS 重连与
 Redis 结果事件隔离以同目录 `nats-result-publishing-final-plan-2026-08-17.md` 为准；该文档替代
@@ -447,12 +461,13 @@ Stargazer 与 CMDB 凭据命中事件字段对齐，以及 CMDB「查询 VM → 
 | --- | --- |
 | `MAX_ACTIVE_RUNS` | 单 Pod 同时运行的 `CollectionRun` 数量 |
 | `MAX_ACTIVE_TARGETS` | 单 Pod 同时活跃的 `TargetCollection` 数量 |
+| `NETWORK_TOPOLOGY_MAX_ACTIVE_TARGETS` | 网络拓扑 workload 的基础目标配额；普通采集完全空闲时可动态借槽 |
 | `TARGET_TASK_WINDOW` | 已创建但未完成的目标协程上限，并复用为有界发布队列容量 |
 | `MAX_TARGETS_PER_RUN` | 单个请求允许的目标数量上限 |
 | `MAX_CREDENTIALS_PER_RUN` | 单个请求允许的候选凭据数量上限 |
 | `PREFLIGHT_TIMEOUT` | 协议预检超时，默认 15 秒；兼容期回退 `CONNECT_TIMEOUT` |
 | `PROBE_TIMEOUT` | 插件 AccessProbe 超时，默认 15 秒；兼容期回退 `CONNECT_TIMEOUT` |
-| `COLLECTION_TIMEOUT` | 正式采集缺省 60 秒；插件 YAML executor `timeout` 优先，兼容期回退 `PLUGIN_TIMEOUT` |
+| `COLLECTION_TIMEOUT` | 任务表单未提供有效 `timeout` 时的正式采集缺省值，默认 60 秒；兼容期回退 `PLUGIN_TIMEOUT`，SNMP 最小有效预算 30 秒 |
 | `PUBLISH_TIMEOUT` | 单目标发布阶段端到端超时，默认 30 秒 |
 | `RUN_DEADLINE` | 整个采集运行的可选截止时间 |
 
@@ -460,6 +475,12 @@ Stargazer 与 CMDB 凭据命中事件字段对齐，以及 CMDB「查询 VM → 
 统一控制；无调度器的兼容执行路径才使用本地 Semaphore/worker budget。结果进入容量为
 `TARGET_TASK_WINDOW` 的发布队列后释放目标调度槽位，Run 通过发布回执等待最终状态。队列满时
 入队等待形成有界背压，不能把内存中的大量等待协程当成免费队列。
+
+网络拓扑和普通采集不拆成两套执行器或两个固定池。调度器只在普通目标既未运行也未排队时，
+把拓扑上限从基础配额临时提高到
+`基础配额 + floor((全局目标容量 - 基础配额) / 2)`；普通目标一旦出现，停止派发超出基础配额的
+新拓扑目标，但不取消或抢占已开始的目标。两个全局目标边界都显式关闭时不基于内部哨兵容量借槽，
+拓扑维持基础配额。
 
 验证示例：255 个 IP、5 个凭据、`MAX_ACTIVE_TARGETS=150`、预检超时 5 秒。
 
@@ -557,7 +578,8 @@ HTTP 分片；本变更不提前实现。
 `target_id`/目标哈希、`plugin_ref`、`credential_id` 和稳定错误码，严禁输出凭据
 明文或认证请求头。
 
-生产 INFO 日志保留 Run 开始、聚合结果和终态；每个失败目标必须输出可检索的
+生产 INFO 日志保留 Run 开始、聚合结果和终态；存在失败时每个 Run 只输出一条可检索的
+`collection_failure_samples`，最多包含 3 个 `target|failed_stage|error_code` 样本，不输出逐目标
 `target_collection_failed`。插件加载步骤、预检跳过和发布成功降为 DEBUG。日志统一写 stdout，
 由日志平台按结构化字段建立视图，不再创建 SNMP 专用日志文件；NATS、Redis、租约、发布不确定等
 基础设施异常继续保留 WARNING/ERROR。
@@ -566,9 +588,9 @@ HTTP 分片；本变更不提前实现。
 源码行；禁止记录运行时局部变量、请求头或凭据字段。
 Run 开始、进度、汇总和终态日志必须携带 `instance_id`。生产 INFO 以约 10% 完成度输出有界
 `collection_progress`；SNMP 正式采集仅由插件输出 `snmp_facts_collection_started`，执行器不得重复输出
-通用目标开始日志。协议探测无响应使用
-`target_collection_failed stage=access_probe reason=timeout` 为每个失败目标提供终态日志，并在 Run 汇总保留
-`protocol_no_response` 计数，不得降级为含混的 `credentials_exhausted`。发布失败逐 Run 最多输出
+通用目标开始日志。协议探测无响应在有界样本中使用
+`access_probe|protocol_no_response`，并在 Run 汇总保留 `protocol_no_response` 计数，不得降级为含混的
+`credentials_exhausted`。失败类型只保留 Top 8，其余合并为 `other`。发布失败逐 Run 最多输出
 3 条 `result_publish_failed`，完整计数与样本在 Run 汇总聚合；成功发布不输出逐目标终态日志。
 `collection_capacity` 保留稳定英文 `event`，正文使用中文分区、单位、状态和阈值提示；底层不可用的
 资源采样显示为“不可用”，机器指标继续由健康接口和 Prometheus 字段提供。
@@ -611,8 +633,8 @@ Run 开始、进度、汇总和终态日志必须携带 `instance_id`。生产 I
 - 云：对 API Endpoint 做 TCP/TLS（非 ICMP）；不通则不进凭据；
 - ICMP 不得作为硬过滤；
 - 出站策略拒绝 → 稳定错误码，不进凭据。
-- **IP 预检锁定修订（2026-08-24）**：默认不做采集前拨测（`PREFLIGHT_REACHABILITY`
-  默认 off）。任务显式开启 `params.ip_precheck`（或环境变量开启）时，按协议做无凭据
+- **IP 预检锁定修订（2026-08-26）**：移除全局 `PREFLIGHT_REACHABILITY` 开关。任务仅在
+  `params.ip_precheck` 显式开启时，按协议做无凭据
   连接性探测作为准入：TCP/TLS 直连类拨协议端口；SSH/job 拨目标 SSH 端口（目标 IP 与
   执行节点管理 IP 一致时跳过）；SNMP/UDP 等未确认类型本期放行；云账号等逻辑目标忽略
   开关。预检组件自身故障时放行目标并记告警，不得阻断采集。

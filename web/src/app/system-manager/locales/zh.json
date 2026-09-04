@@ -148,7 +148,9 @@
         "unlock": "解锁",
         "unlockConfirm": "确定要解锁该用户吗？",
         "enableConfirm": "确定要启用该用户吗？",
-        "disableConfirm": "确定要禁用该用户吗？"
+        "disableConfirm": "确定要禁用该用户吗？",
+        "unbindOtp": "解绑 OTP",
+        "unbindOtpConfirm": "确定要解绑该用户的 OTP 吗？"
       },
       "table": {
         "status": "状态",
@@ -368,6 +370,7 @@
           "phaseCompletedAt": "完成于 {{time}}",
           "phaseFailedAt": "失败于 {{time}}",
           "processed": "已处理 {{current}} / {{total}}",
+          "conflictUsers": "冲突用户：{{usernames}}",
           "syncedUsers": "用户 {{count}}",
           "syncedGroups": "组织 {{count}}",
           "empty": "暂无同步进度"
@@ -387,15 +390,22 @@
           "skipped": "已跳过"
         },
         "phaseCounter": {
+          "ledger": "{{total}}：{{parts}}",
+          "syncUsersTotal": "共 {{n}} 名用户",
           "syncUsersNew": "已新建 {{n}} 名用户",
           "syncUsersUpdated": "已更新 {{n}} 名用户",
+          "syncUsersUnchanged": "无变化 {{n}} 名用户",
           "syncUsersConflict": "发现 {{n}} 名冲突用户",
+          "syncUsersSkipped": "跳过无效 {{n}} 名用户",
           "reconcileDisabled": "禁用 {{n}}",
           "reconcileDeletedUsers": "删除 {{n}} 名用户",
           "reconcileDeleted": "删除 {{n}} 组",
           "syncGroupsSynced": "已同步 {{n}} 个组织",
+          "syncGroupsTotal": "共 {{n}} 个组织",
           "syncGroupsCreated": "已新建 {{n}} 个组织",
-          "syncGroupsUpdated": "已更新 {{n}} 个组织"
+          "syncGroupsUpdated": "已更新 {{n}} 个组织",
+          "syncGroupsUnchanged": "无变化 {{n}} 个组织",
+          "syncGroupsSkipped": "跳过无效 {{n}} 个组织"
         },
         "phaseResult": {
           "fetchDirectory": "已获取 {{users}} 名用户 · {{groups}} 个组织",
@@ -423,10 +433,18 @@
         },
         "runSummary": {
           "success": "同步成功：{{external}}；已同步 {{users}} 个用户、{{groups}} 个组织",
+          "successWithLedger": "同步成功：{{external}}；{{users}}；{{groups}}",
           "partial": "部分成功：{{external}}；已同步 {{users}} 个用户、{{groups}} 个组织，{{conflicts}} 个冲突",
           "partialWithUsers": "部分成功：{{external}}；已同步 {{users}} 个用户、{{groups}} 个组织，{{conflicts}} 个冲突（冲突用户：{{usernames}}）",
+          "partialWithLedger": "部分成功：{{external}}；{{users}}；{{groups}}",
+          "partialWithLedgerAndUsers": "部分成功：{{external}}；{{users}}；{{groups}}（冲突用户：{{usernames}}）",
           "failed": "同步失败：{{external}}；{{reason}}",
           "failedConflict": "同步失败：{{external}}；已同步 {{users}} 个用户、{{groups}} 个组织，{{conflicts}} 个冲突用户（冲突用户：{{usernames}}）",
+          "failedWithLedger": "同步失败：{{external}}；{{users}}；{{groups}}",
+          "failedWithLedgerAndUsers": "同步失败：{{external}}；{{users}}；{{groups}}（冲突用户：{{usernames}}）",
+          "withReason": "{{summary}}；{{reason}}",
+          "userLedger": "用户：{{parts}}",
+          "groupLedger": "组织：{{parts}}",
           "externalCounts": "外部用户共 {{users}} 人，外部组织共 {{groups}} 个",
           "result": "同步结果：{{external}}；{{summary}}",
           "withEmailStatus": "{{summary}}；{{email}}",
@@ -565,6 +583,20 @@
       "operationTypePlaceholder": "请选择操作类型",
       "sixMonths": "六个月",
       "otpSetting": "开启 OTP 认证",
+      "otpSectionTitle": "OTP 认证",
+      "otpEnableHint": "开启后，不在白名单内的用户下次登录需要绑定或验证 OTP。关闭后所有用户仅凭密码登录。已登录会话不会立刻失效。",
+      "otpWhitelist": "OTP 白名单",
+      "otpWhitelistHint": "名单内用户跳过 OTP，仅凭密码登录。请只加入确需豁免的账号。",
+      "otpWhitelistCount": "当前豁免 {count} 人",
+      "otpWhitelistCountZero": "当前无人豁免，开启 OTP 后所有用户均需验证。",
+      "otpWhitelistPlaceholder": "搜索并选择用户",
+      "otpRecommendedApps": "推荐认证器应用",
+      "otpRecommendedAppsHint": "这些名称会显示在用户首次绑定 OTP 的登录页，用于提示安装哪款认证器。可从列表选择，也可输入自定义名称后回车。",
+      "otpRecommendedAppsPlaceholder": "选择或输入认证器名称",
+      "otpRecommendedAppsRequired": "请至少配置一个推荐认证器应用",
+      "otpAppsPreviewSingle": "登录页将显示：在设备上安装以下认证器应用",
+      "otpAppsPreviewMultiple": "登录页将显示：在设备上安装以下任一认证器应用",
+      "otpAppsEmptyPreview": "登录页将缺少认证器名称，保存前请至少添加一个。",
       "errorSummary": "错误摘要",
       "selectTime": "选择时间",
       "auditLogs": "审计日志",
@@ -1167,12 +1199,15 @@
       "permanentlyDelete": "永久删除",
       "permanentlyDeleteConfirm": "确定要永久删除该归档组织吗？",
       "permanentlyDeleteConfirmCxt": "永久删除后数据无法恢复。请先自行处理该组织下各应用模块中的业务资产（监控、日志、CMDB等），再执行此操作。",
+      "permanentlyDeleteConfirmCxtSynced": "永久删除后数据无法恢复，原组织 ID 不再保留。若外部目录再次出现该组织，同步将创建新组织。请先自行处理该组织下各应用模块中的业务资产（监控、日志、CMDB等），再执行此操作。",
       "permanentlyDeleteSuccess": "永久删除成功",
       "permanentlyDeleteFailed": "永久删除失败",
       "archivedKind": {
         "local": "本地组织",
         "synced": "同步源组织"
       },
+      "syncReconcileArchived": "由同步对账归档",
+      "syncReconcileArchivedHint": "该组织仍绑定有效同步源。目录中还在时，下次同步会按原 ID 带回活动树；目录中已不在时会继续留在归档。请到对应用户同步源处理，不要在此手工恢复或删除。",
       "childrenTruncated": "该归档组织子树过大，列表仅展示部分子组织。"
     },
     "role": {
@@ -1236,6 +1271,7 @@
       "testing": "测试中...",
       "testSuccess": "连接测试成功",
       "testFailed": "连接测试失败",
+      "providerUnavailable": "Provider 不可用",
       "createSuccess": "集成实例创建成功",
       "createFailed": "集成实例创建失败",
       "testStatusReady": "已测试",
@@ -1279,7 +1315,7 @@
       "capability": {
         "userSync": "用户同步",
         "loginAuth": "登录认证",
-        "imNotification": "通知渠道",
+        "imNotification": "IM应用通知",
         "imGroup": "群协作"
       },
       "provider": {
@@ -1331,7 +1367,43 @@
       "savingAndTesting": "正在保存配置并测试请求…",
       "saveAndTestSuccess": "配置已保存，测试请求成功",
       "startedHint": "当前实例至少已有一个能力完成启动。",
-      "notStartedHint": "当前实例尚未启动，完成基础连接保存与测试后会更新卡片状态。"
+      "notStartedHint": "当前实例尚未启动，完成基础连接保存与测试后会更新卡片状态。",
+      "providerPacks": {
+        "title": "集成类型",
+        "content": "上传已审查的 Provider zip，热加载后即可用于新建集成实例。",
+        "name": "名称",
+        "key": "标识",
+        "source": "来源",
+        "sourceBuiltin": "内置",
+        "sourceUploaded": "已上传",
+        "revision": "修订",
+        "authorVersion": "作者版本",
+        "upload": "上传",
+        "uploadModalTitle": "上传 Provider 包",
+        "uploadModalHint": "请上传 zip 包，大小不超过 10MB。成功后可在「添加集成」中选用新类型。",
+        "uploadDropHint": "将 zip 拖到此处，或点击选择文件",
+        "uploadFileRequired": "请先选择 zip 文件",
+        "replace": "更换",
+        "replaceConfirmTitle": "确认更换该 Provider 包？",
+        "replaceConfirmContent": "将覆盖当前已装的该类型。受影响实例 {count} 个。测通前该实例的登录、用户同步和 IM 将不可用。",
+        "replaceSuccess": "Provider 包已更换",
+        "oversized": "包体积不能超过 10MB",
+        "uploadSuccess": "Provider 包已上传",
+        "alreadyExists": "该标识已存在，请确认后再更换",
+        "uploadFailed": "Provider 包上传失败",
+        "acceptHint": "选择 Provider 包 zip",
+        "uninstall": "卸载",
+        "uninstallConfirmTitle": "确认卸载该 Provider 包？",
+        "uninstallConfirmContent": "将下线该类型。无集成实例时才会卸载成功。",
+        "uninstallSuccess": "Provider 包已卸载",
+        "uninstallFailed": "Provider 包卸载失败",
+        "uninstallHasInstances": "请先删除该类型下的集成实例，再卸载 Provider 包。",
+        "loadStatus": "加载状态",
+        "loadLoaded": "已加载",
+        "loadFailed": "加载失败",
+        "loadFailedReason": "原因：{errorType}",
+        "builtinNoActions": "内置类型不可更换或卸载"
+      }
     }
   }
 }

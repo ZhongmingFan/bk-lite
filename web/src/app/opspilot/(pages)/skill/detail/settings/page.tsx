@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Form, Input, Select, Switch, Button, InputNumber, Slider, Spin, message, Modal, Checkbox } from 'antd';
 import { useTranslation } from '@/utils/i18n';
-import styles from './index.module.scss';
+import styles from './settings.module.scss';
 import { useSearchParams } from 'next/navigation';
 import CustomChatSSE from '@/app/opspilot/components/custom-chat-sse';
 import CompactEmptyState from '@/components/compact-empty-state';
@@ -25,6 +25,7 @@ import { useSkillApi } from '@/app/opspilot/api/skill';
 import { useWikiApi } from '@/app/opspilot/api/wiki';
 import { WikiKnowledgeBase } from '@/app/opspilot/types/wiki';
 import { useSkill } from '@/app/opspilot/context/skillContext';
+import { notifyWebchatAppsChanged } from '@/app/(core)/components/global-webchat/apps-changed';
 import { getModelOptionText, renderModelOptionLabel } from '@/app/opspilot/utils/modelOption';
 import {
   buildSkillSaveTools,
@@ -228,6 +229,7 @@ const SkillSettingsPage: React.FC = () => {
         message.success(t('common.saveSuccess'));
       }
       refreshSkillInfo();
+      notifyWebchatAppsChanged();
     } catch (error) {
       console.error(t('common.saveFailed'), error);
     } finally {
@@ -873,6 +875,7 @@ const SkillSettingsPage: React.FC = () => {
               useAGUIProtocol={true}
               initialMessages={initialMessages}
               removePendingBotMessageOnCancel={true}
+              conversationHistoryEnabled={chatHistoryEnabled}
             />
           </div>
         </div>

@@ -117,6 +117,7 @@ export const useHostConfig = () => {
       Host: 'host',
       'Host Remote': 'http',
       'Host AIX Remote': 'http',
+      'Host Solaris Remote': 'http',
     },
   };
 };

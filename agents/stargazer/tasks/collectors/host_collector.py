@@ -79,7 +79,8 @@ VALID_MODULES = {"cpu", "mem", "disk", "net", "diskio", "processes", "system"}
 HOST_REMOTE_CALLBACK_REQUEST_TIMEOUT = 60
 LINUX_SCRIPT_WRAPPER_EOF = "STARGAZER_HOST_COLLECT_EOF"
 LINUX_SCRIPT_WRAPPER_PREFIX = "LC_ALL=C LANG=C bash --noprofile --norc"
-SUPPORTED_OS_TYPES = {"linux", "windows", "aix"}
+SUPPORTED_OS_TYPES = {"linux", "windows", "aix", "solaris"}
+SSH_OS_TYPES = frozenset({"linux", "aix", "solaris"})
 
 
 def sanitize_ansible_failure_text(value: Any, *, max_length: int = ANSIBLE_FAILURE_TEXT_MAX_CHARS) -> str:
@@ -166,6 +167,10 @@ def build_script(
     os_type = str(os_type or "").strip().lower()
     if os_type == "aix":
         from .aix_os_monitor import wrap_ksh_collect
+
+        return wrap_ksh_collect()
+    if os_type == "solaris":
+        from .solaris_os_monitor import wrap_ksh_collect
 
         return wrap_ksh_collect()
     if os_type not in {"linux", "windows"}:
@@ -456,11 +461,15 @@ class HostCollector(BaseCollector):
             raise ValueError(f"unsupported os_type: {os_type}")
         username = self.params["username"]
         raw_port = self.params.get("port")
-        ssh_like = os_type in {"linux", "aix"}
+        ssh_like = os_type in SSH_OS_TYPES
         port = int(raw_port) if raw_port not in (None, "") else (22 if ssh_like else 5986)
         ansible_node_id = self.params["ansible_node_id"]
         if os_type == "aix":
             from .aix_os_monitor import COMMAND_EXECUTE_TIMEOUT
+
+            execute_timeout = COMMAND_EXECUTE_TIMEOUT
+        elif os_type == "solaris":
+            from .solaris_os_monitor import COMMAND_EXECUTE_TIMEOUT
 
             execute_timeout = COMMAND_EXECUTE_TIMEOUT
         else:
@@ -523,6 +532,10 @@ class HostCollector(BaseCollector):
         os_type = str(self.params.get("os_type", "") or "").strip().lower()
         if os_type == "aix":
             from .aix_os_monitor import COMMAND_EXECUTE_TIMEOUT
+
+            return int(self.params.get("host_remote_callback_timeout", COMMAND_EXECUTE_TIMEOUT))
+        if os_type == "solaris":
+            from .solaris_os_monitor import COMMAND_EXECUTE_TIMEOUT
 
             return int(self.params.get("host_remote_callback_timeout", COMMAND_EXECUTE_TIMEOUT))
         return int(
@@ -603,6 +616,15 @@ class HostCollector(BaseCollector):
             from .aix_os_monitor import parse_aix_metrics_to_prometheus
 
             prometheus_metrics = parse_aix_metrics_to_prometheus(
+                metrics_data,
+                instance_id,
+                os_type,
+                int(callback_timestamp) if callback_timestamp is not None else int(time.time() * 1000),
+            )
+        elif os_type == "solaris":
+            from .solaris_os_monitor import parse_solaris_metrics_to_prometheus
+
+            prometheus_metrics = parse_solaris_metrics_to_prometheus(
                 metrics_data,
                 instance_id,
                 os_type,

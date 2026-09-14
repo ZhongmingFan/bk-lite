@@ -92,7 +92,11 @@ const COMMUNITY_OBJECT_CONFIG_LOADERS: Record<string, ObjectConfigLoader> = {
     import('./objects/database/openGauss').then((m) => m.useOpenGaussConfig),
   GBase8a: () => import('./objects/database/gBase8a').then((m) => m.useGBase8aConfig),
   VastBase: () => import('./objects/database/vastBase').then((m) => m.useVastBaseConfig),
-  KingBase: () => import('./objects/database/kingBase').then((m) => m.useKingBaseConfig)
+  KingBase: () => import('./objects/database/kingBase').then((m) => m.useKingBaseConfig),
+  'Meraki Switch Inventory': () =>
+    import('./objects/ciscoMeraki/switchInventory').then((m) => m.useMerakiSwitchInventoryConfig),
+  'Meraki Switch': () =>
+    import('./objects/ciscoMeraki/switch').then((m) => m.useMerakiSwitchConfig),
 };
 
 const configCache: Record<string, ObjectConfig> = {};

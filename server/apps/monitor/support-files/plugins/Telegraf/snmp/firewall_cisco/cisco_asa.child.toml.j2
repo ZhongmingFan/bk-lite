@@ -62,17 +62,12 @@
     [[inputs.snmp.table.field]]
         oid = "1.3.6.1.4.1.9.9.48.1.1.1.6"
         name = "free"
-    # ---- Cisco firewall sessions (CISCO-FIREWALL-MIB cfwConnectionStatTable) ----
-    # ConnectionStat: other(1) totalOpen(2) currentOpen(3) currentClosing(4)
-    #   currentHalfOpen(5) currentInUse(6) high(7)。
-    # Services protoIp(40) + currentInUse(6) 为整机当前占用连接数
-    # （cfwConnectionStatValue.40.6）。不展开 buffer 统计表。
-    [[inputs.snmp.table]]
-        name = "firewall"
-        inherit_tags = ["source"]
-    [[inputs.snmp.table.field]]
+    # ---- Cisco firewall sessions (CISCO-FIREWALL-MIB cfwConnectionStatValue) ----
+    # Services protoIp(40) + currentInUse(6) 为整机当前占用连接数。
+    # 叶子已是完整索引 OID（cfwConnectionStatValue.40.6），按标量 GET，不 walk 表。
+    [[inputs.snmp.field]]
         oid = "1.3.6.1.4.1.9.9.147.1.2.2.2.1.5.40.6"
-        name = "active_sessions"
+        name = "firewall_active_sessions"
 
 [[processors.starlark]]
     namepass = ["device_memory"]

@@ -255,6 +255,8 @@
     "sourceType": "数据来源",
     "sourcePath": "来源标识",
     "sourceObject": "取数对象",
+    "searchPlaceholder": "搜索名称",
+    "allSourceTypes": "全部",
     "sourceTypes": {
       "nats": "NATS",
       "mysql": "MySQL",
@@ -485,7 +487,8 @@
         "topologyMap": "关系拓扑",
         "nodeGraph": "通信关系图",
         "networkStatusTopology": "网络状态拓扑",
-        "application3D": "3D应用"
+        "application3D": "3D应用",
+        "relatedTopology": "关联拓扑"
       },
       "widgetDescriptions": {
         "single": "展示核心 KPI、告警总数、在线率等关键数值",
@@ -504,7 +507,8 @@
         "nodeGraph": "展示 IP 或服务之间的有向流量",
         "room3D": "展示单个机房的 3D 机柜布局",
         "networkStatusTopology": "展示只读网络关系和健康态",
-        "application3D": "展示应用系统健康、活跃告警和详情的 3D 应用墙"
+        "application3D": "展示应用系统健康、活跃告警和详情的 3D 应用墙",
+        "relatedTopology": "按单个资产展示同源关系与当前告警叠层"
       }
     },
     "report": {
@@ -804,6 +808,15 @@
     "networkTopoLoadFailed": "网络拓扑结构加载失败",
     "networkTopoStatusLoadFailed": "监控叠色加载失败",
     "networkTopoEmpty": "暂无网络拓扑关系",
+    "relatedTopology": "关联拓扑",
+    "relatedTopologyDesc": "按单个资产展示同源关系与当前告警叠层",
+    "relatedTopologyEmpty": "暂无关联",
+    "relatedTopologyLoadFailed": "关联拓扑加载失败",
+    "relatedTopologySelectAsset": "请选择要展示的资产实例",
+    "relatedTopologyInstUuidRequired": "保存关联拓扑前请选择资产实例",
+    "relatedTopologyModelIdRequired": "保存关联拓扑前请选择资产模型",
+    "relatedTopologyModel": "资产模型",
+    "relatedTopologyAsset": "资产实例",
     "networkTopoTruncated": "拓扑节点已达展示上限",
     "networkTopoMissingConfig": "请重新配置要展示的网络设备",
     "networkTopoLayoutHierarchical": "层级",
@@ -1300,6 +1313,8 @@
     "addGroup": "添加分组",
     "importYaml": "导入 YAML",
     "exportYaml": "导出 YAML",
+    "copyTargetDirectory": "目标目录",
+    "copySuccess": "已复制为 {name}",
     "exportSuccess": "导出成功",
     "exportFailed": "导出失败",
     "exportConfirmMsg": "您确定要导出",
@@ -1365,7 +1380,8 @@
     "control": {
       "input": "输入框",
       "select": "下拉选择",
-      "radio": "单选按钮"
+      "radio": "单选按钮",
+      "organization": "组织"
     },
     "picker": "选择方式",
     "pickerDropdown": "下拉列表",

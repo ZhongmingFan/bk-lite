@@ -14,8 +14,10 @@ from apps.opspilot.tasks.channel import (
 )
 from apps.opspilot.tasks.chatflow import chat_flow_celery_task, chat_flow_test_execute_task
 from apps.opspilot.tasks.memory import (
+    MemoryWriteLlmUnavailable,
     _apply_memory_write_plan,
     _build_memory_write_client,
+    _commit_memory_write_with_retry,
     _create_memory,
     _flush_memory_write_cache_group,
     _get_memory_for_target,
@@ -28,11 +30,14 @@ from apps.opspilot.tasks.memory import (
     cleanup_expired_workflow_attachments,
     cleanup_expired_workflow_attachments_task,
     flush_all_pending_memory_write_cache,
+    flush_idle_skill_conversation_memory,
     flush_memory_write_cache_for_node,
     process_memory_write,
     process_memory_write_cache,
+    write_skill_conversation_memory,
 )
 from apps.opspilot.tasks.wiki import (
+    _WIKI_TASK_IDENTITY_FIELDS,
     _fail_wiki_task_build,
     _freeze_wiki_task_identity,
     _latest_successful_material_build,
@@ -42,7 +47,6 @@ from apps.opspilot.tasks.wiki import (
     _persist_wiki_task_identity,
     _resolve_wiki_task_identity,
     _wiki_running_build_has_identity,
-    _WIKI_TASK_IDENTITY_FIELDS,
     wiki_batch_ingest_materials_task,
     wiki_build_material_task,
     wiki_ingest_material_task,
@@ -55,9 +59,11 @@ from apps.opspilot.tasks.wiki import (
 
 __all__ = [
     "MEMORY_WRITE_PROCESSING_TTL_SECONDS",
+    "MemoryWriteLlmUnavailable",
     "_WIKI_TASK_IDENTITY_FIELDS",
     "_apply_memory_write_plan",
     "_build_memory_write_client",
+    "_commit_memory_write_with_retry",
     "_create_memory",
     "_fail_wiki_task_build",
     "_flush_memory_write_cache_group",
@@ -84,6 +90,7 @@ __all__ = [
     "cleanup_expired_workflow_attachments",
     "cleanup_expired_workflow_attachments_task",
     "flush_all_pending_memory_write_cache",
+    "flush_idle_skill_conversation_memory",
     "flush_memory_write_cache_for_node",
     "process_dingtalk_message",
     "process_enterprise_wechat_aibot_message",
@@ -106,4 +113,5 @@ __all__ = [
     "wiki_rebuild_kb_task",
     "wiki_refresh_web_materials_task",
     "wiki_retry_markdown_import_task",
+    "write_skill_conversation_memory",
 ]

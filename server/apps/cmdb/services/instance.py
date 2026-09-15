@@ -1,13 +1,16 @@
 from apps.cmdb.constants.constants import (
+    ASSOCIATION_TYPE,
     ENUM_SELECT_MODE_DEFAULT,
     INSTANCE,
     INSTANCE_ASSOCIATION,
+    MODEL,
     NETWORK_TOPO_NODE_LIMIT,
     OPERATOR_INSTANCE,
     PERMISSION_INSTANCES,
     VIEW,
 )
 from apps.cmdb.constants.field_constraints import TAG_ATTR_ID, TAG_MODE_FREE
+from apps.cmdb.constants.monitor_link import CMDB_MONITOR_SYNC_MODEL_IDS
 from apps.cmdb.display_field import DisplayFieldHandler
 from apps.cmdb.display_field.constants import (
     DISPLAY_FIELD_TYPES,
@@ -363,6 +366,14 @@ def apply_enum_validation_for_instance(instance_data: dict, attrs: list[dict]) -
     return data
 
 
+_ASSOCIATION_TYPE_NAME = {item["asst_id"]: item["asst_name"] for item in ASSOCIATION_TYPE}
+
+
+def _normalize_cmdb_display_language(language: str | None) -> str:
+    raw = str(language or "zh-Hans")
+    return "en" if raw.lower().startswith("en") else "zh-Hans"
+
+
 class InstanceManage(object):
     @staticmethod
     def _query_instance_map_by_ids(inst_ids: set[int]) -> dict[int, dict]:
@@ -574,7 +585,44 @@ class InstanceManage(object):
         return filtered_result
 
     @classmethod
-    def _transport_topology_result(cls, result: dict) -> dict:
+    def _resolve_topology_model_names(cls, model_ids: set[str], language: str | None = None) -> dict[str, str]:
+        ids = sorted({str(model_id) for model_id in model_ids if model_id not in (None, "")})
+        if not ids:
+            return {}
+        from apps.cmdb.language.service import SettingLanguage
+
+        lan = SettingLanguage(_normalize_cmdb_display_language(language))
+        names: dict[str, str] = {}
+        missing: list[str] = []
+        for model_id in ids:
+            translated = lan.get_val("MODEL", model_id)
+            if translated:
+                names[model_id] = translated
+            else:
+                missing.append(model_id)
+        if missing:
+            names.update(cls._query_stored_model_names(missing))
+        for model_id in ids:
+            names.setdefault(model_id, model_id)
+        return names
+
+    @staticmethod
+    def _query_stored_model_names(model_ids: list[str]) -> dict[str, str]:
+        if not model_ids:
+            return {}
+        with GraphClient() as ag:
+            models, _ = ag.query_entity(MODEL, [{"field": "model_id", "type": "str[]", "value": sorted(model_ids)}])
+        names: dict[str, str] = {}
+        for model in models:
+            model_id = model.get("model_id")
+            model_name = model.get("model_name")
+            if model_id in (None, "") or model_name in (None, ""):
+                continue
+            names[str(model_id)] = str(model_name)
+        return names
+
+    @classmethod
+    def _transport_topology_result(cls, result: dict, language: str | None = None) -> dict:
         """把通用拓扑树递归转换为只暴露 inst_uuid 的 Transport DTO。"""
         if not isinstance(result, dict):
             return result
@@ -586,6 +634,13 @@ class InstanceManage(object):
         uuid_by_id = {
             int(graph_id): item.get("inst_uuid") for graph_id, item in instances_map.items() if isinstance(item, dict) and item.get("inst_uuid")
         }
+        model_ids = set()
+        for item in instances_map.values():
+            if isinstance(item, dict) and item.get("model_id") not in (None, ""):
+                model_ids.add(str(item["model_id"]))
+        for key in ("src_result", "dst_result"):
+            model_ids.update(cls._collect_topology_model_ids(result.get(key)))
+        model_name_by_id = cls._resolve_topology_model_names(model_ids, language=language)
 
         def transport_node(node: dict | None) -> dict:
             if not isinstance(node, dict) or node.get("_id") is None:
@@ -599,6 +654,15 @@ class InstanceManage(object):
                 return {}
             transported = {key: value for key, value in node.items() if key not in {"_id", "inst_id", "children"}}
             transported["inst_uuid"] = inst_uuid
+            asst_id = transported.get("asst_id")
+            if asst_id and not transported.get("asst_name"):
+                transported["asst_name"] = _ASSOCIATION_TYPE_NAME.get(str(asst_id), "")
+            instance = instances_map.get(graph_id) if isinstance(instances_map.get(graph_id), dict) else {}
+            model_id = transported.get("model_id") or instance.get("model_id")
+            if model_id not in (None, ""):
+                transported["model_id"] = str(model_id)
+                if not transported.get("model_name"):
+                    transported["model_name"] = model_name_by_id.get(str(model_id), str(model_id))
             transported["children"] = [child for item in node.get("children") or [] if (child := transport_node(item))]
             return transported
 
@@ -607,6 +671,22 @@ class InstanceManage(object):
             "src_result": transport_node(result.get("src_result")),
             "dst_result": transport_node(result.get("dst_result")),
         }
+
+    @classmethod
+    def _collect_topology_model_ids(cls, node: dict | None) -> set[str]:
+        model_ids: set[str] = set()
+
+        def walk(value):
+            if not isinstance(value, dict):
+                return
+            model_id = value.get("model_id")
+            if model_id not in (None, ""):
+                model_ids.add(str(model_id))
+            for child in value.get("children") or []:
+                walk(child)
+
+        walk(node)
+        return model_ids
 
     @staticmethod
     def _build_format_permission_dict(permission_map: dict, creator: str = "") -> dict:
@@ -906,7 +986,7 @@ class InstanceManage(object):
                     "[InstanceManage] post-create auto_relation hook failed cmdb_id=%s",
                     result.get("_id"),
                 )
-            if model_id == "host":
+            if model_id in CMDB_MONITOR_SYNC_MODEL_IDS:
                 try:
                     result = InstanceManage._best_effort_notify_peers_on_host_create(result, operator=operator, allowed_org_ids=allowed_org_ids)
                 except Exception:
@@ -923,7 +1003,7 @@ class InstanceManage(object):
         operator: str,
         allowed_org_ids: list | None,
     ) -> dict:
-        """主机新建 IoC 钩子：通知节点 + 监控（best-effort，不阻断创建）。"""
+        """可关联模型新建 IoC 钩子：通知监控（best-effort，不阻断创建）；主机额外通知节点。"""
         try:
             from apps.cmdb.services.module_push import CmdbToMonitorPushService
 
@@ -1105,6 +1185,24 @@ class InstanceManage(object):
             operator=operator,
         )
         schedule_instance_auto_relation_reconcile([item["_id"] for item in created])
+        if model_id in CMDB_MONITOR_SYNC_MODEL_IDS:
+            notified = []
+            for item in created:
+                try:
+                    notified.append(
+                        InstanceManage._best_effort_notify_peers_on_host_create(
+                            item,
+                            operator=operator,
+                            allowed_org_ids=allowed_org_ids,
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "[InstanceManage] post-create IoC hook failed cmdb_id=%s",
+                        (item or {}).get("_id"),
+                    )
+                    notified.append(item)
+            return notified
         return created
 
     @staticmethod
@@ -2316,12 +2414,19 @@ class InstanceManage(object):
         return cls._filter_topology_result(result, int(inst_id), permission_map=permission_map, user=user)
 
     @classmethod
-    def topo_search_lite_by_uuid(cls, inst_uuid: str, depth: int = 3, permission_map: dict | None = None, user=None):
+    def topo_search_lite_by_uuid(
+        cls,
+        inst_uuid: str,
+        depth: int = 3,
+        permission_map: dict | None = None,
+        user=None,
+        language: str | None = None,
+    ):
         instance = cls.query_entity_by_uuid(inst_uuid)
         if not instance:
             raise BaseAppException("实例不存在！")
         result = cls.topo_search_lite(instance["_id"], depth=depth, permission_map=permission_map, user=user)
-        return cls._transport_topology_result(result)
+        return cls._transport_topology_result(result, language=language)
 
     @classmethod
     def topo_search_expand(
@@ -2345,6 +2450,7 @@ class InstanceManage(object):
         depth: int = 2,
         permission_map: dict | None = None,
         user=None,
+        language: str | None = None,
     ):
         instance = cls.query_entity_by_uuid(inst_uuid)
         if not instance:
@@ -2359,7 +2465,7 @@ class InstanceManage(object):
             permission_map=permission_map,
             user=user,
         )
-        return cls._transport_topology_result(result)
+        return cls._transport_topology_result(result, language=language)
 
     @staticmethod
     def inst_export(
@@ -2751,18 +2857,100 @@ class InstanceManage(object):
 
     @classmethod
     def license_instance_count(cls) -> dict:
-        """许可用量：原生自动发现且属于收费模型目录的实例数。"""
-        from apps.cmdb.constants.license_catalog import CMDB_LICENSE_MODEL_IDS
+        """许可用量：原生自动发现且属于收费模型目录的实例数。
 
-        return cls.group_inst_count(
-            group_by_attr="model_id",
-            permissions_map={},
-            params=[
-                {"field": "auto_collect", "type": "bool", "value": True},
-                {"field": "model_id", "type": "str[]", "value": list(CMDB_LICENSE_MODEL_IDS)},
-            ],
-            creator="",
+        仅本方法做 host 与虚拟机的 IP 去重；group_inst_count / model_inst_count 保持原语义。
+        """
+        from apps.cmdb.constants.license_catalog import (
+            CMDB_LICENSE_MODEL_IDS,
+            CMDB_LICENSE_OS_MODEL_ID,
+            CMDB_LICENSE_VM_MODEL_IDS,
         )
+
+        other_model_ids = CMDB_LICENSE_MODEL_IDS - CMDB_LICENSE_VM_MODEL_IDS - {CMDB_LICENSE_OS_MODEL_ID}
+        counts = dict(
+            cls.group_inst_count(
+                group_by_attr="model_id",
+                permissions_map={},
+                params=[
+                    {"field": "auto_collect", "type": "bool", "value": True},
+                    {"field": "model_id", "type": "str[]", "value": list(other_model_ids)},
+                ],
+                creator="",
+            )
+        )
+        counts.update(cls._license_os_vm_instance_count())
+        return counts
+
+    @staticmethod
+    def _iter_license_ips(raw):
+        """从 ip_addr 拆出非空 IP。支持逗号分隔字符串，以及已拆好的序列。"""
+        if raw is None:
+            return
+        if isinstance(raw, (list, tuple, set)):
+            parts = raw
+        else:
+            text = str(raw).strip()
+            if not text:
+                return
+            parts = text.split(",")
+        for part in parts:
+            ip = str(part).strip()
+            if ip:
+                yield ip
+
+    @classmethod
+    def _count_license_os_vm_instances(cls, inst_list) -> dict:
+        """host 全计；虚拟机 IP 与 host 有交集则不计。不按云区域拆 IP。"""
+        from apps.cmdb.constants.license_catalog import (
+            CMDB_LICENSE_OS_MODEL_ID,
+            CMDB_LICENSE_VM_MODEL_IDS,
+        )
+
+        host_ips = set()
+        host_count = 0
+        vms = []
+        for inst in inst_list or []:
+            model_id = inst.get("model_id")
+            if model_id == CMDB_LICENSE_OS_MODEL_ID:
+                host_count += 1
+                host_ips.update(cls._iter_license_ips(inst.get("ip_addr")))
+            elif model_id in CMDB_LICENSE_VM_MODEL_IDS:
+                vms.append(inst)
+
+        counts = {}
+        if host_count:
+            counts[CMDB_LICENSE_OS_MODEL_ID] = host_count
+
+        for inst in vms:
+            ips = list(cls._iter_license_ips(inst.get("ip_addr")))
+            if ips and any(ip in host_ips for ip in ips):
+                continue
+            model_id = inst.get("model_id")
+            counts[model_id] = counts.get(model_id, 0) + 1
+        return counts
+
+    @classmethod
+    def _query_license_os_vm_instances(cls) -> list:
+        from apps.cmdb.constants.license_catalog import (
+            CMDB_LICENSE_OS_MODEL_ID,
+            CMDB_LICENSE_VM_MODEL_IDS,
+        )
+
+        model_ids = [CMDB_LICENSE_OS_MODEL_ID, *sorted(CMDB_LICENSE_VM_MODEL_IDS)]
+        with GraphClient() as ag:
+            inst_list, _ = ag.query_entity(
+                INSTANCE,
+                [
+                    {"field": "auto_collect", "type": "bool", "value": True},
+                    {"field": "model_id", "type": "str[]", "value": model_ids},
+                ],
+            )
+        return inst_list or []
+
+    @classmethod
+    def _license_os_vm_instance_count(cls) -> dict:
+        return cls._count_license_os_vm_instances(cls._query_license_os_vm_instances())
 
     @classmethod
     def _build_permission_params(cls, permission_map: dict, creator: str = ""):

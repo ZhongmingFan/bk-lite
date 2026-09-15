@@ -15,6 +15,46 @@ from plugins.inputs.network_config_file.constants import (
 from scrapli import AsyncScrapli
 from scrapli.driver.generic.async_driver import AsyncGenericDriver
 
+HTTP_HEADER_COMMANDS_PREFIX = "b64:"
+SSH_TRANSPORT = "asyncssh"
+TELNET_TRANSPORT = "asynctelnet"
+SSH_DEFAULT_PORT = 22
+TELNET_DEFAULT_PORT = 23
+TELNET_ALIASES = {"telnet", "asynctelnet"}
+SSH_ALIASES = {"ssh", "asyncssh"}
+
+
+def resolve_cli_transport(params: dict | None) -> tuple[str, str, int]:
+    """解析 CLI 传输：返回 (ssh|telnet, scrapli transport, 默认端口)。
+
+    正式字段为 ``transport_protocol``。``protocol`` 仅在值为 ssh/telnet 别名时生效，
+    避免 ``protocol_version`` 等其它 protocol 键误改传输。未知或缺失回退 SSH/22。
+    """
+    source = params or {}
+    protocol = "ssh"
+    for key in ("transport_protocol", "protocol"):
+        raw = str(source.get(key) or "").strip().lower()
+        if raw in TELNET_ALIASES:
+            protocol = "telnet"
+            break
+        if raw in SSH_ALIASES:
+            protocol = "ssh"
+            break
+    if protocol == "telnet":
+        return "telnet", TELNET_TRANSPORT, TELNET_DEFAULT_PORT
+    return "ssh", SSH_TRANSPORT, SSH_DEFAULT_PORT
+
+
+def decode_http_header_commands(raw_commands) -> str:
+    text = str(raw_commands or "")
+    if not text.startswith(HTTP_HEADER_COMMANDS_PREFIX):
+        return text
+    payload = text[len(HTTP_HEADER_COMMANDS_PREFIX) :]
+    try:
+        return base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8")
+    except (ValueError, UnicodeDecodeError) as err:
+        raise ValueError("采集命令头编码无效") from err
+
 
 def validate_safe_command(command: str) -> str:
     normalized = " ".join(str(command or "").strip().split())
@@ -46,21 +86,24 @@ class NetworkConfigFileInfo:
         return any(pattern in lowered for pattern in COMMAND_ERROR_PATTERNS)
 
     def _commands(self) -> list[str]:
-        return [validate_safe_command(line) for line in str(self.params.get("commands") or "").splitlines() if line.strip()]
+        raw = decode_http_header_commands(self.params.get("commands"))
+        return [validate_safe_command(line) for line in raw.splitlines() if line.strip()]
 
     def _connect_params(self) -> dict:
         device_type = str(self.params.get("device_type") or "").strip()
         if device_type not in SUPPORTED_DEVICE_TYPES:
             raise ValueError(f"不支持的异步网络驱动: {device_type}")
+        _, scrapli_transport, default_port = resolve_cli_transport(self.params)
         return {
             "platform": SCRAPLI_PLATFORM_BY_DEVICE_TYPE[device_type],
             "host": self.params.get("host") or self.params.get("connect_ip"),
             "auth_username": self.params.get("username"),
             "auth_password": self.params.get("password"),
             "auth_secondary": self.params.get("enable_password") or "",
-            "port": int(self.params.get("port") or 22),
-            "auth_strict_key": True,
-            "transport": "asyncssh",
+            "port": int(self.params.get("port") or default_port),
+            # 目标管理 IP 已随采集任务落在 CMDB；任务下发即授权该地址，不再用 known_hosts 拒绝。
+            "auth_strict_key": False,
+            "transport": scrapli_transport,
             "timeout_socket": 30.0,  # 建连超时硬编码
             "timeout_transport": 30.0,
             "timeout_ops": 60.0,  # 单命令超时硬编码；表单 timeout 由框架作单对象预算

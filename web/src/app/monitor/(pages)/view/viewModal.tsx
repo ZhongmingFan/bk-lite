@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, forwardRef, useImperativeHandle } from 'react';
-import { useRouter } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import { Button, Tabs } from 'antd';
 import OperateDrawer from '@/components/operate-drawer';
 import { ModalRef, TabItem, ChartProps, ObjectItem } from '@/app/monitor/types';
@@ -9,6 +9,7 @@ import { ViewModalProps } from '@/app/monitor/types/view';
 import { useTranslation } from '@/utils/i18n';
 import MonitorView from './monitorView';
 import MonitorAlarm from './monitorAlarm';
+import MonitorPolicy from './monitorPolicy';
 import { OBJECT_DEFAULT_ICON } from '@/app/monitor/constants';
 import { INIT_VIEW_MODAL_FORM } from '@/app/monitor/constants/view';
 import { resolveDashboardUrl } from '@/app/monitor/dashboards/registry';
@@ -19,7 +20,7 @@ import { findByMonitorId } from '@/app/monitor/utils/monitorIds';
 const ViewModal = forwardRef<ModalRef, ViewModalProps>(
   ({ monitorObject, monitorName, plugins, metrics, objects = [] }, ref) => {
     const { t } = useTranslation();
-    const router = useRouter();
+    const router = useScreenAwareRouter();
     const [groupVisible, setGroupVisible] = useState<boolean>(false);
     const [title, setTitle] = useState<string>('');
     const [viewConfig, setViewConfig] =
@@ -32,6 +33,10 @@ const ViewModal = forwardRef<ModalRef, ViewModalProps>(
       {
         label: t('monitor.views.alertList'),
         key: 'alertList',
+      },
+      {
+        label: t('monitor.views.monitoringPolicy'),
+        key: 'monitorPolicy',
       },
     ];
     const [currentTab, setCurrentTab] = useState<string>('monitorView');
@@ -127,13 +132,21 @@ const ViewModal = forwardRef<ModalRef, ViewModalProps>(
               plugins={plugins}
               form={viewConfig}
             />
-          ) : (
+          ) : currentTab === 'alertList' ? (
             <MonitorAlarm
               monitorObject={monitorObject}
               monitorName={monitorName}
               plugins={plugins}
               form={viewConfig}
               metrics={metrics}
+              objects={objects}
+            />
+          ) : (
+            <MonitorPolicy
+              monitorObject={monitorObject}
+              monitorName={monitorName}
+              plugins={plugins}
+              form={viewConfig}
               objects={objects}
             />
           )}

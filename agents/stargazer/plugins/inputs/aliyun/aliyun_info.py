@@ -7,6 +7,7 @@ import copy
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 
 # 必须先安装 Python 3.12 兼容别名，再导入会加载旧版 aliyunsdkcore 的 SDK。
 # isort: off
@@ -92,8 +93,8 @@ from common.cmp.cloud_apis.constant import CloudType
 from common.cmp.cloud_apis.resource_apis.cw_aliyun import RESOURCE_MAP
 from common.cmp.cloud_apis.resource_apis.resource_format.common.base_format import get_format_method
 from common.cmp.utils import set_dir_size
-from core.logger import logger
-from plugins.base_utils import ts_to_dts, utc_to_dts
+from core.logger import logger, safe_exception_info
+from plugins.base_utils import utc_to_dts
 from six.moves import range
 from Tea.core import TeaCore
 
@@ -188,8 +189,8 @@ class CwAliyun(object):
         :param region_id:
         :param kwargs:
         """
-        self.AccessKey = params["secret_id"]
-        self.AccessSecret = params["secret_key"]
+        self.AccessKey = params.get("secret_id") or params.get("accessKey") or params.get("access_key")
+        self.AccessSecret = params.get("secret_key") or params.get("accessSecret") or params.get("access_secret")
         self.RegionId = params.get("region_id", "cn-hangzhou")
         self.timeout = 30  # 连接超时硬编码；读超时用 timeout*2；表单 timeout 由框架作单对象预算
 
@@ -247,6 +248,11 @@ class CwAliyun(object):
     async def list_all_resources(self, **kwargs):
         manager = self.__getattr__("list_all_resources")
         return await manager.list_all_resources(**kwargs)
+
+    def list_regions(self, ids=None):
+        """插件入口：CollectionService 直接调用此类方法，必须走阿里云 ECS DescribeRegions。"""
+        manager = self.__getattr__("list_regions")
+        return manager.list_regions(ids)
 
 
 class Aliyun(object):
@@ -405,7 +411,7 @@ class Aliyun(object):
             total_count = ali_response.get("TotalCount", 0)
             page = total_count // 50 if total_count % 50 == 0 else total_count // 50 + 1
             key1, key2 = RESOURCE_MAP[resource]
-            for i in range(page):
+            for i in range(max(0, page - 1)):
                 request.set_PageNumber(str(i + 2))
                 ali_res = self._get_result(request, True)
                 ali_response[key1][key2].extend(ali_res[key1][key2])
@@ -1006,9 +1012,19 @@ class Aliyun(object):
         list_buckets_request.max_keys = 1000
 
         try:
-            resp = self.oss_client.list_buckets_with_options(list_buckets_request, list_buckets_header, runtime)
-            result = TeaCore.to_map(resp.body)
-            buckets = result.get("buckets", [])
+            buckets = []
+            seen_markers = set()
+            while True:
+                resp = self.oss_client.list_buckets_with_options(list_buckets_request, list_buckets_header, runtime)
+                result = TeaCore.to_map(resp.body)
+                buckets.extend(result.get("buckets", []))
+                if not result.get("isTruncated"):
+                    break
+                marker = result.get("nextMarker")
+                if not marker or marker in seen_markers:
+                    raise ValueError("OSS pagination did not advance")
+                seen_markers.add(marker)
+                list_buckets_request.marker = marker
             for bucket in buckets:
                 # 获取bucket详情
                 bucket_name = bucket.get("Name")
@@ -1718,7 +1734,8 @@ serverless"""
                     "intranet_endpoint": f"{data['Name']}.{data['IntranetEndpoint']}",
                     "storage_class": data["StorageClass"],
                     "cross_region_replication": data["CrossRegionReplication"],
-                    "block_public_access": data["BlockPublicAccess"],
+                    # 当前 SDK 的 BucketInfo 不提供此属性，缺失表示未知而非关闭。
+                    "block_public_access": data.get("BlockPublicAccess", ""),
                     "creation_date": utc_to_dts(data["CreationDate"], utc_fmt="%Y-%m-%dT%H:%M:%S.%fZ"),
                 }
             )
@@ -1744,11 +1761,12 @@ serverless"""
                     "class": data.get("DBInstanceClass"),
                     "storage_type": data.get("DBInstanceStorageType"),
                     "network_type": data.get("InstanceNetworkType"),
+                    "net_type": data.get("DBInstanceNetType"),
                     "connection_mode": data.get("ConnectionMode"),
                     "lock_mode": data.get("LockMode"),
                     "cpu": data.get("DBInstanceCPU"),
                     "memory_mb": data.get("DBInstanceMemory"),
-                    "charge_type": data.get("ChargeType"),
+                    "charge_type": data.get("PayType"),
                     "create_time": utc_to_dts(data.get("CreateTime")),
                     "expire_time": utc_to_dts(data.get("ExpireTime")),
                 }
@@ -1779,7 +1797,7 @@ serverless"""
                     "lock_mode": data.get("LockMode"),
                     "cpu": data.get("DBInstanceCPU", ""),
                     "memory_mb": data.get("DBInstanceMemory"),
-                    "charge_type": data.get("ChargeType", ""),
+                    "charge_type": data.get("PayType", ""),
                     "create_time": utc_to_dts(data.get("CreateTime")),
                     "expire_time": utc_to_dts(data.get("ExpireTime")),
                 }
@@ -1845,15 +1863,22 @@ serverless"""
     def format_aliyun_kafka_inst(data_list):
         result = []
         for data in data_list:
+            created_at = data.get("CreateTime")
+            # Kafka API 返回毫秒时间戳；与其他阿里云资源统一输出北京时间。
+            create_time = (
+                datetime.fromtimestamp(created_at / 1000, tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
+                if created_at is not None
+                else ""
+            )
             result.append(
                 {
-                    "resource_name": data.get("LoadBalancerName"),
-                    "resource_id": data.get("LoadBalancerId"),
+                    "resource_name": data.get("Name") or data.get("InstanceId"),
+                    "resource_id": data.get("InstanceId"),
                     "region": data.get("RegionId"),
                     "zone": data.get("ZoneId"),
                     "vpc": data.get("VpcId"),
-                    "status": data.get("LoadBalancerStatus"),
-                    "class": data.get("LoadBalancerSpec"),
+                    "status": data.get("ViewInstanceStatusCode", data.get("ServiceStatus")),
+                    "class": data.get("IoMaxSpec", ""),
                     "storage_gb": data.get("DiskSize", ""),
                     "storage_type": data.get("DiskType", ""),
                     "msg_retain": data.get("MsgRetain"),
@@ -1861,7 +1886,7 @@ serverless"""
                     "io_max_read": data.get("IoMaxRead", ""),
                     "io_max_write": data.get("IoMaxWrite", ""),
                     "charge_type": data.get("PaidType", ""),
-                    "create_time": ts_to_dts(data.get("CreateTime")),
+                    "create_time": create_time,
                 }
             )
         return result
@@ -1910,7 +1935,24 @@ serverless"""
             else:
                 func = self.format_funcs.get(model_id)
                 if func:
-                    result[model_id] = func(model_data)
+                    try:
+                        result[model_id] = func(model_data)
+                    except Exception as error:
+                        logger.error(
+                            "event=aliyun_format_resource_failed resource=%s region=%s task_id=%s failed_stage=%s error_type=%s",
+                            model_id,
+                            self.RegionId,
+                            self.collection_task_id,
+                            "format_metrics",
+                            type(error).__name__,
+                            exc_info=safe_exception_info(error),
+                        )
+                        result[model_id] = [
+                            {
+                                "collect_status": "failed",
+                                "cmdb_collect_error": f"format_metrics failed: {type(error).__name__}",
+                            }
+                        ]
                 else:
                     # 如果没有对应的格式化函数，直接使用原数据
                     result[model_id] = model_data if isinstance(model_data, list) else [model_data]

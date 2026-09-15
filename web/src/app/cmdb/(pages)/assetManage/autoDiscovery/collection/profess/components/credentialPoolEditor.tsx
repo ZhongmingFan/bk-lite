@@ -49,7 +49,7 @@ import type { CredentialHelpDefinition } from './credentialHelp';
 
 import styles from '../index.module.scss';
 
-type CredentialShape = 'ssh' | 'sql' | 'snmp' | 'config_file' | 'network_config_file' | 'vm' | 'winsphere' | 'cloud' | 'ipmi' | 'winrm' | 'macos_ssh' | 'influxdb' | 'platform_api';
+type CredentialShape = 'ssh' | 'sql' | 'snmp' | 'config_file' | 'network_config_file' | 'vm' | 'winsphere' | 'cloud' | 'ipmi' | 'redfish' | 'winrm' | 'macos_ssh' | 'influxdb' | 'platform_api';
 interface CredentialDragEndEvent {
   active: { id: string | number };
   over: { id: string | number } | null;
@@ -61,6 +61,26 @@ const IPMI_PRIVILEGE_OPTIONS = [
   { label: 'operator', value: 'operator' },
   { label: 'administrator', value: 'administrator' },
 ];
+
+const NETWORK_SSH_DEFAULT_PORT = 22;
+const NETWORK_TELNET_DEFAULT_PORT = 23;
+
+function normalizeNetworkTransport(value?: string): 'ssh' | 'telnet' {
+  return String(value || 'ssh').trim().toLowerCase() === 'telnet' ? 'telnet' : 'ssh';
+}
+
+function defaultPortForNetworkTransport(protocol: 'ssh' | 'telnet'): number {
+  return protocol === 'telnet' ? NETWORK_TELNET_DEFAULT_PORT : NETWORK_SSH_DEFAULT_PORT;
+}
+
+function portForNetworkTransportSwitch(currentPort: unknown, nextProtocol: 'ssh' | 'telnet'): number {
+  const numeric = Number(currentPort);
+  const previousDefault = nextProtocol === 'telnet' ? NETWORK_SSH_DEFAULT_PORT : NETWORK_TELNET_DEFAULT_PORT;
+  if (currentPort === undefined || currentPort === null || currentPort === '' || numeric === previousDefault) {
+    return defaultPortForNetworkTransport(nextProtocol);
+  }
+  return Number.isFinite(numeric) ? numeric : defaultPortForNetworkTransport(nextProtocol);
+}
 
 export interface CredentialPoolEditorProps {
   value?: CredentialPoolItem[];
@@ -178,7 +198,9 @@ const createEmptyCredential = (
     ...(shape === 'vm' ? { ssl: false } : {}),
     ...(shape === 'cloud' ? { accessKey: '', accessSecret: '', regionId: '' } : {}),
     ...(shape === 'ipmi' ? { port: '623', privilege: 'administrator' } : {}),
+    ...(shape === 'redfish' ? { port: '443', verify_tls: true } : {}),
     ...(shape === 'sql' && showDatabase ? { database: 'master' } : {}),
+    ...(shape === 'network_config_file' ? { transport_protocol: 'ssh' } : {}),
   };
 };
 
@@ -346,10 +368,23 @@ function getPreviewFields(
   if (showPort) {
     fields.push({
       label: t('Collection.port', '端口'),
-      value: String(item.port || (shape === 'sql' ? '3306' : shape === 'vm' ? '443' : shape === 'ipmi' ? '623' : '22')),
+      value: String(item.port || (shape === 'sql' ? '3306' : shape === 'vm' || shape === 'redfish' ? '443' : shape === 'ipmi' ? '623' : '22')),
+    });
+  }
+  if (shape === 'redfish') {
+    fields.push({
+      label: t('Collection.RedfishTask.verifyTls', '校验证书'),
+      value: item.verify_tls !== false ? t('common.yes', '是') : t('common.no', '否'),
     });
   }
   if (shape === 'network_config_file') {
+    const transportProtocol = String(item.transport_protocol || 'ssh').toLowerCase() === 'telnet'
+      ? 'telnet'
+      : 'ssh';
+    fields.splice(0, 0, {
+      label: t('Collection.credentialPool.transportProtocol', '连接协议'),
+      value: transportProtocol === 'telnet' ? 'Telnet' : 'SSH',
+    });
     fields.push({
       label: t('Collection.credentialPool.enablePassword', '特权密码'),
       value: passwordVisible && item.enable_password && item.enable_password !== PASSWORD_PLACEHOLDER
@@ -990,6 +1025,36 @@ function renderCredentialFields({
 
   return (
     <div className={styles.credentialFieldGrid}>
+      {shape === 'network_config_file' && (
+        <>
+          <InputRow label={t('Collection.credentialPool.transportProtocol', '连接协议')}>
+            <Select
+              value={normalizeNetworkTransport(item.transport_protocol)}
+              options={[
+                { label: 'SSH', value: 'ssh' },
+                { label: 'Telnet', value: 'telnet' },
+              ]}
+              onChange={(nextValue) => {
+                const transport_protocol = normalizeNetworkTransport(nextValue);
+                updateItem(index, {
+                  transport_protocol,
+                  port: portForNetworkTransportSwitch(item.port, transport_protocol),
+                });
+              }}
+            />
+          </InputRow>
+          {normalizeNetworkTransport(item.transport_protocol) === 'telnet' && (
+            <Alert
+              type="warning"
+              showIcon
+              message={t(
+                'Collection.credentialPool.telnetWarning',
+                'Telnet 明文传输账号口令，仅应在隔离管理网或设备只开放 TCP/23 时使用。',
+              )}
+            />
+          )}
+        </>
+      )}
       <InputRow
         label={shape === 'sql' || shape === 'vm' ? t('Collection.VMTask.username', '用户') : t('user', '用户')}
         required={shape !== 'ssh'}
@@ -1022,6 +1087,26 @@ function renderCredentialFields({
           />
         </InputRow>
       )}
+      {shape === 'redfish' && (
+        <>
+          <InputRow label={t('Collection.RedfishTask.verifyTls', '校验证书')}>
+            <Switch
+              checked={item.verify_tls !== false}
+              onChange={(verify_tls) => updateItem(index, { verify_tls })}
+            />
+          </InputRow>
+          {item.verify_tls === false && (
+            <Alert
+              type="warning"
+              showIcon
+              message={t(
+                'Collection.RedfishTask.tlsWarning',
+                '关闭证书校验会增加中间人攻击风险，仅应临时用于受信任网络中的自签名证书。',
+              )}
+            />
+          )}
+        </>
+      )}
       {shape === 'sql' && showDatabase && (
         <InputRow label={t('Collection.database', '数据库')}>
           <Input
@@ -1040,7 +1125,7 @@ function renderCredentialFields({
         </InputRow>
       )}
       {shape === 'network_config_file' && (
-        <InputRow label="特权密码" required={false}>
+        <InputRow label={t('Collection.credentialPool.enablePassword', '特权密码')} required={false}>
           <SecretInput
             value={item.enable_password}
             placeholder={t('common.inputTip', '请输入')}

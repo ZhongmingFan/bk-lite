@@ -60,6 +60,36 @@ def test_monitor_ingest_from_source(monitor):
     )
 
 
+def test_monitor_list_cmdb_bind_candidates(monitor):
+    monitor.ingest_client = monitor.client
+    monitor.list_cmdb_bind_candidates(object_name="Host", query="web", allowed_org_ids=[1])
+    assert _last(monitor.client) == (
+        "monitor_list_cmdb_bind_candidates",
+        (),
+        {"params": {"object_name": "Host", "query": "web", "allowed_org_ids": [1]}},
+    )
+
+
+def test_monitor_bind_cmdb_id(monitor):
+    monitor.ingest_client = monitor.client
+    monitor.bind_cmdb_id(monitor_id="m-1", cmdb_id="ci-1", object_name="Host", allowed_org_ids=[1])
+    assert _last(monitor.client) == (
+        "monitor_bind_cmdb_id",
+        (),
+        {"params": {"monitor_id": "m-1", "cmdb_id": "ci-1", "object_name": "Host", "allowed_org_ids": [1]}},
+    )
+
+
+def test_monitor_clear_cmdb_id(monitor):
+    monitor.ingest_client = monitor.client
+    monitor.clear_cmdb_id(monitor_id="m-1", expected_cmdb_id="ci-1", allowed_org_ids=[1])
+    assert _last(monitor.client) == (
+        "monitor_clear_cmdb_id",
+        (),
+        {"params": {"monitor_id": "m-1", "expected_cmdb_id": "ci-1", "allowed_org_ids": [1]}},
+    )
+
+
 def test_monitor_local_client_appclient_path(monkeypatch):
     monkeypatch.setenv("IS_LOCAL_RPC", "0")
     m = Monitor(is_local_client=True)
@@ -224,4 +254,13 @@ def test_query_metric_series(ana_rpc):
         "query_metric_series",
         (),
         {"metric": "device_flow_bytes_rate", "mode": "range", "instance_ids": ["sw-1"]},
+    )
+
+
+def test_get_zombie_host_report(ana_rpc):
+    ana_rpc.get_zombie_host_report(inst_uuids=["u1"], time=10080)
+    assert _last(ana_rpc.client) == (
+        "get_zombie_host_report",
+        (),
+        {"inst_uuids": ["u1"], "time": 10080},
     )

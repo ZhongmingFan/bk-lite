@@ -12,7 +12,12 @@ import { useLocalizedTime } from '@/hooks/useLocalizedTime';
 import { useAlarmApi } from '@/app/alarm/api/alarms';
 import { useSettingApi } from '@/app/alarm/api/settings';
 import { useCommon } from '@/app/alarm/context/common';
-import { useStateMap } from '@/app/alarm/constants/alarm';
+import { useStateMap, useNotifiedStateMap } from '@/app/alarm/constants/alarm';
+import { useAiPageContext } from '@/components/ai-page-context';
+import {
+  ALARM_DETAIL_EVENT_LIMIT,
+  buildAlarmDetailPageContext,
+} from './alarmDetail.context';
 import EllipsisWithTooltip from '@/components/ellipsis-with-tooltip';
 import CompactEmptyState from '@/components/compact-empty-state';
 import {
@@ -36,6 +41,7 @@ import React, {
   forwardRef,
   useImperativeHandle,
   useEffect,
+  useMemo,
   useRef,
 } from 'react';
 import {
@@ -45,9 +51,15 @@ import {
   Pagination,
   TimeLineItem,
 } from '@/app/alarm/types/types';
+import {
+  AlarmObjectSwitcher,
+  PublicWidgetPane,
+  useAlarmPublicWidgets,
+} from '@/app/alarm/components/public-widget-pane';
 const AlertDetail = forwardRef<ModalRef, ModalConfig & { readonly?: boolean }>(
   ({ handleAction, readonly = false }, ref) => {
     const STATE_MAP = useStateMap();
+    const notifiedState = useNotifiedStateMap();
     const { levelList, levelMap } = useCommon();
     const { t } = useTranslation();
     const { convertToLocalizedTime } = useLocalizedTime();
@@ -60,36 +72,44 @@ const AlertDetail = forwardRef<ModalRef, ModalConfig & { readonly?: boolean }>(
     const [recordLoading, setRecordLoading] = useState<boolean>(false);
     const [eventLoading, setEventLoading] = useState<boolean>(false);
     const [eventList, setEventList] = useState<EventItem[]>([]);
+    const eventRequestIdRef = useRef(0);
     const [timeLineData, setTimeLineData] = useState<TimeLineItem[]>([]);
     const timelineRef = useRef<HTMLDivElement>(null);
     const isFetchingRef = useRef<boolean>(false);
-    const isBaseInfo = activeTab === 'baseInfo';
-    const isEventTab = activeTab === 'event';
     const [pagination, setPagination] = useState<Pagination>({
       current: 1,
       total: 0,
       pageSize: 100,
     });
-    const tabList: TabItem[] = [
-      {
-        key: 'baseInfo',
-        label: t('alarms.summary'),
-      },
-      {
-        key: 'event',
-        label: t('alarms.event'),
-      },
-      {
-        key: 'timeline',
-        label: t('alarms.changes'),
-      },
-      {
-        key: 'actionRecords',
-        label: t('settings.actionTab'),
-      },
-    ];
+    const isBaseInfo = activeTab === 'baseInfo';
+    const isEventTab = activeTab === 'event';
+    const publicWidgets = useAlarmPublicWidgets({
+      monitorObjects: groupVisible ? formData.monitor_objects : undefined,
+      includeActionRecords: true,
+      activeTab,
+    });
+    const [objectKey, setObjectKey] = useState('0');
+    const currentObject =
+      publicWidgets.objects.find((item) => item.key === objectKey) ||
+      publicWidgets.objects[0];
+    const tabList: TabItem[] = publicWidgets.tabs;
+    const renderObjectSwitcher = () =>
+      publicWidgets.showObjectSwitcher ? (
+        <AlarmObjectSwitcher
+          objects={publicWidgets.objects}
+          value={currentObject?.key || '0'}
+          onChange={setObjectKey}
+        />
+      ) : null;
+
+    useEffect(() => {
+      if (!publicWidgets.objects.some((item) => item.key === objectKey)) {
+        setObjectKey(publicWidgets.objects[0]?.key || '0');
+      }
+    }, [objectKey, publicWidgets.objects]);
 
     const getEventListData = async (params: any) => {
+      const requestId = ++eventRequestIdRef.current;
       setEventLoading(true);
       try {
         const { items, count } = await getEventList({
@@ -97,10 +117,40 @@ const AlertDetail = forwardRef<ModalRef, ModalConfig & { readonly?: boolean }>(
           page: pagination.current,
           page_size: pagination.pageSize,
         });
+        if (requestId !== eventRequestIdRef.current) return;
         setEventList(items || []);
         setPagination((prev) => ({ ...prev, total: count }));
       } finally {
-        setEventLoading(false);
+        if (requestId === eventRequestIdRef.current) {
+          setEventLoading(false);
+        }
+      }
+    };
+
+    const prefetchEvents = async (alertId?: number | string) => {
+      if (!alertId) return;
+      const requestId = ++eventRequestIdRef.current;
+      setEventLoading(true);
+      try {
+        const { items, count } = await getEventList({
+          alert_id: alertId,
+          page: 1,
+          page_size: ALARM_DETAIL_EVENT_LIMIT,
+        });
+        if (requestId !== eventRequestIdRef.current) return;
+        setEventList(items || []);
+        setPagination((prev) => ({
+          ...prev,
+          current: 1,
+          total: count || 0,
+        }));
+      } catch {
+        if (requestId !== eventRequestIdRef.current) return;
+        setEventList([]);
+      } finally {
+        if (requestId === eventRequestIdRef.current) {
+          setEventLoading(false);
+        }
       }
     };
 
@@ -127,12 +177,14 @@ const AlertDetail = forwardRef<ModalRef, ModalConfig & { readonly?: boolean }>(
         form: AlarmTableDataItem;
         defaultTab?: string;
       }) => {
+        eventRequestIdRef.current += 1;
         setEventList([]);
         setGroupVisible(true);
         setTitle(title);
         setFormData(form);
         setActiveTab(defaultTab);
         setPagination((prev) => ({ ...prev, current: 1, total: 0 }));
+        prefetchEvents(form?.id);
       },
     }));
 
@@ -222,9 +274,12 @@ const AlertDetail = forwardRef<ModalRef, ModalConfig & { readonly?: boolean }>(
     };
 
     const handleCancel = () => {
+      eventRequestIdRef.current += 1;
       setGroupVisible(false);
       setActiveTab('baseInfo');
       setTimeLineData([]);
+      setEventList([]);
+      setFormData({});
     };
 
     const changeTab = (val: string) => {
@@ -242,6 +297,51 @@ const AlertDetail = forwardRef<ModalRef, ModalConfig & { readonly?: boolean }>(
       navigator.clipboard.writeText(text);
       message.success(t('alarmCommon.copied'));
     };
+
+    const detailContextLabels = useMemo(
+      () => ({
+        level: (value?: string | number) =>
+          levelList.find((item) => item.level_id === Number(value))
+            ?.level_display_name || String(value ?? '--'),
+        state: (value?: string) =>
+          STATE_MAP[value as keyof StateMap] || value || '--',
+        formatTime: (value?: string) =>
+          value ? convertToLocalizedTime(value) : '--',
+        notifyStatus: (value?: string) =>
+          notifiedState[value as keyof typeof notifiedState] || value || '--',
+        objects: (form: Record<string, any>) => {
+          if (!Array.isArray(form.monitor_objects) || !form.monitor_objects.length) {
+            return String(form.resource_name || '');
+          }
+          return form.monitor_objects
+            .map((item: { resource_type?: string; resource_name?: string }) =>
+              `${item.resource_type || '--'}: ${item.resource_name || '--'}`,
+            )
+            .join('；');
+        },
+      }),
+      [STATE_MAP, convertToLocalizedTime, levelList, notifiedState],
+    );
+
+    useAiPageContext(
+      () =>
+        buildAlarmDetailPageContext({
+          visible: groupVisible,
+          eventLoading,
+          formData,
+          eventData: eventList,
+          eventTotal: pagination.total,
+          labels: detailContextLabels,
+        }),
+      [
+        groupVisible,
+        eventLoading,
+        formData,
+        eventList,
+        pagination.total,
+        detailContextLabels,
+      ],
+    );
 
     return (
       <Drawer
@@ -263,8 +363,11 @@ const AlertDetail = forwardRef<ModalRef, ModalConfig & { readonly?: boolean }>(
             <Button onClick={handleCancel}>{t('common.close')}</Button>
           </div>
         }
+        classNames={{
+          body: 'flex min-h-0 flex-col overflow-hidden',
+        }}
       >
-        <div>
+        <div className="shrink-0">
           <div className="flex min-w-0 items-center gap-3">
             <div className="flex min-w-0 flex-1 items-center gap-2">
               <Tag className="shrink-0" color={levelMap[formData.level] as string}>
@@ -359,16 +462,23 @@ const AlertDetail = forwardRef<ModalRef, ModalConfig & { readonly?: boolean }>(
             </li>
           </ul>
         </div>
-        <Tabs activeKey={activeTab} items={tabList} onChange={changeTab} />
-        <div className="w-full min-h-[300px]">
+        <Tabs
+          className="shrink-0"
+          activeKey={activeTab}
+          items={tabList}
+          onChange={changeTab}
+        />
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {isBaseInfo && (
-            <div className="flex flex-col gap-4">
-              <BaseInfo detail={formData} />
-              <RelatedAlertsPanel alert={formData} onRefresh={handleAction} />
+            <div className="min-h-0 flex-1 overflow-auto">
+              <div className="flex flex-col gap-4">
+                <BaseInfo detail={formData} />
+                <RelatedAlertsPanel alert={formData} onRefresh={handleAction} />
+              </div>
             </div>
           )}
           {isEventTab && (
-            <div className="pt-[10px]">
+            <div className="min-h-0 flex-1 overflow-auto pt-[10px]">
               <EventTable
                 dataSource={eventList}
                 loading={eventLoading}
@@ -386,23 +496,78 @@ const AlertDetail = forwardRef<ModalRef, ModalConfig & { readonly?: boolean }>(
           )}
 
           {activeTab === 'timeline' && (
-            <Spin spinning={recordLoading}>
-              {timeLineData.length > 1 ? (
-                <div
-                  className="pt-[10px]"
-                  style={{ height: 'calc(100vh - 330px)', overflowY: 'auto' }}
-                  ref={timelineRef}
-                  onScroll={handleScroll}
-                >
-                  <Timeline items={timeLineData} />
-                </div>
-              ) : (
-                <CompactEmptyState description={t('common.noData')} />
-              )}
-            </Spin>
+            <div className="min-h-0 flex-1 overflow-auto">
+              <Spin spinning={recordLoading}>
+                {timeLineData.length > 1 ? (
+                  <div
+                    className="pt-[10px]"
+                    style={{ height: 'calc(100vh - 330px)', overflowY: 'auto' }}
+                    ref={timelineRef}
+                    onScroll={handleScroll}
+                  >
+                    <Timeline items={timeLineData} />
+                  </div>
+                ) : (
+                  <CompactEmptyState description={t('common.noData')} />
+                )}
+              </Spin>
+            </div>
+          )}
+          {publicWidgets.monitorView.visible && (
+            <div
+              className={
+                activeTab === 'monitorView'
+                  ? 'flex min-h-0 flex-1 flex-col overflow-hidden'
+                  : 'hidden'
+              }
+            >
+              <PublicWidgetPane
+                active={publicWidgets.monitorView.active}
+                loadWidget={publicWidgets.monitorView.loadWidget}
+                identifier={currentObject?.monitorId || ''}
+                identifierProp="monitorId"
+                toolbarStart={renderObjectSwitcher()}
+              />
+            </div>
+          )}
+          {publicWidgets.relatedTopology.visible && (
+            <div
+              className={
+                activeTab === 'relatedTopology'
+                  ? 'flex min-h-0 flex-1 flex-col overflow-hidden'
+                  : 'hidden'
+              }
+            >
+              <PublicWidgetPane
+                active={publicWidgets.relatedTopology.active}
+                loadWidget={publicWidgets.relatedTopology.loadWidget}
+                identifier={currentObject?.instUuid || ''}
+                identifierProp="instUuid"
+                toolbarStart={renderObjectSwitcher()}
+              />
+            </div>
+          )}
+          {publicWidgets.assetInfo.visible && (
+            <div
+              className={
+                activeTab === 'assetInfo'
+                  ? 'flex min-h-0 flex-1 flex-col overflow-hidden'
+                  : 'hidden'
+              }
+            >
+              <PublicWidgetPane
+                active={publicWidgets.assetInfo.active}
+                loadWidget={publicWidgets.assetInfo.loadWidget}
+                identifier={currentObject?.instUuid || ''}
+                identifierProp="instUuid"
+                toolbarStart={renderObjectSwitcher()}
+              />
+            </div>
           )}
           {activeTab === 'actionRecords' && (
-            <ActionTimeline alertId={formData.alert_id || ''} />
+            <div className="min-h-0 flex-1 overflow-auto">
+              <ActionTimeline alertId={formData.alert_id || ''} />
+            </div>
           )}
         </div>
       </Drawer>

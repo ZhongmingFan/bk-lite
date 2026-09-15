@@ -40,6 +40,28 @@ class Monitor(object):
         """
         return self.ingest_client.run("monitor_ingest_from_source", params=kwargs)
 
+    def list_cmdb_bind_candidates(self, **kwargs):
+        """列出可手绑的监控实例（name/ip 检索）。
+
+        走 ingest_client（apps.monitor.nats.monitor）。NATS 签名为
+        monitor_list_cmdb_bind_candidates(params)，须整包为 params。
+        """
+        return self.ingest_client.run("monitor_list_cmdb_bind_candidates", params=kwargs)
+
+    def bind_cmdb_id(self, **kwargs):
+        """按监控实例 ID 写入 cmdb_id。
+
+        走 ingest_client。NATS 签名为 monitor_bind_cmdb_id(params)，须整包为 params。
+        """
+        return self.ingest_client.run("monitor_bind_cmdb_id", params=kwargs)
+
+    def clear_cmdb_id(self, **kwargs):
+        """按 expected_cmdb_id 清空监控实例 cmdb_id，不改 node_id。
+
+        走 ingest_client。NATS 签名为 monitor_clear_cmdb_id(params)，须整包为 params。
+        """
+        return self.ingest_client.run("monitor_clear_cmdb_id", params=kwargs)
+
     def query_active_alert_summaries_by_monitor_ids(self, monitor_ids, **kwargs):
         """CMDB room3D 等调用方：按 monitor_id 批量查活跃告警摘要。"""
         return self.ingest_client.run(
@@ -242,3 +264,7 @@ class MonitorOperationAnaRpc(BaseOperationAnaRpc):
     def query_metric_series(self, **kwargs):
         """按已注册指标名查询趋势或排行，未选实例不退化为全量。"""
         return self.client.run("query_metric_series", **kwargs)
+
+    def get_zombie_host_report(self, **kwargs):
+        """按所选 CMDB 主机查询僵尸机报表（阈值过滤后分页）。"""
+        return self.client.run("get_zombie_host_report", **kwargs)

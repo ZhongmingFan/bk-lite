@@ -1,8 +1,8 @@
 'use client';
-
+import './register-incidents-pilot';
 import React, { useState, useEffect } from 'react';
 import LevelIcon from '@/app/alarm/components/levelIcon';
-import AlarmFilters from '@/app/alarm/components/alarmFilters';
+import AlarmFilters from '@/app/alarm/components/alarm-filters';
 import CustomTable from '@/components/custom-table';
 import alertStyle from './index.module.scss';
 import TimeSelector from '@/components/time-selector';
@@ -15,14 +15,15 @@ import { IncidentTableDataItem } from '@/app/alarm/types/incidents';
 import { FiltersConfig } from '@/app/alarm/types/alarms';
 import { useTranslation } from '@/utils/i18n';
 import { incidentStates } from '@/app/alarm/constants/alarm';
-import { useRouter } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import { useCommon } from '@/app/alarm/context/common';
+import { toIncidentLevelFilterOptions } from '@/app/alarm/utils/incidentLevelFilters';
 import { KeepAlive, useActivate } from 'react-activation';
 
 const IncidentsPage: React.FC = () => {
   const { getIncidentList } = useIncidentsApi();
   const { t } = useTranslation();
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const { levelListIncident, levelMapIncident } = useCommon();
   const [searchText, setSearchText] = useState('');
   const [data, setData] = useState<IncidentTableDataItem[]>([]);
@@ -209,6 +210,7 @@ const IncidentsPage: React.FC = () => {
         <AlarmFilters
           filterSource={false}
           stateOptions={stateOptions}
+          levelOptions={toIncidentLevelFilterOptions(levelListIncident)}
           filters={filters}
           onFilterChange={onFilterChange}
           clearFilters={clearFilters}
@@ -233,7 +235,7 @@ const IncidentsPage: React.FC = () => {
         </div>
         <CustomTable
           rowKey="id"
-          scroll={{ y: 'calc(100vh - 280px)', x: 'calc(100vw - 320px)' }}
+          scroll={{ y: 'calc(100vh - 280px)', x: 'max-content' }}
           columns={columns}
           dataSource={data}
           pagination={pagination}

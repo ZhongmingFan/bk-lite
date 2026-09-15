@@ -34,6 +34,11 @@ import type {
   AlarmActionRowData,
 } from '@/app/alarm/components/alarm-action/types';
 import type { MonitorObjectSnapshot } from '@/app/alarm/types/alarms';
+import {
+  AlarmObjectSwitcher,
+  PublicWidgetPane,
+  useAlarmPublicWidgets,
+} from '@/app/alarm/components/public-widget-pane';
 
 export interface AlarmDetailLevelOption {
   color?: string;
@@ -63,6 +68,8 @@ export interface AlarmDetailLogItem {
 }
 
 export interface AlarmDetailDrawerData extends AlarmActionRowData {
+  push_source_ids?: string[];
+  source_names?: string[];
   alert_id?: string | number;
   content?: string;
   duration?: string;
@@ -164,27 +171,37 @@ const AlarmDetailDrawer = forwardRef<
     const [timeLineData, setTimeLineData] = useState<Array<{ color: string; children: React.ReactNode }>>([]);
     const timelineRef = useRef<HTMLDivElement>(null);
     const isFetchingRef = useRef<boolean>(false);
-    const isBaseInfo = activeTab === 'baseInfo';
-    const isEventTab = activeTab === 'event';
     const [pagination, setPagination] = useState<AlarmDetailPagination>({
       current: 1,
       total: 0,
       pageSize: 100,
     });
-    const tabList = [
-      {
-        key: 'baseInfo',
-        label: t('alarms.summary'),
-      },
-      {
-        key: 'event',
-        label: t('alarms.event'),
-      },
-      {
-        key: 'timeline',
-        label: t('alarms.changes'),
-      },
-    ];
+    const isBaseInfo = activeTab === 'baseInfo';
+    const isEventTab = activeTab === 'event';
+    const publicWidgets = useAlarmPublicWidgets({
+      monitorObjects: groupVisible ? formData.monitor_objects : undefined,
+      includeActionRecords: false,
+      activeTab,
+    });
+    const [objectKey, setObjectKey] = useState('0');
+    const currentObject =
+      publicWidgets.objects.find((item) => item.key === objectKey) ||
+      publicWidgets.objects[0];
+    const tabList = publicWidgets.tabs;
+    const renderObjectSwitcher = () =>
+      publicWidgets.showObjectSwitcher ? (
+        <AlarmObjectSwitcher
+          objects={publicWidgets.objects}
+          value={currentObject?.key || '0'}
+          onChange={setObjectKey}
+        />
+      ) : null;
+
+    useEffect(() => {
+      if (!publicWidgets.objects.some((item) => item.key === objectKey)) {
+        setObjectKey(publicWidgets.objects[0]?.key || '0');
+      }
+    }, [objectKey, publicWidgets.objects]);
 
     const getEventListData = async (params: Record<string, unknown>) => {
       setEventLoading(true);
@@ -364,8 +381,11 @@ const AlarmDetailDrawer = forwardRef<
         maskClosable={false}
         cancelText={t('common.close')}
         onCancel={handleCancel}
+        classNames={{
+          body: 'flex min-h-0 flex-col overflow-hidden',
+        }}
       >
-        <div>
+        <div className="shrink-0">
           <div className="flex min-w-0 items-center gap-3">
             <div className="flex min-w-0 flex-1 items-center gap-2">
               <EventLevelTag
@@ -457,16 +477,23 @@ const AlarmDetailDrawer = forwardRef<
             </li>
           </ul>
         </div>
-        <Tabs activeKey={activeTab} items={tabList} onChange={changeTab} />
-        <div className="min-h-[300px] w-full">
+        <Tabs
+          className="shrink-0"
+          activeKey={activeTab}
+          items={tabList}
+          onChange={changeTab}
+        />
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {isBaseInfo && (
-            <div className="flex flex-col gap-4">
-              <AlarmBaseInfo detail={formData} />
-              {renderRelatedAlerts?.(formData, { onRefresh: handleAction })}
+            <div className="min-h-0 flex-1 overflow-auto">
+              <div className="flex flex-col gap-4">
+                <AlarmBaseInfo detail={formData} />
+                {renderRelatedAlerts?.(formData, { onRefresh: handleAction })}
+              </div>
             </div>
           )}
           {isEventTab && (
-            <div className="pt-[10px]">
+            <div className="min-h-0 flex-1 overflow-auto pt-[10px]">
               <AlarmEventTable
                 dataSource={eventList}
                 levelOptions={toEventLevelOptions(levelOptions)}
@@ -484,21 +511,75 @@ const AlarmDetailDrawer = forwardRef<
             </div>
           )}
 
-          {!isBaseInfo && !isEventTab && (
-            <Spin spinning={recordLoading}>
-              {timeLineData.length > 1 ? (
-                <div
-                  className="pt-[10px]"
-                  style={{ height: 'calc(100vh - 330px)', overflowY: 'auto' }}
-                  ref={timelineRef}
-                  onScroll={handleScroll}
-                >
-                  <Timeline items={timeLineData} />
-                </div>
-              ) : (
-                <CompactEmptyState description={t('common.noData')} className="py-6" />
-              )}
-            </Spin>
+          {publicWidgets.monitorView.visible && (
+            <div
+              className={
+                activeTab === 'monitorView'
+                  ? 'flex min-h-0 flex-1 flex-col overflow-hidden'
+                  : 'hidden'
+              }
+            >
+              <PublicWidgetPane
+                active={publicWidgets.monitorView.active}
+                loadWidget={publicWidgets.monitorView.loadWidget}
+                identifier={currentObject?.monitorId || ''}
+                identifierProp="monitorId"
+                toolbarStart={renderObjectSwitcher()}
+              />
+            </div>
+          )}
+          {publicWidgets.relatedTopology.visible && (
+            <div
+              className={
+                activeTab === 'relatedTopology'
+                  ? 'flex min-h-0 flex-1 flex-col overflow-hidden'
+                  : 'hidden'
+              }
+            >
+              <PublicWidgetPane
+                active={publicWidgets.relatedTopology.active}
+                loadWidget={publicWidgets.relatedTopology.loadWidget}
+                identifier={currentObject?.instUuid || ''}
+                identifierProp="instUuid"
+                toolbarStart={renderObjectSwitcher()}
+              />
+            </div>
+          )}
+          {publicWidgets.assetInfo.visible && (
+            <div
+              className={
+                activeTab === 'assetInfo'
+                  ? 'flex min-h-0 flex-1 flex-col overflow-hidden'
+                  : 'hidden'
+              }
+            >
+              <PublicWidgetPane
+                active={publicWidgets.assetInfo.active}
+                loadWidget={publicWidgets.assetInfo.loadWidget}
+                identifier={currentObject?.instUuid || ''}
+                identifierProp="instUuid"
+                toolbarStart={renderObjectSwitcher()}
+              />
+            </div>
+          )}
+
+          {activeTab === 'timeline' && (
+            <div className="min-h-0 flex-1 overflow-auto">
+              <Spin spinning={recordLoading}>
+                {timeLineData.length > 1 ? (
+                  <div
+                    className="pt-[10px]"
+                    style={{ height: 'calc(100vh - 330px)', overflowY: 'auto' }}
+                    ref={timelineRef}
+                    onScroll={handleScroll}
+                  >
+                    <Timeline items={timeLineData} />
+                  </div>
+                ) : (
+                  <CompactEmptyState description={t('common.noData')} className="py-6" />
+                )}
+              </Spin>
+            </div>
           )}
         </div>
       </ContentFormDrawer>

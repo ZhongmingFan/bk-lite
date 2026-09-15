@@ -4,7 +4,7 @@
 # @Author: windyzhao
 
 import json
-from typing import List, Dict
+from typing import Dict, List
 
 from django.db import transaction
 from django.db.models import Max
@@ -134,6 +134,10 @@ class FieldGroupService:
                             False,
                         )
 
+                    from apps.cmdb.display_field import ExcludeFieldsCache
+
+                    ExcludeFieldsCache.invalidate_model_attrs(model_id)
+
         return group
 
     @staticmethod
@@ -189,6 +193,10 @@ class FieldGroupService:
                         [],
                         False,
                     )
+
+                from apps.cmdb.display_field import ExcludeFieldsCache
+
+                ExcludeFieldsCache.invalidate_model_attrs(model_id)
 
             # 删除分组
             group.delete()
@@ -330,10 +338,13 @@ class FieldGroupService:
         groups_count = groups.count()
 
         # 3. 解析属性（系统联动 ID 不对用户暴露于分组表单/模型设计）
+        from apps.cmdb.language.service import apply_attr_translations, group_display_name
         from apps.cmdb.services.module_ingest import filter_user_facing_attrs
 
-        attrs = filter_user_facing_attrs(
-            ModelManage.parse_attrs(model_info.get("attrs", "[]"))
+        attrs = apply_attr_translations(
+            filter_user_facing_attrs(ModelManage.parse_attrs(model_info.get("attrs", "[]"))),
+            model_id,
+            language,
         )
         # 4. 按分组组织属性
         groups_data = []
@@ -351,6 +362,7 @@ class FieldGroupService:
                 {
                     "id": group.id,
                     "group_name": group.group_name,
+                    "display_name": group_display_name(group.group_name, language),
                     "order": group.order,
                     "is_collapsed": group.is_collapsed,
                     "description": group.description,
@@ -416,7 +428,7 @@ class FieldGroupService:
             raise BaseAppException("模型不存在")
 
         # 2. 校验所有目标分组是否存在
-        unique_group_names = set(item["group_name"] for item in updates)
+        unique_group_names = {item["group_name"] for item in updates}
         for group_name in unique_group_names:
             FieldGroupService.validate_group_exists(model_id, group_name)
 
@@ -445,7 +457,7 @@ class FieldGroupService:
         # 更新模型属性缓存
         from apps.cmdb.display_field import ExcludeFieldsCache
 
-        ExcludeFieldsCache.update_on_model_change(model_id)
+        ExcludeFieldsCache.invalidate_model_attrs(model_id)
 
         # 6. 更新各个分组的attr_orders（添加新属性到末尾）
         for group_name in unique_group_names:
@@ -522,7 +534,7 @@ class FieldGroupService:
         # 更新模型属性缓存
         from apps.cmdb.display_field import ExcludeFieldsCache
 
-        ExcludeFieldsCache.update_on_model_change(model_id)
+        ExcludeFieldsCache.invalidate_model_attrs(model_id)
 
         # 6. 更新分组的attr_orders
         # 从旧分组移除
@@ -608,7 +620,7 @@ class FieldGroupService:
                 raise BaseAppException(f"属性'{attr_id}'不属于分组'{group_name}'")
 
         # 5. 校验：attr_orders必须包含该分组的所有属性
-        if set(attr_orders) != set(i for i in group_attr_ids if not i.endswith("_display")):
+        if set(attr_orders) != {i for i in group_attr_ids if not i.endswith("_display")}:
             missing = group_attr_ids - set(attr_orders)
             raise BaseAppException(f"缺少属性：{', '.join(missing)}")
 

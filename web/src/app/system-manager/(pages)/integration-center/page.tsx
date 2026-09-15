@@ -8,7 +8,7 @@ import { Button, Menu, Modal, message } from 'antd';
 import EntityList from '@/components/entity-list';
 import PermissionWrapper from '@/components/permission';
 import TopSection from '@/components/top-section';
-import { useRouter } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import { useIntegrationCenterApi } from '@/app/system-manager/api/integration-center';
 import type { IntegrationInstance, ProviderManifest } from '@/app/system-manager/types/integration-center';
 import { useUserInfoContext } from '@/context/userInfo';
@@ -17,11 +17,11 @@ import commonStyles from '@/app/system-manager/styles/common.module.scss';
 
 import CreateIntegrationInstanceModal from './CreateIntegrationInstanceModal';
 import ProviderCapabilityTags from './ProviderCapabilityTags';
-import { buildIntegrationInstanceCardItem, filterIntegrationInstancesByName, getIntegrationCapabilityLabel, getIntegrationCapabilityTagColor, type IntegrationInstanceCardItem } from '@/app/system-manager/utils/integrationCenter';
+import { buildIntegrationInstanceCardItem, filterIntegrationInstancesByName, formatIntegrationInstanceDeleteError, getIntegrationCapabilityLabel, getIntegrationCapabilityTagColor, type IntegrationInstanceCardItem } from '@/app/system-manager/utils/integrationCenter';
 
 const IntegrationCenterPage: React.FC = () => {
   const { t } = useTranslation();
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const { selectedGroup } = useUserInfoContext();
   const { getProviders, getInstances, createInstance, updateInstance, deleteInstance } = useIntegrationCenterApi();
 
@@ -161,7 +161,7 @@ const IntegrationCenterPage: React.FC = () => {
   const handleDeleteInstance = (instance: IntegrationInstance) => {
     Modal.confirm({
       title: t('common.delConfirm'),
-      content: t('common.delConfirmCxt'),
+      content: t('system.integrationCenter.deleteConfirmContent'),
       okText: t('common.confirm'),
       cancelText: t('common.cancel'),
       onOk: async () => {
@@ -169,8 +169,8 @@ const IntegrationCenterPage: React.FC = () => {
           await deleteInstance(instance.id);
           message.success(t('common.delSuccess'));
           await fetchInstances();
-        } catch {
-          message.error(t('common.delFailed'));
+        } catch (error) {
+          message.error(formatIntegrationInstanceDeleteError(error, t, t('common.delFailed')));
         }
       },
     });

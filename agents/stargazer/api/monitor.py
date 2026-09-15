@@ -194,13 +194,15 @@ async def _run_monitor_handler(
     error_labels: Callable[[], dict] | None = None,
     extra_headers: dict[str, str] | None = None,
     log_name: str | None = None,
+    request_log_level: str = "info",
 ):
     display = log_name or monitor_type
-    logger.info("event=metrics_collection_request_received monitor_type=%s", display)
+    request_log = logger.debug if request_log_level == "debug" else logger.info
+    request_log("event=metrics_collection_request_received monitor_type=%s", display)
     try:
         task_params = build_params(request)
         task_info = await _submit_monitor_request(request, task_params)
-        logger.info("%s metrics run accepted: %s", display, task_info["task_id"])
+        request_log("%s metrics run accepted: %s", display, task_info["task_id"])
         return _monitor_accepted_response(
             monitor_type,
             task_info,
@@ -245,11 +247,14 @@ async def qcloud_metrics(request):
     def build_params(req):
         minutes = req.args.get("minutes", 5)
         username = req.headers.get("username")
-        logger.info("Request: Minutes=%s", minutes)
+        # 未传 region 时保持历史默认 ap-guangzhou，避免旧配置行为突变。
+        region = (req.headers.get("region") or "").strip() or "ap-guangzhou"
+        logger.info("Request: Minutes=%s Region=%s", minutes, region)
         return {
             "monitor_type": "qcloud",
             "username": username,
             "password": req.headers.get("password"),
+            "region": region,
             "minutes": int(minutes),
             "tags": _standard_tags(req),
         }
@@ -515,4 +520,219 @@ async def host_aix_remote_metrics(request):
         accept_labels=lambda task_params: {"host": task_params.get("host")},
         error_labels=lambda: {"host": request.headers.get("host")},
         log_name="HostAIXRemote",
+    )
+
+
+def _freebsd_os_monitor_params(request, *, config_type: str) -> dict:
+    host = request.headers.get("host")
+    username = request.headers.get("username")
+    password = request.headers.get("password")
+    auth_type = request.headers.get("auth_type", "password")
+    private_key_content = request.headers.get("private_key_content", "")
+    private_key_passphrase = request.headers.get("private_key_passphrase", "")
+    credential_encoding = request.headers.get("credential_encoding", "url")
+    port = request.headers.get("port", "22")
+    ansible_node_id = request.headers.get("ansible_node_id", "")
+    if not host or not username:
+        raise ValueError("missing required headers: host, username")
+    if auth_type == "private_key":
+        if not private_key_content:
+            raise ValueError("missing required headers: private_key_content")
+    elif not password:
+        raise ValueError("missing required headers: host, username, password")
+    if not ansible_node_id:
+        raise ValueError("missing ansible_node_id header")
+    logger.debug("event=freebsd_os_monitor_request host=%s config_type=%s monitor_type=host", host, config_type)
+    return {
+        "monitor_type": "host",
+        "host": host,
+        "os_type": "freebsd",
+        "username": username,
+        "password": password,
+        "port": port,
+        "ansible_node_id": ansible_node_id,
+        "auth_type": auth_type,
+        "private_key_content": private_key_content,
+        "private_key_passphrase": private_key_passphrase,
+        "credential_encoding": credential_encoding,
+        "tags": _standard_tags(
+            request,
+            defaults={
+                "instance_type": "os",
+                "collect_type": "http",
+                "config_type": config_type,
+            },
+        ),
+    }
+
+
+@monitor_router.get("/host_freebsd_remote/metrics")
+async def host_freebsd_remote_metrics(request):
+    try:
+        params = _freebsd_os_monitor_params(request, config_type="host_freebsd_remote")
+    except ValueError as error:
+        return _monitor_error_response("host", str(error), status=400, host=request.headers.get("host"))
+    return await _run_monitor_handler(
+        request,
+        monitor_type="host",
+        build_params=lambda _req: params,
+        accept_labels=lambda task_params: {"host": task_params.get("host")},
+        error_labels=lambda: {"host": request.headers.get("host")},
+        log_name="HostFreeBSDRemote",
+        request_log_level="debug",
+    )
+
+
+def _solaris_os_monitor_params(request, *, config_type: str) -> dict:
+    host = request.headers.get("host")
+    username = request.headers.get("username")
+    password = request.headers.get("password")
+    auth_type = request.headers.get("auth_type", "password")
+    private_key_content = request.headers.get("private_key_content", "")
+    private_key_passphrase = request.headers.get("private_key_passphrase", "")
+    credential_encoding = request.headers.get("credential_encoding", "url")
+    port = request.headers.get("port", "22")
+    ansible_node_id = request.headers.get("ansible_node_id", "")
+    if not host or not username:
+        raise ValueError("missing required headers: host, username")
+    if auth_type == "private_key":
+        if not private_key_content:
+            raise ValueError("missing required headers: private_key_content")
+    elif not password:
+        raise ValueError("missing required headers: host, username, password")
+    if not ansible_node_id:
+        raise ValueError("missing ansible_node_id header")
+    logger.debug("event=solaris_os_monitor_request host=%s config_type=%s monitor_type=host", host, config_type)
+    return {
+        "monitor_type": "host",
+        "host": host,
+        "os_type": "solaris",
+        "username": username,
+        "password": password,
+        "port": port,
+        "ansible_node_id": ansible_node_id,
+        "auth_type": auth_type,
+        "private_key_content": private_key_content,
+        "private_key_passphrase": private_key_passphrase,
+        "credential_encoding": credential_encoding,
+        "tags": _standard_tags(
+            request,
+            defaults={
+                "instance_type": "os",
+                "collect_type": "http",
+                "config_type": config_type,
+            },
+        ),
+    }
+
+
+@monitor_router.get("/host_solaris_remote/metrics")
+async def host_solaris_remote_metrics(request):
+    try:
+        params = _solaris_os_monitor_params(request, config_type="host_solaris_remote")
+    except ValueError as error:
+        return _monitor_error_response("host", str(error), status=400, host=request.headers.get("host"))
+    return await _run_monitor_handler(
+        request,
+        monitor_type="host",
+        build_params=lambda _req: params,
+        accept_labels=lambda task_params: {"host": task_params.get("host")},
+        error_labels=lambda: {"host": request.headers.get("host")},
+        log_name="HostSolarisRemote",
+        request_log_level="debug",
+    )
+
+
+def _hpux_os_monitor_params(request, *, config_type: str) -> dict:
+    host = request.headers.get("host")
+    username = request.headers.get("username")
+    password = request.headers.get("password")
+    auth_type = request.headers.get("auth_type", "password")
+    private_key_content = request.headers.get("private_key_content", "")
+    private_key_passphrase = request.headers.get("private_key_passphrase", "")
+    credential_encoding = request.headers.get("credential_encoding", "url")
+    port = request.headers.get("port", "22")
+    ansible_node_id = request.headers.get("ansible_node_id", "")
+    if not host or not username:
+        raise ValueError("missing required headers: host, username")
+    if auth_type == "private_key":
+        if not private_key_content:
+            raise ValueError("missing required headers: private_key_content")
+    elif not password:
+        raise ValueError("missing required headers: host, username, password")
+    if not ansible_node_id:
+        raise ValueError("missing ansible_node_id header")
+    logger.debug("event=hpux_os_monitor_request host=%s config_type=%s monitor_type=host", host, config_type)
+    return {
+        "monitor_type": "host",
+        "host": host,
+        "os_type": "hpux",
+        "username": username,
+        "password": password,
+        "port": port,
+        "ansible_node_id": ansible_node_id,
+        "auth_type": auth_type,
+        "private_key_content": private_key_content,
+        "private_key_passphrase": private_key_passphrase,
+        "credential_encoding": credential_encoding,
+        "tags": _standard_tags(
+            request,
+            defaults={
+                "instance_type": "os",
+                "collect_type": "http",
+                "config_type": config_type,
+            },
+        ),
+    }
+
+
+@monitor_router.get("/host_hpux_remote/metrics")
+async def host_hpux_remote_metrics(request):
+    try:
+        params = _hpux_os_monitor_params(request, config_type="host_hpux_remote")
+    except ValueError as error:
+        return _monitor_error_response("host", str(error), status=400, host=request.headers.get("host"))
+    return await _run_monitor_handler(
+        request,
+        monitor_type="host",
+        build_params=lambda _req: params,
+        accept_labels=lambda task_params: {"host": task_params.get("host")},
+        error_labels=lambda: {"host": request.headers.get("host")},
+        log_name="HostHPUXRemote",
+        request_log_level="debug",
+    )
+
+
+@monitor_router.get("/cisco_meraki/metrics")
+async def cisco_meraki_metrics(request):
+    def build_params(req):
+        base_url = (req.headers.get("base_url") or req.headers.get("host") or "https://api.meraki.com").strip()
+        organization_id = (req.headers.get("organization_id") or "").strip()
+        return {
+            "monitor_type": "cisco_meraki",
+            "password": req.headers.get("password"),
+            "base_url": base_url,
+            "organization_id": organization_id,
+            "timespan": req.args.get("timespan", 86400),
+            "uplink_timespan": req.headers.get("uplink_timespan"),
+            "preflight_kind": "https",
+            "preflight_kind_explicit": True,
+            "host": base_url,
+            "tags": _standard_tags(
+                req,
+                defaults={
+                    "instance_type": "cisco_meraki",
+                    "collect_type": "http",
+                    "config_type": "cisco_meraki",
+                },
+            ),
+        }
+
+    return await _run_monitor_handler(
+        request,
+        monitor_type="cisco_meraki",
+        build_params=build_params,
+        accept_labels=lambda params: {"organization_id": params.get("organization_id")},
+        error_labels=lambda: {"organization_id": request.headers.get("organization_id")},
+        log_name="Meraki",
     )

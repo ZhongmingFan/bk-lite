@@ -258,7 +258,7 @@ class LLMSkill(MaintainerInfo):
     # 使用组织：平台/Web/嵌入式对话准入；不变式 team ⊆ usage_team（与 Bot 对齐）。
     usage_team = models.JSONField(default=list, verbose_name="使用组织")
 
-    show_think = models.BooleanField(default=True)
+    show_think = models.BooleanField(default=False)
     tools = models.JSONField(default=list)
     skill_params = models.JSONField(default=list, verbose_name="技能参数")
     skill_packages = models.JSONField(default=list, verbose_name="技能包")
@@ -277,6 +277,16 @@ class LLMSkill(MaintainerInfo):
     instance_id = models.CharField(max_length=36, blank=True, null=True, verbose_name="实例ID", db_index=True)
     is_builtin = models.BooleanField(default=False, verbose_name="是否内置", db_index=True)
     wiki_knowledge_bases = models.ManyToManyField("WikiKnowledgeBase", blank=True, related_name="skills", verbose_name="Wiki知识库")
+    force_wiki_grounded = models.BooleanField(default=False, verbose_name="强制知识库回答")
+    memory_space = models.ForeignKey(
+        "MemorySpace",
+        on_delete=models.SET_NULL,
+        verbose_name="记忆体",
+        blank=True,
+        null=True,
+        related_name="llm_skills",
+    )
+    memory_write_rounds = models.IntegerField(default=10, verbose_name="记忆写入轮数")
 
     def __str__(self):
         return self.name

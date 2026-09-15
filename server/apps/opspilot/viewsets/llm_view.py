@@ -22,6 +22,7 @@ from apps.core.mixinx import EncryptMixin
 from apps.core.utils.loader import LanguageLoader
 from apps.core.utils.ssrf_validator import SSRFError, SSRFValidator
 from apps.core.utils.viewset_utils import AuthViewSet, LanguageViewSet
+from apps.opspilot.metis.llm.common.llm_client_factory import DEFAULT_CHAT_TEMPERATURE
 from apps.opspilot.metis.llm.tools.elasticsearch.connection import normalize_es_instance, test_es_instance
 from apps.opspilot.metis.llm.tools.jenkins.connection import normalize_jenkins_instance, test_jenkins_instance
 from apps.opspilot.metis.llm.tools.kubernetes.connection import (
@@ -59,6 +60,12 @@ from apps.opspilot.services.caller_identity import CALLER_IDENTITY_CONFIG_KEY, C
 from apps.opspilot.services.llm_context_budget import parse_context_window_tokens
 from apps.opspilot.services.mcp_client import MCPClient
 from apps.opspilot.services.skill_channel_service import sync_skill_channel_usage_teams
+from apps.opspilot.services.skill_memory_service import (
+    SkillMemoryConfigError,
+    normalize_memory_space_id,
+    normalize_write_rounds,
+    validate_skill_memory_binding,
+)
 from apps.opspilot.services.skill_package.importer import DEFAULT_SKILL_PACKAGE_ROOT, SkillPackageImporter
 from apps.opspilot.services.skill_package.runtime import build_skill_package_prompt, build_skill_package_strategy, hydrate_skill_packages
 from apps.opspilot.services.usage_team import merge_usage_team
@@ -123,6 +130,9 @@ class LLMViewSet(PinMixin, AuthViewSet):
             "enable_query_rewrite",
             "instance_id",
             "skill_id",
+            "force_wiki_grounded",
+            "memory_space_id",
+            "memory_write_rounds",
         }
     )
 
@@ -278,6 +288,21 @@ class LLMViewSet(PinMixin, AuthViewSet):
             self._validate_org_field_permission(request, extra_orgs)
         if "llm_model" in params:
             params["llm_model_id"] = params.pop("llm_model")
+        if "memory_space" in params or "memory_space_id" in params:
+            raw_space = params.pop("memory_space", None)
+            if "memory_space_id" in params:
+                raw_space = params.pop("memory_space_id")
+            try:
+                space_id = normalize_memory_space_id(raw_space)
+                validate_skill_memory_binding(space_id, request.user)
+            except SkillMemoryConfigError as exc:
+                return JsonResponse({"result": False, "message": str(exc)})
+            params["memory_space_id"] = space_id
+        if "memory_write_rounds" in params:
+            try:
+                params["memory_write_rounds"] = normalize_write_rounds(params.get("memory_write_rounds"))
+            except SkillMemoryConfigError as exc:
+                return JsonResponse({"result": False, "message": str(exc)})
         for tool in params.get("tools", []):
             for i in tool.get("kwargs", []):
                 if i.get("type") == "password":
@@ -390,13 +415,15 @@ class LLMViewSet(PinMixin, AuthViewSet):
             params["skill_type"] = skill_obj.skill_type
             params["tools"] = resolve_request_tools(params.get("tools"), skill_obj.tools)
             params["group"] = params["group"] if params.get("group") else skill_obj.team[0]
-            params["enable_suggest"] = params["enable_suggest"] if params.get("enable_suggest") else skill_obj.enable_suggest
-            params["enable_query_rewrite"] = params["enable_query_rewrite"] if params.get("enable_query_rewrite") else skill_obj.enable_query_rewrite
-            params["show_think"] = params["show_think"] if params.get("show_think") is not None else skill_obj.show_think
+            params["enable_suggest"] = False
+            params["enable_query_rewrite"] = False
+            params["show_think"] = False
+            params["temperature"] = DEFAULT_CHAT_TEMPERATURE
             params["locale"] = getattr(request.user, "locale", "en")  # 用户语言设置
             # 透传技能绑定的 Wiki 知识库,触发 format_chat_server_kwargs 的检索增强;
             # 否则智能体对话不会引用知识库内容,易凭 LLM 自身知识作答(幻觉)。
             params["wiki_kb_ids"] = list(skill_obj.wiki_knowledge_bases.values_list("id", flat=True))
+            params["force_wiki_grounded"] = bool(getattr(skill_obj, "force_wiki_grounded", False))
             error_message = self._prepare_skill_package_params(params, skill_obj)
             if error_message:
                 return self.create_error_stream_response(error_message)
@@ -473,13 +500,15 @@ class LLMViewSet(PinMixin, AuthViewSet):
             params["skill_type"] = skill_obj.skill_type
             params["tools"] = resolve_request_tools(params.get("tools"), skill_obj.tools)
             params["group"] = params["group"] if params.get("group") else skill_obj.team[0]
-            params["enable_suggest"] = params["enable_suggest"] if params.get("enable_suggest") else skill_obj.enable_suggest
-            params["enable_query_rewrite"] = params["enable_query_rewrite"] if params.get("enable_query_rewrite") else skill_obj.enable_query_rewrite
-            params["show_think"] = params["show_think"] if params.get("show_think") is not None else skill_obj.show_think
+            params["enable_suggest"] = False
+            params["enable_query_rewrite"] = False
+            params["show_think"] = False
+            params["temperature"] = DEFAULT_CHAT_TEMPERATURE
             params["locale"] = getattr(request.user, "locale", "en")  # 用户语言设置
             params["browser_use_force_task"] = True
             # 同 execute:透传 Wiki 知识库以触发检索增强,避免智能体不查知识库而凭空作答。
             params["wiki_kb_ids"] = list(skill_obj.wiki_knowledge_bases.values_list("id", flat=True))
+            params["force_wiki_grounded"] = bool(getattr(skill_obj, "force_wiki_grounded", False))
             error_message = self._prepare_skill_package_params(params, skill_obj)
             if error_message:
                 return self.create_error_stream_response(error_message)
@@ -869,24 +898,24 @@ class SkillPackageViewSet(AuthViewSet):
             )
         return queryset
 
-    @HasPermission("tools_list-View")
+    @HasPermission("tool_list-View")
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
 
-    @HasPermission("tools_list-View")
+    @HasPermission("tool_list-View")
     def retrieve(self, request, *args, **kwargs):
         return super().retrieve(request, *args, **kwargs)
 
-    @HasPermission("tools_list-Edit")
+    @HasPermission("tool_list-Edit")
     def update(self, request, *args, **kwargs):
         return super().update(request, *args, **kwargs)
 
-    @HasPermission("tools_list-Edit")
+    @HasPermission("tool_list-Edit")
     def partial_update(self, request, *args, **kwargs):
         return super().partial_update(request, *args, **kwargs)
 
     @action(methods=["POST"], detail=False)
-    @HasPermission("tools_list-Add")
+    @HasPermission("tool_list-Add")
     def import_zip(self, request):
         upload = request.FILES.get("file")
         if not upload:
@@ -945,7 +974,7 @@ class SkillPackageViewSet(AuthViewSet):
                     pass
 
     @action(methods=["POST"], detail=False)
-    @HasPermission("tools_list-Add")
+    @HasPermission("tool_list-Add")
     def import_local(self, request):
         """从本地服务器目录导入技能包。
 

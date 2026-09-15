@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const configFields = readFileSync(
   new URL('../src/app/system-manager/components/user/user-sync/UserSyncConfigFields.tsx', import.meta.url),
@@ -27,7 +29,7 @@ assert.match(
 );
 assert.match(
   configModal,
-  /const initialRootScopeValue = source\?\.business_config\?\.\[rootScopeFieldKey\];/,
+  /source\?\.business_config\?\.\[rootScopeFieldKey\]/,
   'the edit modal must read the saved root scope directly from the source',
 );
 assert.match(
@@ -52,7 +54,7 @@ assert.match(
 );
 assert.match(
   configFields,
-  /onChange=\{\(\) => \{\n\s+form\.setFields\(\[\{ name: namePath, errors: \[\] \}\]\);\n\s+setDepartmentSelectionMissing\(false\);\n\s+\}\}/,
+  /onChange=\{\(\) => \{\n\s+setDepartmentSelectionMissing\(false\);\n\s+\}\}/,
   'the missing-selection warning must be cleared after a real user selection',
 );
 assert.doesNotMatch(configFields, /__all__|ALL_DEPARTMENT_SELECTION_ID|is_all/);
@@ -65,12 +67,23 @@ assert.match(
 );
 assert.match(
   configFields,
-  /const nextValue = result\.selection_missing\n\s+\? ''\n\s+: result\.selected_id;/,
+  /writeRootDepartmentValue\(result\.selection_missing \? undefined : \(result\.selected_id \|\| undefined\)\)/,
   'an empty selected_id must leave the field empty rather than selecting a default tree node',
 );
 assert.doesNotMatch(configFields, /items\[0\]/);
-assert.equal(zh.system.channel.imNotificationPage.externalFieldOption.userid, '用户 ID');
-assert.equal(en.system.channel.imNotificationPage.externalFieldOption.userid, 'User ID');
+assert.equal(zh.system.channel.imNotificationPage.externalFieldOption, undefined);
+assert.equal(en.system.channel.imNotificationPage.externalFieldOption, undefined);
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const wecomZh = readFileSync(
+  resolve(repoRoot, 'server/apps/system_mgmt/providers/builtin/wecom/language/zh-Hans.yaml'),
+  'utf8',
+);
+const wecomEn = readFileSync(
+  resolve(repoRoot, 'server/apps/system_mgmt/providers/builtin/wecom/language/en.yaml'),
+  'utf8',
+);
+assert.match(wecomZh, /userid:\n\s+label:\s*用户 ID/);
+assert.match(wecomEn, /userid:\n\s+label:\s*User ID/);
 assert.equal(
   zh.system.user.userSyncPage.departmentSelectionInvalid,
   '当前选择的部门已不在应用可访问范围内，请重新选择',

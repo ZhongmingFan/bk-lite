@@ -17,7 +17,71 @@ export interface IntegrationSummaryItem {
 
 export const INTEGRATION_DETAIL_TAB_ORDER = ['base', 'user_sync', 'login_auth', 'im_notification', 'im_group'] as const;
 
+export const INTEGRATION_INSTANCE_IN_USE_CODE = 'INTEGRATION_INSTANCE_IN_USE';
+
 export type IntegrationDetailTab = typeof INTEGRATION_DETAIL_TAB_ORDER[number];
+
+export interface IntegrationInstanceCapabilityReference {
+  type: string;
+  id: number;
+  name: string;
+}
+
+const IN_USE_REFERENCE_LABEL_KEYS: Record<string, string> = {
+  user_sync: 'system.integrationCenter.capability.userSync',
+  login_auth: 'system.integrationCenter.capability.loginAuth',
+  im_notification: 'system.integrationCenter.capability.imNotification',
+};
+
+export function readIntegrationInstanceInUseReferences(
+  error: unknown,
+): IntegrationInstanceCapabilityReference[] {
+  if (!error || typeof error !== 'object') {
+    return [];
+  }
+  const record = error as { code?: unknown; payload?: unknown };
+  if (record.code !== INTEGRATION_INSTANCE_IN_USE_CODE) {
+    return [];
+  }
+  const payload = record.payload;
+  if (!payload || typeof payload !== 'object') {
+    return [];
+  }
+  const data = (payload as { data?: unknown }).data;
+  if (!data || typeof data !== 'object') {
+    return [];
+  }
+  const refs = (data as { references?: unknown }).references;
+  if (!Array.isArray(refs)) {
+    return [];
+  }
+  return refs.filter((item): item is IntegrationInstanceCapabilityReference => {
+    if (!item || typeof item !== 'object') {
+      return false;
+    }
+    const row = item as { type?: unknown; id?: unknown; name?: unknown };
+    return typeof row.type === 'string' && typeof row.id === 'number' && typeof row.name === 'string';
+  });
+}
+
+export function formatIntegrationInstanceDeleteError(
+  error: unknown,
+  t: (key: string, fallback?: string, values?: Record<string, string>) => string,
+  fallback: string,
+): string {
+  const refs = readIntegrationInstanceInUseReferences(error);
+  if (refs.length === 0) {
+    return error instanceof Error && error.message ? error.message : fallback;
+  }
+  const names = refs
+    .map((ref) => `${t(IN_USE_REFERENCE_LABEL_KEYS[ref.type] || ref.type)}「${ref.name}」`)
+    .join('、');
+  return t(
+    'system.integrationCenter.deleteBlockedInUse',
+    '该集成实例仍被其他配置引用，请先删除这些配置后再试：{names}',
+    { names },
+  );
+}
 
 export function getAvailableIntegrationTabs(
   instance: Pick<IntegrationInstance, 'capability_status'>,
@@ -97,23 +161,6 @@ export function getCreateModalFooterMode(input: {
     showCreate: !input.creating,
     showCreateAndConfigure: !input.creating,
   };
-}
-
-
-export const DEFAULT_INTEGRATION_PROVIDER_ICON = 'default-provider';
-
-export function resolveIntegrationProviderIcon(providerKey: string) {
-  const providerIconMap: Record<string, string> = {
-    feishu: 'feishu',
-    ad: 'ad',
-    ldap: 'LDAP',
-    oidc: 'OIDC',
-    saml: 'SAML',
-    github: 'github-fill',
-    wechat: 'wechat',
-    wecom: 'wecom',
-  };
-  return providerIconMap[providerKey] || DEFAULT_INTEGRATION_PROVIDER_ICON;
 }
 
 export function filterIntegrationInstancesByName<T extends { name: string }>(
@@ -234,10 +281,9 @@ export function formatIntegrationInstanceDisplayName(
     provider_name?: string;
     provider?: { name: string } | null;
   },
-  t: (key: string, fallback?: string) => string,
 ): string {
   const providerDisplayName =
-    instance.provider?.name || instance.provider_name || t(`system.integrationCenter.provider.${instance.provider_key}`, instance.provider_key);
+    instance.provider?.name || instance.provider_name || instance.provider_key;
   return `${instance.name} / ${providerDisplayName}`;
 }
 
@@ -267,21 +313,6 @@ export interface IntegrationInstanceCardItem {
   provider?: ProviderManifest;
 }
 
-export function getIntegrationProviderDisplayName(
-  providerKey: string,
-  t: (key: string, fallback?: string) => string,
-): string {
-  return t(`system.integrationCenter.provider.${providerKey}`, providerKey);
-}
-
-export function getIntegrationProviderDescription(
-  providerKey: string,
-  t: (key: string, fallback?: string) => string,
-  fallback = '',
-): string {
-  return t(`system.integrationCenter.providerDesc.${providerKey}`, fallback);
-}
-
 export function buildIntegrationInstanceCardItem(
   instance: IntegrationInstance,
   provider?: ProviderManifest,
@@ -289,7 +320,7 @@ export function buildIntegrationInstanceCardItem(
   return {
     id: instance.id,
     name: instance.name,
-    icon: resolveIntegrationProviderIcon(instance.provider_key),
+    icon: instance.provider_key,
     description: instance.provider?.name || instance.provider_key,
     tagList: [],
     raw: instance,
@@ -420,7 +451,7 @@ export function getIntegrationDetailTopSectionContent(
   instance: Pick<IntegrationInstance, 'provider_key' | 'description' | 'provider'>,
   t: (key: string, fallback?: string) => string,
 ) {
-  const providerName = instance.provider?.name || getIntegrationProviderDisplayName(instance.provider_key, t);
+  const providerName = instance.provider?.name || instance.provider_key;
   const providerLabel = `${t('system.integrationCenter.providerTypeLabel')}: ${providerName}`;
   return instance.description ? `${providerLabel} · ${instance.description}` : providerLabel;
 }

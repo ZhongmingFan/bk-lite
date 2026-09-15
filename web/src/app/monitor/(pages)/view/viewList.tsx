@@ -6,18 +6,19 @@ import useMonitorApi from '@/app/monitor/api';
 import useViewApi from '@/app/monitor/api/view';
 import { useTranslation } from '@/utils/i18n';
 import { useUnitTransform } from '@/app/monitor/hooks/useUnitTransform';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import ViewModal from './viewModal';
 import {
   ColumnItem,
   ModalRef,
   Pagination,
   TableDataItem,
-  IntegrationItem,
   ObjectItem,
   MetricItem
 } from '@/app/monitor/types';
 import { ViewListProps, ViewPluginOption } from '@/app/monitor/types/view';
+import { formatMonitorViewPluginTabs } from '@/app/monitor/utils/monitorViewPlugins';
 import CustomTable from '@/components/custom-table';
 import TimeSelector from '@/components/time-selector';
 import { useLocalizedTime } from '@/hooks/useLocalizedTime';
@@ -37,7 +38,6 @@ import {
 } from './viewColumnPreference';
 import {
   INSTANCE_VIEW_ACTION_KEY,
-  RESOURCE_IP_ROLE,
   buildInstanceViewColumns,
   buildReportTimeColumn,
   displayFieldKey,
@@ -61,7 +61,7 @@ const ViewList: React.FC<ViewListProps> = ({
     saveViewColumnPreference
   } = useViewApi();
   const { t } = useTranslation();
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const searchParams = useSearchParams();
   const { convertToLocalizedTime } = useLocalizedTime();
   const { getEnumValueUnit } = useUnitTransform();
@@ -216,10 +216,10 @@ const ViewList: React.FC<ViewListProps> = ({
     return summaryColumns.some((column) => column.fact === 'asset.ip');
   }, [objects, objectId]);
 
-  // 云平台子对象的内置 IP 列（role=resource_ip）：候选值需要后端下发，走同一个枚举接口。
+  // 带 role 的字段展示列（云平台子对象 IP、K8s Pod Namespace）：候选值需要后端下发。
   const roleFieldColumns = useMemo(() => {
     return (findByMonitorId(objects, objectId)?.display_fields || []).filter(
-      (column) => column.type === 'field' && column.role === RESOURCE_IP_ROLE
+      (column) => column.type === 'field' && Boolean(column.role)
     );
   }, [objects, objectId]);
 
@@ -336,7 +336,10 @@ const ViewList: React.FC<ViewListProps> = ({
           filters: assetIpFilters.length ? assetIpFilters : undefined
         };
       }
-      if (col.role === RESOURCE_IP_ROLE) {
+      if (
+        col.filterParam &&
+        String(col.filterParam).startsWith('field:')
+      ) {
         const options = fieldFilters[String(col.filterParam)] || [];
         next = {
           ...next,
@@ -846,23 +849,11 @@ const ViewList: React.FC<ViewListProps> = ({
     getAssetInsts(objectId, 'clear');
   };
 
-  const formatPlugins = (items: IntegrationItem[]): ViewPluginOption[] =>
-    items
-      .sort((a: IntegrationItem, b: IntegrationItem) => {
-        const order = (item: IntegrationItem) =>
-          item.is_pre ? 0 : !item.is_custom ? 1 : 2;
-        return order(a) - order(b);
-      })
-      .map((item: IntegrationItem) => ({
-        label: String(item.display_name || item.name || '--'),
-        value: String(item.id)
-      }));
-
   const openViewModal = async (row: TableDataItem) => {
     const effectivePlugins = await getEffectivePlugins(objectId, {
       instance_id: row.instance_id
     });
-    setPlugins(formatPlugins(effectivePlugins || []));
+    setPlugins(formatMonitorViewPluginTabs(effectivePlugins || []));
     viewRef.current?.showModal({
       title: t('monitor.views.indexView'),
       type: 'add',

@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
-from apps.cmdb.node_configs.network_config_file import NetworkConfigFileNodeParams
+import pytest
+
+from apps.cmdb.node_configs.network_config_file import NetworkConfigFileNodeParams, default_port_for_transport, resolve_transport_protocol
 
 INSTANCE_UUID = "123e4567-e89b-42d3-a456-426614174000"
 
@@ -36,6 +38,65 @@ def _task():
             "port": 2222,
         },
     )
+
+
+@pytest.mark.parametrize(
+    ("credential", "expected"),
+    [
+        ({}, "ssh"),
+        ({"transport_protocol": "ssh"}, "ssh"),
+        ({"transport_protocol": "telnet"}, "telnet"),
+        ({"transport_protocol": "TELNET"}, "telnet"),
+        ({"protocol": "telnet"}, "telnet"),
+        ({"transport_protocol": "ftp"}, "ssh"),
+        ({"transport_protocol": ""}, "ssh"),
+        ({"protocol": "2"}, "ssh"),
+        (None, "ssh"),
+    ],
+)
+def test_resolve_transport_protocol_falls_back_to_ssh(credential, expected):
+    assert resolve_transport_protocol(credential) == expected
+    assert default_port_for_transport(expected) == (23 if expected == "telnet" else 22)
+
+
+def test_set_credential_defaults_ssh_transport_and_port():
+    params = NetworkConfigFileNodeParams(_task())
+
+    headers = params.custom_headers()
+
+    assert headers["cmdbtransport_protocol"] == "ssh"
+    assert headers["cmdbport"] == "2222"
+
+
+def test_set_credential_uses_telnet_default_port():
+    task = _task()
+    task.decrypt_credentials = {
+        "username": "admin",
+        "password": "secret",
+        "transport_protocol": "telnet",
+    }
+    params = NetworkConfigFileNodeParams(task)
+
+    headers = params.custom_headers()
+
+    assert headers["cmdbtransport_protocol"] == "telnet"
+    assert headers["cmdbport"] == "23"
+
+
+def test_set_credential_keeps_explicit_telnet_port():
+    task = _task()
+    task.decrypt_credentials = {
+        "username": "admin",
+        "password": "secret",
+        "transport_protocol": "telnet",
+        "port": 2323,
+    }
+    params = NetworkConfigFileNodeParams(task)
+
+    headers = params.custom_headers()
+
+    assert headers["cmdbtransport_protocol"] == "telnet"
+    assert headers["cmdbport"] == "2323"
 
 
 def test_need_enable_is_derived_from_credential_enable_password():
@@ -79,7 +140,9 @@ def test_custom_headers_include_network_config_callback_and_device_type():
     assert headers["cmdbdevice_type"] == "cisco_ios"
     assert headers["cmdbcallback_subject"] == "receive_config_file_result"
     assert headers["cmdbconfig_name"] == "running-config"
-    assert headers["cmdbcommands"] == "show running-config\nshow version"
+    assert "\n" not in headers["cmdbcommands"]
+    assert "\r" not in headers["cmdbcommands"]
+    assert headers["cmdbcommands"].startswith("b64:")
 
 
 def test_env_config_contains_password_and_enable_password_without_plain_headers():
@@ -124,6 +187,8 @@ def test_push_params_builds_one_telegraf_child_config_per_target():
     assert '"cmdbhosts" = "10.0.0.2"' in configs[1]["content"]
     assert '"cmdbtarget_instance_uuid" = "223e4567-e89b-42d3-a456-426614174000"' in configs[1]["content"]
     assert all('namedrop = ["collection_request_accepted"]' in item["content"] for item in configs)
+    assert all('"cmdbcommands" = "b64:' in item["content"] for item in configs)
+    assert all("show running-config\\n" not in item["content"] for item in configs)
 
 
 def test_delete_params_cleans_legacy_and_per_target_child_configs():

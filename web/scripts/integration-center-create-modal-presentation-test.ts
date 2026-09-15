@@ -3,8 +3,8 @@ import { readFileSync } from 'node:fs';
 
 import {
   computeVisibleCapabilityTagCount,
-  DEFAULT_INTEGRATION_PROVIDER_ICON,
-  resolveIntegrationProviderIcon,
+  formatIntegrationInstanceDeleteError,
+  INTEGRATION_INSTANCE_IN_USE_CODE,
 } from '../src/app/system-manager/utils/integrationCenter';
 
 const page = readFileSync(
@@ -13,6 +13,10 @@ const page = readFileSync(
 );
 const modal = readFileSync(
   new URL('../src/app/system-manager/(pages)/integration-center/CreateIntegrationInstanceModal.tsx', import.meta.url),
+  'utf8',
+);
+const utils = readFileSync(
+  new URL('../src/app/system-manager/utils/integrationCenter.ts', import.meta.url),
   'utf8',
 );
 const tags = readFileSync(
@@ -31,9 +35,10 @@ assert.equal(computeVisibleCapabilityTagCount([200, 40], 80, 28), 1);
 assert.equal(computeVisibleCapabilityTagCount([], 200, 28), 0);
 assert.equal(computeVisibleCapabilityTagCount([40], 0, 28), 0);
 
-assert.equal(resolveIntegrationProviderIcon('wecom'), 'wecom');
-assert.equal(resolveIntegrationProviderIcon('acmedemo'), DEFAULT_INTEGRATION_PROVIDER_ICON);
-assert.equal(DEFAULT_INTEGRATION_PROVIDER_ICON, 'default-provider');
+assert.match(modal, /icon:\s*provider\.key/);
+assert.doesNotMatch(modal, /resolveIntegrationProviderIcon/);
+assert.doesNotMatch(utils, /resolveIntegrationProviderIcon/);
+assert.doesNotMatch(utils, /DEFAULT_INTEGRATION_PROVIDER_ICON/);
 
 assert.doesNotMatch(tags, /grid-cols-2/);
 assert.match(tags, /ResizeObserver/);
@@ -149,5 +154,48 @@ assert.equal(en.system.integrationCenter.providerPacks.builtinNoActions, 'Built-
 assert.match(packPage, /<Tag color="success">\{t\('system\.integrationCenter\.providerPacks\.loadLoaded'\)\}<\/Tag>/);
 assert.match(packPage, /<span[\s\S]*?title=\{t\('system\.integrationCenter\.providerPacks\.builtinNoActions'\)\}[\s\S]*?>\s*--\s*<\/span>/);
 assert.doesNotMatch(packPage, /record\.source === 'uploaded'[\s\S]*?:\s*null/);
+
+assert.equal(
+  zh.system.integrationCenter.deleteBlockedInUse,
+  '该集成实例仍被以下配置引用，请先删除后再试：{names}',
+);
+assert.equal(
+  en.system.integrationCenter.deleteBlockedInUse,
+  'This integration instance is still referenced. Delete these configurations first: {names}',
+);
+assert.equal(
+  zh.system.integrationCenter.deleteConfirmContent.includes('请先删除这些配置'),
+  true,
+);
+assert.match(page, /deleteConfirmContent/);
+assert.match(
+  readFileSync(new URL('../src/app/system-manager/api/integration-center/index.ts', import.meta.url), 'utf8'),
+  /suppressErrorNotification:\s*true/,
+);
+assert.equal(
+  formatIntegrationInstanceDeleteError(
+    {
+      code: INTEGRATION_INSTANCE_IN_USE_CODE,
+      payload: {
+        data: {
+          references: [
+            { type: 'user_sync', id: 1, name: 'source-a' },
+            { type: 'login_auth', id: 2, name: 'binding-c' },
+          ],
+        },
+      },
+    },
+    (key, fallback, values) => {
+      if (key === 'system.integrationCenter.capability.userSync') return '用户同步';
+      if (key === 'system.integrationCenter.capability.loginAuth') return '登录认证';
+      if (key === 'system.integrationCenter.deleteBlockedInUse') {
+        return `该集成实例仍被以下配置引用，请先删除后再试：${values?.names ?? ''}`;
+      }
+      return fallback || key;
+    },
+    '删除失败',
+  ),
+  '该集成实例仍被以下配置引用，请先删除后再试：用户同步「source-a」、登录认证「binding-c」',
+);
 
 console.log('integration-center create modal presentation contract passed');

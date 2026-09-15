@@ -92,6 +92,43 @@ def _fallback_answer(contexts):
     return f"{_FALLBACK_PREFIX}根据《{top['title']}》：\n{top['snippet']}"
 
 
+_POLICY_INTENT_MARKERS = ("制度", "规范", "政策", "规定", "管理办法", "管理规范")
+_POLICY_PAGE_TYPES = {"Policy", "policy", "Standard", "standard"}
+_GUIDE_PAGE_TYPES = {"User Guide", "user_guide", "How-to", "how-to", "Troubleshooting", "troubleshooting"}
+
+
+def _has_policy_intent(query, terms):
+    """True when the user is asking for policy/regulation rather than a how-to guide."""
+    blob = f"{query or ''}".lower()
+    if any(marker.lower() in blob for marker in _POLICY_INTENT_MARKERS):
+        return True
+    return any(term in _POLICY_INTENT_MARKERS for term in (terms or []))
+
+
+def _policy_intent_boost(entry, terms, query):
+    """Prefer Policy/Standard docs when the query asks for 制度/规范.
+
+    Keyword MVP has no embeddings; queries like "VPN使用有什么制度要求" otherwise
+    over-rank nearby 手册/账号规范 pages that share generic tokens.
+    """
+    if not _has_policy_intent(query, terms):
+        return 0
+    title = entry.title or ""
+    page_type = (entry.page_type or "").strip()
+    boost = 0
+    if page_type in _POLICY_PAGE_TYPES:
+        boost += 36
+    if any(marker in title for marker in ("管理规范", "使用规范", "管理制度", "使用管理")):
+        boost += 24
+    # Domain token in title (e.g. VPN) + policy phrasing should beat a how-to handbook.
+    domain_hits = sum(1 for term in terms if term and len(term) >= 2 and term.lower() in title.lower())
+    if domain_hits and any(marker in title for marker in ("规范", "制度", "政策")):
+        boost += 18 * domain_hits
+    if page_type in _GUIDE_PAGE_TYPES or any(marker in title for marker in ("手册", "指引", "FAQ", "指南")):
+        boost -= 20
+    return boost
+
+
 def _index_score(entry, terms, query):
     title = entry.title or ""
     aliases = " ".join(entry.aliases or [])
@@ -115,6 +152,7 @@ def _index_score(entry, terms, query):
         + _score(summary, terms) * 2
         + _score(entry.page_type, terms)
     )
+    score += _policy_intent_boost(entry, terms, query)
     if exact:
         score += 100
     return score, exact
@@ -132,7 +170,7 @@ def _generation_search_cache_key(scope, query, directory_ids, top_k):
         separators=(",", ":"),
     ).encode("utf-8")
     digest = hashlib.sha256(payload).hexdigest()
-    return f"wiki:generation-index-search:v1:{scope.generation_id}:{digest}"
+    return f"wiki:generation-index-search:v2:{scope.generation_id}:{digest}"
 
 
 def _generation_index_search(scope, terms, *, query, directory_ids, top_k):
@@ -419,12 +457,227 @@ def _answer_with_llm(query, contexts, llm_model_id, *, max_output_tokens):
 def _build_qa_prompt(query, contexts):
     ctx_text = "\n\n".join(f"[{i + 1}]\n# {c['title']}\n{c['snippet']}" for i, c in enumerate(contexts))
     return (
-        "基于下面的知识页面与资料摘要回答问题。优先使用知识页面;"
-        "在回答末尾用 [n] 标注所引用的编号(n 与上文 [n] 一致),"
-        "例如引用第 1 个上下文则写 [1]。"
-        "若资料不足,请明确说明。\n\n"
+        "你是企业知识库助手。只能依据下面提供的知识页面与资料摘要回答问题。\n"
+        "规则：\n"
+        "1. 优先使用知识页面;回答末尾用 [n] 标注引用(n 与上文 [n] 一致)。\n"
+        "2. 若上下文没有直接支撑问题结论的信息,必须明确回复："
+        "知识库中暂无相关资料,无法回答该问题。\n"
+        "3. 禁止借助常识补全、翻译、创作、编造制度条款或操作步骤;"
+        "禁止把仅共享个别关键词的无关文档当成依据。\n\n"
         f"# 上下文\n{ctx_text}\n\n# 问题\n{query}\n"
     )
+
+
+def _hit_relevance_score(hit):
+    try:
+        return float(hit.get("score") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _hit_matched_terms(hit):
+    explanation = hit.get("explanation") or {}
+    terms = explanation.get("matched_terms") or []
+    return [term for term in terms if term]
+
+
+def _hit_matched_by(hit):
+    matched_by = (hit.get("explanation") or {}).get("matched_by") or []
+    if isinstance(matched_by, str):
+        return [matched_by]
+    return [item for item in matched_by if item]
+
+
+def _is_graph_expansion(hit):
+    return "graph" in _hit_matched_by(hit)
+
+
+# Question/filler tokens that routinely produce keyword near-misses.
+_GENERIC_MATCH_TERMS = frozenset(
+    {
+        "知识",
+        "资料",
+        "相关",
+        "使用",
+        "如何",
+        "怎么",
+        "什么",
+        "哪些",
+        "为何",
+        "为什么",
+        "请问",
+        "介绍",
+        "说明",
+        "问题",
+        "查询",
+        "一下",
+        "the",
+        "a",
+        "an",
+        "of",
+        "to",
+        "in",
+        "for",
+        "and",
+        "or",
+        "is",
+        "are",
+        "what",
+        "how",
+        "why",
+        "which",
+        "please",
+    }
+)
+
+
+def _is_distinctive_term(term):
+    token = str(term or "").strip().lower()
+    if not token or token in _GENERIC_MATCH_TERMS:
+        return False
+    if _has_cjk(token):
+        return len(token) >= 2
+    return len(token) >= 3
+
+
+def _distinctive_matched_terms(hit):
+    return [term for term in _hit_matched_terms(hit) if _is_distinctive_term(term)]
+
+
+def _distinctive_terms_in_title(hit, terms):
+    title = (hit.get("title") or "").lower()
+    if not title:
+        return False
+    return any(str(term).lower() in title for term in terms)
+
+
+def _is_relevant_hit(hit, *, min_strong_score=100, min_weak_score=60, min_weak_terms=2):
+    """Drop keyword near-misses that only share generic tokens (e.g. 知识).
+
+    Without embeddings, search almost always returns top_k hits; feeding weak hits
+    to the LLM causes out-of-KB answers (translation/recipes/etc.).
+
+    Graph hops are not keyword matches (`matched_by: ["graph"]` only). They stay
+    relevant here; `_filter_relevant_contexts` keeps those aligned to a surviving seed.
+    `min_weak_terms` no longer rejects a single distinctive term — generic tokens
+    are excluded first, then one remaining term is enough.
+    """
+    if _is_graph_expansion(hit):
+        return True
+    score = _hit_relevance_score(hit)
+    if score >= min_strong_score:
+        return True
+    if (hit.get("explanation") or {}).get("exact_title_or_alias"):
+        return True
+    distinctive = _distinctive_matched_terms(hit)
+    if not distinctive:
+        return False
+    if _distinctive_terms_in_title(hit, distinctive):
+        return True
+    needed = 1 if min_weak_terms else 0
+    return score >= min_weak_score and len(distinctive) >= needed
+
+
+def _page_hit_id(hit):
+    if hit.get("kind") not in (None, "page"):
+        return None
+    return hit.get("id")
+
+
+def _graph_source_id(hit):
+    return (hit.get("explanation") or {}).get("graph_source_id")
+
+
+def _filter_relevant_contexts(contexts):
+    hits = list(contexts or [])
+    seeds = []
+    graph_hits = []
+    for hit in hits:
+        if _is_graph_expansion(hit):
+            graph_hits.append(hit)
+        elif _is_relevant_hit(hit):
+            seeds.append(hit)
+    kept_page_ids = {page_id for page_id in (_page_hit_id(hit) for hit in seeds) if page_id is not None}
+    aligned_graph = []
+    remaining = list(graph_hits)
+    progressed = True
+    while remaining and progressed:
+        progressed = False
+        still_pending = []
+        for hit in remaining:
+            if _graph_source_id(hit) in kept_page_ids:
+                aligned_graph.append(hit)
+                page_id = _page_hit_id(hit)
+                if page_id is not None:
+                    kept_page_ids.add(page_id)
+                progressed = True
+            else:
+                still_pending.append(hit)
+        remaining = still_pending
+    keep = {id(hit) for hit in seeds}
+    keep.update(id(hit) for hit in aligned_graph)
+    return [hit for hit in hits if id(hit) in keep]
+
+
+def _adapt_context_k(
+    hits,
+    *,
+    max_k=5,
+    strong_score=100.0,
+    gap_ratio=0.45,
+    weak_score=60.0,
+):
+    """Shrink filtered contexts before LLM (scheme A: adaptive top_k).
+
+    - Sort by score descending; never exceed max_k.
+    - Always keep the best hit when any remain after relevance filtering.
+    - If the top hit is exact-title/alias or score >= strong_score, prefer 1-2
+      contexts unless subsequent hits are also strong or close in score.
+    - Score-gap: with a strong top and len(kept) >= 2, stop when the next score
+      is below top * gap_ratio; with exact title and len(kept) >= 2, stop when
+      the next hit is weak.
+    """
+    if not hits:
+        return []
+    ranked = sorted(hits, key=_hit_relevance_score, reverse=True)
+    try:
+        max_k = max(1, int(max_k or 1))
+    except (TypeError, ValueError):
+        max_k = 5
+
+    top = ranked[0]
+    top_score = _hit_relevance_score(top)
+    top_exact = bool((top.get("explanation") or {}).get("exact_title_or_alias"))
+    top_strong = top_exact or top_score >= float(strong_score)
+    kept = [top]
+
+    for hit in ranked[1:]:
+        if len(kept) >= max_k:
+            break
+        score = _hit_relevance_score(hit)
+        exact = bool((hit.get("explanation") or {}).get("exact_title_or_alias"))
+        is_strong = exact or score >= float(strong_score)
+        is_weak = (not exact) and score < float(weak_score)
+        close = top_score > 0 and score >= top_score * float(gap_ratio)
+
+        if top_strong:
+            if len(kept) >= 2:
+                # Gap rule / exact+weak: stop before taking a 3rd+ weak/far hit.
+                if top_score > 0 and score < top_score * float(gap_ratio):
+                    break
+                if top_exact and is_weak:
+                    break
+                if not (is_strong or close):
+                    break
+            else:
+                # Prefer stopping at 1 when the runner-up is far/weak.
+                if top_score > 0 and score < top_score * float(gap_ratio) and not is_strong:
+                    break
+                if top_exact and is_weak:
+                    break
+
+        kept.append(hit)
+    return kept
 
 
 def _prepare_answer_context(
@@ -449,8 +702,10 @@ def _prepare_answer_context(
         include_descendants=include_descendants,
         llm_model_id=llm_model_id,
     )
-    contexts = context_result["hits"]
-    citations = context_result["citations"]
+    contexts = _adapt_context_k(_filter_relevant_contexts(context_result["hits"]), max_k=top_k)
+    # Keep citations aligned with surviving contexts when ids are present.
+    kept_ids = {(c.get("kind"), c.get("id")) for c in contexts}
+    citations = [cite for cite in (context_result.get("citations") or []) if (cite.get("kind"), cite.get("id")) in kept_ids or not kept_ids]
     if not contexts:
         return {
             "empty": True,

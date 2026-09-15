@@ -1,11 +1,12 @@
 # -- coding: utf-8 --
 import asyncio
+import importlib
 import json
 import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 from urllib.parse import unquote
 
 from core.logger import safe_log_value
@@ -21,10 +22,7 @@ ANSIBLE_ADHOC_FAILED_LOG_TEMPLATE = (
     "host_status=%s exit_code=%s stderr=%s stderr_missing=%s "
     "failed_stage=callback_process error_type=%s"
 )
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(password|passwd|secret|token|authorization|passphrase|"
-    r"private_key(?:_content)?)\s*[:=]\s*\S+"
-)
+_SECRET_ASSIGNMENT_RE = re.compile(r"(?i)\b(password|passwd|secret|token|authorization|passphrase|" r"private_key(?:_content)?)\s*[:=]\s*\S+")
 _PEM_BLOCK_RE = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
     re.DOTALL,
@@ -43,6 +41,18 @@ _UNREACHABLE_MARKERS = (
     "no route to host",
     "name or service not known",
 )
+
+
+def encode_ansible_raw_module_args(command: str) -> str:
+    """把 raw 命令编码成 Ansible adhoc `-a` 可安全解析的 JSON。
+
+    AdHocCLI 对非 JSON 的 `-a` 会走 ``parse_kv`` / ``split_args``。AIX ksh
+    heredoc 和脚本正文里的引号会触发
+    ``failed at splitting arguments, either an unbalanced jinja2 block or quotes``
+    （进程退出码 4），SSH 根本不会发生。JSON ``{"_raw_params": "..."}`` 走
+    ``from_yaml(..., json_only=True)``，跳过引号拆分。
+    """
+    return json.dumps({"_raw_params": command}, ensure_ascii=False)
 
 
 def _url_decode_secret(value: Any, credential_encoding: Any = "url") -> str:
@@ -70,12 +80,30 @@ VALID_MODULES = {"cpu", "mem", "disk", "net", "diskio", "processes", "system"}
 HOST_REMOTE_CALLBACK_REQUEST_TIMEOUT = 60
 LINUX_SCRIPT_WRAPPER_EOF = "STARGAZER_HOST_COLLECT_EOF"
 LINUX_SCRIPT_WRAPPER_PREFIX = "LC_ALL=C LANG=C bash --noprofile --norc"
-SUPPORTED_OS_TYPES = {"linux", "windows", "aix"}
+# 与 Host AIX/FreeBSD/HP-UX/Solaris Remote 看板、display_fields、collectTypes 取并集。
+# 采集模块按 OS 延迟导入；本 PR 不携带其它 Remote 插件树，模块存在时即可调度。
+HOST_REMOTE_OS_TYPES = frozenset({"aix", "freebsd", "hpux", "solaris"})
+SUPPORTED_OS_TYPES = {"linux", "windows", *HOST_REMOTE_OS_TYPES}
+SSH_OS_TYPES = frozenset({"linux", *HOST_REMOTE_OS_TYPES})
+DEBUG_SCRAPE_OS_TYPES = frozenset({"freebsd", "hpux", "solaris"})
+# module, wrap_attr, parse_attr — 名称对齐各 Remote 采集模块导出。
+_REMOTE_OS_MONITOR_SPECS: Dict[str, Tuple[str, str, str]] = {
+    "aix": ("aix_os_monitor", "wrap_ksh_collect", "parse_aix_metrics_to_prometheus"),
+    "freebsd": ("freebsd_os_monitor", "wrap_sh_collect", "parse_freebsd_metrics_to_prometheus"),
+    "hpux": ("hpux_os_monitor", "wrap_ksh_collect", "parse_hpux_metrics_to_prometheus"),
+    "solaris": ("solaris_os_monitor", "wrap_ksh_collect", "parse_solaris_metrics_to_prometheus"),
+}
 
 
-def sanitize_ansible_failure_text(
-    value: Any, *, max_length: int = ANSIBLE_FAILURE_TEXT_MAX_CHARS
-) -> str:
+def _load_remote_os_monitor(os_type: str):
+    spec = _REMOTE_OS_MONITOR_SPECS[os_type]
+    try:
+        return importlib.import_module(f"{__package__ or 'tasks.collectors'}.{spec[0]}")
+    except ImportError as exc:
+        raise ValueError(f"unsupported os_type: {os_type}") from exc
+
+
+def sanitize_ansible_failure_text(value: Any, *, max_length: int = ANSIBLE_FAILURE_TEXT_MAX_CHARS) -> str:
     text = _PEM_BLOCK_RE.sub("[omitted]", str(value or ""))
     text = _SECRET_ASSIGNMENT_RE.sub(r"\1=[omitted]", text)
     return safe_log_value(text, max_length=max_length)
@@ -110,21 +138,11 @@ def extract_ansible_failure_summary(result: Dict[str, Any], host: str) -> Dict[s
     summary_meta = payload.get("result_summary")
     if not isinstance(summary_meta, dict):
         summary_meta = {}
-    raw_status = str(
-        host_result.get("raw_status")
-        or summary_meta.get("failure_status")
-        or host_result.get("status")
-        or ""
-    )
+    raw_status = str(host_result.get("raw_status") or summary_meta.get("failure_status") or host_result.get("status") or "")
     exit_code = host_result.get("exit_code")
     if exit_code is None:
         exit_code = host_result.get("rc", summary_meta.get("failure_exit_code"))
-    stderr = str(
-        host_result.get("stderr")
-        or host_result.get("error_message")
-        or summary_meta.get("failure_stderr")
-        or ""
-    )
+    stderr = str(host_result.get("stderr") or host_result.get("error_message") or summary_meta.get("failure_stderr") or "")
     sanitized_stderr = sanitize_ansible_failure_text(stderr)
     return {
         "error": sanitize_ansible_failure_text(error),
@@ -137,9 +155,7 @@ def extract_ansible_failure_summary(result: Dict[str, Any], host: str) -> Dict[s
 
 def classify_ansible_failure(summary: Dict[str, Any]) -> str:
     host_status = str(summary.get("host_status") or "").upper()
-    text = " ".join(
-        str(summary.get(key) or "") for key in ("error", "stderr", "host_status")
-    ).lower()
+    text = " ".join(str(summary.get(key) or "") for key in ("error", "stderr", "host_status")).lower()
     if host_status.startswith("UNREACHABLE"):
         return "target_unreachable"
     if any(marker in text for marker in _AUTH_FAILURE_MARKERS):
@@ -169,10 +185,10 @@ def build_script(
     config_type: str | None = None,
 ) -> str:
     os_type = str(os_type or "").strip().lower()
-    if os_type == "aix":
-        from .aix_os_monitor import wrap_ksh_collect
-
-        return wrap_ksh_collect()
+    spec = _REMOTE_OS_MONITOR_SPECS.get(os_type)
+    if spec:
+        module = _load_remote_os_monitor(os_type)
+        return getattr(module, spec[1])()
     if os_type not in {"linux", "windows"}:
         raise ValueError(f"unsupported os_type: {os_type}")
     base_dir = SCRIPTS_DIR / ("linux" if os_type == "linux" else "windows")
@@ -461,20 +477,21 @@ class HostCollector(BaseCollector):
             raise ValueError(f"unsupported os_type: {os_type}")
         username = self.params["username"]
         raw_port = self.params.get("port")
-        ssh_like = os_type in {"linux", "aix"}
+        ssh_like = os_type in SSH_OS_TYPES
         port = int(raw_port) if raw_port not in (None, "") else (22 if ssh_like else 5986)
         ansible_node_id = self.params["ansible_node_id"]
-        if os_type == "aix":
-            from .aix_os_monitor import COMMAND_EXECUTE_TIMEOUT
-
-            execute_timeout = COMMAND_EXECUTE_TIMEOUT
+        if os_type in _REMOTE_OS_MONITOR_SPECS:
+            execute_timeout = getattr(_load_remote_os_monitor(os_type), "COMMAND_EXECUTE_TIMEOUT")
         else:
             execute_timeout = 60  # 脚本执行上限硬编码；表单 timeout 由框架作单对象预算
 
         modules = self._resolve_modules()
         credential_encoding = self.params.get("credential_encoding") or self.params.get("credentials_encoding") or "url"
 
-        logger.info("[Host Collector] host=%s, os=%s, modules=%s", host, os_type, modules)
+        if os_type in DEBUG_SCRAPE_OS_TYPES:
+            logger.debug("[Host Collector] host=%s, os=%s, modules=%s", host, os_type, modules)
+        else:
+            logger.info("[Host Collector] host=%s, os=%s, modules=%s", host, os_type, modules)
 
         script = build_script(
             os_type,
@@ -484,6 +501,7 @@ class HostCollector(BaseCollector):
 
         connection = "ssh" if ssh_like else "winrm"
         module = "raw" if ssh_like else "win_shell"
+        module_args = encode_ansible_raw_module_args(script) if ssh_like else script
 
         host_credential = {
             "host": host,
@@ -519,16 +537,15 @@ class HostCollector(BaseCollector):
             "ansible_node_id": ansible_node_id,
             "host_credentials": host_credentials,
             "module": module,
-            "module_args": script,
+            "module_args": module_args,
             "execute_timeout": execute_timeout,
         }
 
     def _resolve_callback_timeout(self) -> int:
         os_type = str(self.params.get("os_type", "") or "").strip().lower()
-        if os_type == "aix":
-            from .aix_os_monitor import COMMAND_EXECUTE_TIMEOUT
-
-            return int(self.params.get("host_remote_callback_timeout", COMMAND_EXECUTE_TIMEOUT))
+        if os_type in _REMOTE_OS_MONITOR_SPECS:
+            execute_timeout = getattr(_load_remote_os_monitor(os_type), "COMMAND_EXECUTE_TIMEOUT")
+            return int(self.params.get("host_remote_callback_timeout", execute_timeout))
         return int(
             self.params.get(
                 "host_remote_callback_timeout",
@@ -603,13 +620,14 @@ class HostCollector(BaseCollector):
 
         instance_id = self.params.get("tags", {}).get("instance_id", host)
         callback_timestamp = self.params.get("callback_timestamp")
-        if os_type == "aix":
-            from .aix_os_monitor import parse_aix_metrics_to_prometheus
-
-            prometheus_metrics = parse_aix_metrics_to_prometheus(
+        os_key = str(os_type or "linux").strip().lower()
+        spec = _REMOTE_OS_MONITOR_SPECS.get(os_key)
+        if spec:
+            parse_metrics = getattr(_load_remote_os_monitor(os_key), spec[2])
+            prometheus_metrics = parse_metrics(
                 metrics_data,
                 instance_id,
-                os_type,
+                os_key,
                 int(callback_timestamp) if callback_timestamp is not None else int(time.time() * 1000),
             )
         else:
@@ -622,7 +640,10 @@ class HostCollector(BaseCollector):
                 disk_exclude_fstypes=self.params.get("disk_exclude_fstypes"),
             )
 
-        logger.info(f"[Host Collector] Completed: host={host}, metrics_size={len(prometheus_metrics)}")
+        if os_key in DEBUG_SCRAPE_OS_TYPES:
+            logger.debug("[Host Collector] Completed: host=%s, metrics_size=%s", host, len(prometheus_metrics))
+        else:
+            logger.info(f"[Host Collector] Completed: host={host}, metrics_size={len(prometheus_metrics)}")
         return prometheus_metrics
 
     async def collect(self) -> str:

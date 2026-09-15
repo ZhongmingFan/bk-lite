@@ -2,7 +2,8 @@
 
 import './application3DChrome.css';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Empty, Select, Spin } from 'antd';
+import { Alert, Button, Select, Spin } from 'antd';
+import CompactEmptyState from '@/components/compact-empty-state';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useParams } from 'next/navigation';
 import { useTranslation } from '@/utils/i18n';
@@ -38,6 +39,7 @@ interface Application3DProps {
   onError?: (message: string) => void;
   runtimeActive?: boolean;
   onRawData?: (data: unknown) => void;
+  instUuid?: string;
 }
 
 const getErrorCode = (error: unknown): string | undefined => {
@@ -63,6 +65,7 @@ export default function Application3D({
   onError,
   runtimeActive = true,
   onRawData,
+  instUuid,
 }: Application3DProps) {
   const { t } = useTranslation();
   const translateRef = useRef(t);
@@ -111,6 +114,7 @@ export default function Application3D({
   const [architectureHost, setArchitectureHost] = useState<ArchitectureHostSelection | null>(null);
   const architectureOpenRef = useRef(false);
   const allowedOnSurface =
+    Boolean(instUuid) ||
     isSceneWidgetAllowedOnSurface('application3D', surface) ||
     screenRenderContext?.enabled === true;
   const wallMotionRef = useRef<'intro' | 'filter' | 'none'>('intro');
@@ -275,7 +279,7 @@ export default function Application3D({
     setError('');
     setRefreshWarning('');
     try {
-      const result = await getWall(filters, abortController.signal);
+      const result = await getWall(filters, abortController.signal, instUuid);
       if (!mountedRef.current || generation !== wallGenerationRef.current) return;
       setWall(result);
       setAppliedFilters(result.appliedFilters || filters);
@@ -318,12 +322,12 @@ export default function Application3D({
         setRefreshing(false);
       }
     }
-  }, [clearSelection, getWall, onError, onReady, t]);
+  }, [clearSelection, getWall, instUuid, onError, onReady, t]);
 
   useEffect(() => {
     if (!allowedOnSurface || !runtimeActive) return;
     void fetchWall(appliedFilters, Boolean(wall));
-  }, [refreshKey, runtimeActive]);
+  }, [refreshKey, runtimeActive, instUuid]);
 
   useEffect(() => {
     if (wall && !loading) setToolbarEntered(true);
@@ -613,12 +617,14 @@ export default function Application3D({
       )}
       {!loading && !error && wall?.items.length === 0 && (
         <div className="pointer-events-none absolute inset-0 z-[5] flex items-center justify-center">
-          <Empty description={t('dashboard.application3DEmpty')} />
+          <CompactEmptyState description={t('dashboard.application3DEmpty')} />
         </div>
       )}
       {!editMode && (
         <div className={`pointer-events-none absolute left-3 right-3 top-3 z-20 flex items-start justify-between gap-3${toolbarEntered ? ' app3d-toolbar-in' : ''}`}>
-          <div className="pointer-events-auto flex flex-wrap gap-2">{filterControls}</div>
+          <div className="pointer-events-auto flex flex-wrap gap-2">
+            {instUuid ? null : filterControls}
+          </div>
           <Button
             size="small"
             className="pointer-events-auto border-[var(--color-application3d-refresh-border)] bg-[var(--color-application3d-refresh-bg)] text-[var(--color-application3d-text)]"

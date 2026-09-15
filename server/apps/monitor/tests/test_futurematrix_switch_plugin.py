@@ -3,7 +3,9 @@
 FutureMatrix S1730S (enterprise 56813, FMEntity*) mirrors Huawei switch metrics
 with PEN 2011→56813 OID swap. Multi-dimensional health metrics use descr tags.
 Optical Rx/Tx is stored as raw µW; metrics query converts via 10*log10(µW/1000).
-PSU omitted to align with Switch Huawei SNMP (even though FMEntityPwrState exists).
+PSU is still omitted on FutureMatrix (even though FMEntityPwrState exists).
+Huawei switch may declare additional STACK/CSS/PSU/optical-DDM metrics beyond
+this mirrored campus set; FutureMatrix remains a subset.
 """
 import json
 from pathlib import Path
@@ -102,7 +104,8 @@ def test_pen_56813_not_2011(toml_text):
 def test_metric_set_matches_huawei_switch(metrics, huawei_metrics):
     names = {m["name"] for m in metrics["metrics"]}
     huawei_names = {m["name"] for m in huawei_metrics["metrics"]}
-    assert names == huawei_names
+    extra = names - huawei_names
+    assert extra == set(), f"futurematrix extra vs huawei: {extra}"
     missing = [h for h in HEALTH if h not in names]
     assert missing == []
 

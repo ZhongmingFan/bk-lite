@@ -372,16 +372,25 @@ class CollectorReleaseService:
         return token
 
     @staticmethod
-    def _import_plugin_payload(parsed: ParsedPack, meta: dict) -> None:
+    def _import_plugin_payload(parsed: ParsedPack, meta: dict) -> dict:
         if meta.get("skip_plugin"):
-            return
+            plugin_name = ""
+            if isinstance(parsed.metrics, dict):
+                plugin_name = str(parsed.metrics.get("plugin") or "").strip()
+            plugin = MonitorPlugin.objects.filter(name=plugin_name or parsed.collector).first()
+            current = (plugin.pack_content_sha256 or "") if plugin else ""
+            return {
+                "plugin": (plugin.name if plugin else plugin_name) or parsed.collector,
+                "previous_fingerprint": current,
+                "pack_content_sha256": current,
+            }
         templates = []
         if parsed.child_template:
             templates.append(parsed.child_template.__dict__)
         if parsed.base_template:
             templates.append(parsed.base_template.__dict__)
         try:
-            CollectorReleasePluginService.import_from_pack(
+            result = CollectorReleasePluginService.import_from_pack(
                 {
                     "metrics": parsed.metrics,
                     "ui": parsed.ui,
@@ -397,6 +406,7 @@ class CollectorReleaseService:
                 "监控插件写入失败，已成功的架构二进制保持导入状态。",
                 data={"code": PLUGIN_IMPORT_FAILED},
             ) from exc
+        return result
 
     @staticmethod
     def _upload_one_artifact(parsed: ParsedPack, artifact, data: dict, executable_name: str) -> None:
@@ -476,7 +486,7 @@ class CollectorReleaseService:
         return {"os": artifact.os, "arch": artifact.arch, "action": action}
 
     @staticmethod
-    def apply(token: str, confirms: list[str] | None = None) -> dict:
+    def apply(token: str, confirms: list[str] | None = None, actor_context=None) -> dict:
         confirms = set(confirms or [])
         staged = cache.get(f"{C.STAGING_CACHE_PREFIX}{token}")
         if not staged:
@@ -554,23 +564,36 @@ class CollectorReleaseService:
             # 二进制却只导入了一部分，内置迁移被跳过却没法用新包。
             CollectorReleaseService._renew_import_lock(parsed.collector, token)
             with transaction.atomic():
-                CollectorReleaseService._import_plugin_payload(parsed, meta)
+                plugin_result = CollectorReleaseService._import_plugin_payload(parsed, meta) or {}
 
             cache.delete(f"{C.STAGING_CACHE_PREFIX}{token}")
             plugin_name = ""
             if isinstance(parsed.metrics, dict):
                 plugin_name = str(parsed.metrics.get("plugin") or "").strip()
+            plugin_name = plugin_result.get("plugin") or plugin_name or parsed.collector
+            plugin = MonitorPlugin.objects.filter(name=plugin_name).first()
+            from apps.monitor.services.collect_config_update import CollectConfigUpdateService
+
+            stale = CollectConfigUpdateService.stale_summary(
+                plugin,
+                actor_context,
+                previous_fingerprint=plugin_result.get("previous_fingerprint") or "",
+            )
             return {
                 "ok": True,
                 "collector": parsed.collector,
                 "version": parsed.version,
                 "artifacts": artifact_results,
                 "issues": [item.to_dict() for item in all_issues if item.level != LEVEL_ERROR],
-                "monitor_object_id": CollectorReleasePluginService.resolve_entry_monitor_object_id(
-                    plugin_name=plugin_name or parsed.collector,
+                "monitor_object_id": stale.get("monitor_object_id")
+                or CollectorReleasePluginService.resolve_entry_monitor_object_id(
+                    plugin_name=plugin_name,
                     collector=parsed.collector,
                 ),
-                "message": "导入成功。已接入实例不会自动重下发，须到接入页再保存；节点二进制须再安装或升级。",
+                "plugin_id": stale.get("plugin_id"),
+                "stale_instance_count": stale.get("stale_instance_count") or 0,
+                "first_fingerprint": bool(stale.get("first_fingerprint")),
+                "message": "导入成功。已接入实例不会自动重下发。配置需更新与节点二进制可升级不是同一件事；节点二进制须再安装或升级。",
             }
         finally:
             CollectorReleaseService._release_import_lock(collector_name, token)
@@ -602,7 +625,7 @@ class CollectorReleaseService:
             cache.delete(key)
 
     @staticmethod
-    def restore_builtin(collector_name: str) -> dict:
+    def restore_builtin(collector_name: str, actor_context=None) -> dict:
         from apps.node_mgmt.services.collector_release.allowlist import load_builtin_collectors
 
         owner = f"restore:{uuid.uuid4().hex}"
@@ -616,7 +639,22 @@ class CollectorReleaseService:
                     collector.execute_parameters = builtin["execute_parameters"]
                 collector.imported_package_version = ""
                 collector.save(update_fields=["execute_parameters", "imported_package_version"])
-            return {"collector": collector_name, "plugin": plugin_result}
+            plugin = MonitorPlugin.objects.filter(name=plugin_result.get("plugin") or collector_name).first()
+            from apps.monitor.services.collect_config_update import CollectConfigUpdateService
+
+            stale = CollectConfigUpdateService.stale_summary(
+                plugin,
+                actor_context,
+                previous_fingerprint=plugin_result.get("previous_fingerprint") or "",
+            )
+            return {
+                "collector": collector_name,
+                "plugin": plugin_result,
+                "monitor_object_id": stale.get("monitor_object_id"),
+                "plugin_id": stale.get("plugin_id"),
+                "stale_instance_count": stale.get("stale_instance_count") or 0,
+                "first_fingerprint": bool(stale.get("first_fingerprint")),
+            }
         finally:
             CollectorReleaseService._release_import_lock(collector_name, owner)
 

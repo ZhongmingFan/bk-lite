@@ -139,6 +139,9 @@ export interface PluginItem {
   config_source?: 'configured' | 'reported_only' | 'configured_reported';
   time: string;
   config_ids?: string[];
+  need_update?: boolean;
+  hand_edited?: boolean;
+  can_update?: boolean;
 }
 
 export interface TemplateAccessGuideMetricItem {

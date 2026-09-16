@@ -20,6 +20,7 @@ import { HandledRequestError } from '@/utils/request';
 import PermissionWrapper from '@/components/permission';
 import { useScreenAwareRouter } from '@/console-layout';
 import { MODULE_OBJECT_QUERY_PARAM } from '@/app/monitor/utils/monitorObjectQuery';
+import { buildCollectNeedUpdateAssetUrl } from '@/app/monitor/utils/collectNeedUpdate';
 
 interface PackIssue {
   code: string;
@@ -48,6 +49,9 @@ interface ImportResult {
   artifacts?: Array<{ os: string; arch: string; action: string }>;
   message?: string;
   monitor_object_id?: number | string | null;
+  plugin_id?: number | string | null;
+  stale_instance_count?: number;
+  first_fingerprint?: boolean;
 }
 
 interface PackPreviewItem {
@@ -87,6 +91,26 @@ export const buildCollectorReleaseIntegrationListUrl = (
   }
   return `${INTEGRATION_LIST_PATH}?${MODULE_OBJECT_QUERY_PARAM}=${encodeURIComponent(String(objectId))}`;
 };
+
+export const buildCollectorReleaseStaleAssetUrl = (
+  items: Array<{ applied?: Pick<ImportResult, 'ok' | 'monitor_object_id' | 'plugin_id' | 'stale_instance_count'> | null }>
+): string => {
+  const applied = items
+    .map((item) => item.applied)
+    .find((item) => item?.ok && (item.stale_instance_count || 0) > 0);
+  return buildCollectNeedUpdateAssetUrl({
+    monitorObjectId: applied?.monitor_object_id,
+    pluginId: applied?.plugin_id
+  });
+};
+
+const sumStaleInstanceCount = (
+  items: Array<{ applied?: Pick<ImportResult, 'ok' | 'stale_instance_count'> | null }>
+) =>
+  (items || []).reduce((total, item) => {
+    if (!item.applied?.ok) return total;
+    return total + (Number(item.applied.stale_instance_count) || 0);
+  }, 0);
 
 const fileKey = (file: File) => `${file.name}-${file.size}-${file.lastModified}`;
 
@@ -601,6 +625,7 @@ const CollectorReleaseImportModal = ({
     const skipped = (items || []).filter(
       (item) => !item.applied?.ok && !item.applyFailed
     );
+    const staleCount = sumStaleInstanceCount(items || []);
     const title =
       imported.length && !failed.length && !skipped.length
         ? t('node-manager.packetManage.importSummarySuccess', '', {
@@ -613,11 +638,22 @@ const CollectorReleaseImportModal = ({
             skipped: skipped.length
           })
           : t('node-manager.packetManage.importSummaryFailed');
+    const staleHint =
+      staleCount > 0
+        ? t('node-manager.packetManage.successStaleCollect', '', {
+          count: staleCount
+        })
+        : '';
     return (
       <Result
         status={imported.length ? (failed.length ? 'warning' : 'success') : 'error'}
         title={title}
-        subTitle={t('node-manager.packetManage.successNeedSave')}
+        subTitle={
+          <div className="space-y-1">
+            <div>{t('node-manager.packetManage.successNeedSave')}</div>
+            {staleHint ? <div>{staleHint}</div> : null}
+          </div>
+        }
         extra={renderPackList(
           (items || []).map((item) => {
             const status = item.applied?.ok
@@ -679,16 +715,28 @@ const CollectorReleaseImportModal = ({
             <Button onClick={handleClose}>{t('common.close')}</Button>
             {(items || []).some((item) => item.applied?.ok) ? (
               <>
+                {sumStaleInstanceCount(items || []) > 0 ? (
+                  <Button
+                    type="primary"
+                    onClick={() => {
+                      handleClose();
+                      router.push(buildCollectorReleaseStaleAssetUrl(items || []));
+                    }}
+                  >
+                    {t('node-manager.packetManage.goToStaleAssets')}
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={() => {
+                      handleClose();
+                      router.push(buildCollectorReleaseIntegrationListUrl(items || []));
+                    }}
+                  >
+                    {t('node-manager.packetManage.goToIntegration')}
+                  </Button>
+                )}
                 <Button
-                  onClick={() => {
-                    handleClose();
-                    router.push(buildCollectorReleaseIntegrationListUrl(items || []));
-                  }}
-                >
-                  {t('node-manager.packetManage.goToIntegration')}
-                </Button>
-                <Button
-                  type="primary"
+                  type={sumStaleInstanceCount(items || []) > 0 ? 'default' : 'primary'}
                   onClick={() => {
                     handleClose();
                     router.push('/node-manager/cloudregion/node');

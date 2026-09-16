@@ -8,10 +8,12 @@ import {
   Popconfirm,
   Space,
   Tooltip,
-  Modal
+  Modal,
+  Switch,
+  Tag
 } from 'antd';
 import useApiClient from '@/utils/request';
-import { useSearchParams, useRouter } from 'next/navigation';
+import { useSearchParams, useRouter, usePathname } from 'next/navigation';
 import useMonitorApi from '@/app/monitor/api';
 import useIntegrationApi from '@/app/monitor/api/integration';
 import useViewApi from '@/app/monitor/api/view';
@@ -81,14 +83,18 @@ const normalizeIpList = (values: unknown): string[] => {
 const Asset = () => {
   const { isLoading } = useApiClient();
   const { getMonitorObject } = useMonitorApi();
-  const { deleteMonitorInstance, getInstanceListByPrimaryObject } =
-    useIntegrationApi();
+  const {
+    deleteMonitorInstance,
+    getInstanceListByPrimaryObject,
+    updateCollectTemplateConfigs
+  } = useIntegrationApi();
   const { getInstanceQueryParams } = useViewApi();
   const { t } = useTranslation();
   const commonContext = useCommon();
   const { convertToLocalizedTime } = useLocalizedTime();
   const searchparams = useSearchParams();
   const router = useRouter();
+  const pathname = usePathname();
   const { syncObjectId } = useMonitorObjectQuery();
   const urlObjId = resolveMonitorObjectQueryId({
     searchParams: searchparams,
@@ -124,6 +130,13 @@ const Asset = () => {
   const [ipFilterOptions, setIpFilterOptions] = useState<string[]>([]);
   const [selectedAssetIps, setSelectedAssetIps] = useState<string[]>([]);
   const selectedAssetIpsRef = useRef<string[]>([]);
+  const [needUpdateOnly, setNeedUpdateOnly] = useState(
+    searchparams.get('need_update') === '1'
+  );
+  const [stalePluginId, setStalePluginId] = useState(
+    searchparams.get('monitor_plugin_id') || ''
+  );
+  const [updatingKeys, setUpdatingKeys] = useState<React.Key[]>([]);
   const [modal, modalContextHolder] = Modal.useModal();
 
   useEffect(() => {
@@ -140,6 +153,10 @@ const Asset = () => {
   const handleAssetMenuClick: MenuProps['onClick'] = (e) => {
     if (e.key === 'batchDelete') {
       showBatchDeleteConfirm();
+      return;
+    }
+    if (e.key === 'batchUpdateCollectConfig') {
+      batchUpdateCollectConfigs();
       return;
     }
     openInstanceModal(
@@ -220,6 +237,8 @@ const Asset = () => {
                     )}
                     collectMode={plugin.collect_mode}
                     collectorNodes={plugin.collector_nodes}
+                    needUpdate={Boolean(plugin.need_update)}
+                    needUpdateText={t('monitor.integrations.needUpdateHint')}
                   />
                 );
 
@@ -230,19 +249,28 @@ const Asset = () => {
                         max-width: none;
                       }
                     `}</style>
-                    <PluginTooltipTrigger
-                      ariaLabel={`${plugin.display_name || '--'}，${statusText}`}
-                      color={statusInfo.color}
-                      onActivate={() =>
-                        openTemplateDrawer(record, {
-                          selectedConfigId: isAuto ? plugin.name : undefined,
-                          showTemplateList: false
-                        })
-                      }
-                      title={tooltipTitle}
-                    >
-                      {plugin.display_name || '--'}
-                    </PluginTooltipTrigger>
+                    <span className="inline-flex items-center gap-1">
+                      <PluginTooltipTrigger
+                        ariaLabel={`${plugin.display_name || '--'}，${statusText}`}
+                        color={statusInfo.color}
+                        onActivate={() =>
+                          openTemplateDrawer(record, {
+                            selectedConfigId: isAuto ? plugin.name : undefined,
+                            showTemplateList: false
+                          })
+                        }
+                        title={tooltipTitle}
+                      >
+                        {plugin.display_name || '--'}
+                      </PluginTooltipTrigger>
+                      {plugin.need_update ? (
+                        <Tooltip title={t('monitor.integrations.needUpdateHint')}>
+                          <Tag className="m-0" color="warning">
+                            {t('monitor.integrations.needUpdate')}
+                          </Tag>
+                        </Tooltip>
+                      ) : null}
+                    </span>
                   </React.Fragment>
                 );
               })}
@@ -318,7 +346,7 @@ const Asset = () => {
         title: t('common.action'),
         key: 'action',
         dataIndex: 'action',
-        width: 220,
+        width: 300,
         fixed: 'right',
         render: (_, record) => (
           <>
@@ -340,6 +368,37 @@ const Asset = () => {
                 {t('common.edit')}
               </Button>
             </Permission>
+            {record.can_update ? (
+              <Permission
+                requiredPermissions={['Edit']}
+                instPermissions={record.permission}
+              >
+                <Button
+                  type="link"
+                  className="ml-[10px]"
+                  loading={updatingKeys.includes(record.instance_id)}
+                  onClick={() =>
+                    updateCollectConfigs([record.instance_id], record)
+                  }
+                >
+                  {t('monitor.integrations.updateCollectConfig')}
+                </Button>
+              </Permission>
+            ) : null}
+            {record.need_update && !record.can_update ? (
+              <Permission
+                requiredPermissions={['Edit']}
+                instPermissions={record.permission}
+              >
+                <Button
+                  type="link"
+                  className="ml-[10px]"
+                  onClick={() => openHandEditedConfig(record)}
+                >
+                  {t('monitor.integrations.goToEditConfig')}
+                </Button>
+              </Permission>
+            ) : null}
             <Permission
               requiredPermissions={['Edit']}
               instPermissions={record.permission}
@@ -427,7 +486,8 @@ const Asset = () => {
     ipFilterOptions,
     selectedAssetIps,
     tableData,
-    organizationList
+    organizationList,
+    updatingKeys
   ]);
 
   const enableOperateAsset = useMemo(() => {
@@ -458,6 +518,12 @@ const Asset = () => {
       getAssetInsts(objectId);
     }
   }, [pagination.current, pagination.pageSize]);
+
+  useEffect(() => {
+    if (objectId) {
+      getAssetInsts(objectId);
+    }
+  }, [needUpdateOnly, stalePluginId]);
 
   useEffect(() => {
     if (objectId) {
@@ -510,7 +576,9 @@ const Asset = () => {
     objectId,
     pagination.current,
     pagination.pageSize,
-    searchText
+    searchText,
+    needUpdateOnly,
+    stalePluginId
   ]);
 
   const onRefresh = () => {
@@ -538,6 +606,7 @@ const Asset = () => {
     setSelectedAssetIps([]);
     selectedAssetIpsRef.current = [];
     setIpFilterOptions([]);
+    setStalePluginId('');
     setObjectId(id);
     syncObjectId(id);
   };
@@ -604,6 +673,14 @@ const Asset = () => {
         id: String(objectId),
         ...(selectedIps.length
           ? { vm_params: { [ASSET_IP_FACT]: selectedIps.join(',') } }
+          : {}),
+        ...(needUpdateOnly
+          ? {
+            need_update: true,
+            ...(stalePluginId
+              ? { monitor_plugin_id: stalePluginId }
+              : {})
+          }
           : {})
       };
       const data = await getInstanceListByPrimaryObject(params, {
@@ -753,6 +830,84 @@ const Asset = () => {
     getAssetInsts(objectId, 'clear');
   };
 
+  const openHandEditedConfig = (record: any) => {
+    const plugins = record.plugins || [];
+    const target =
+      plugins.find((plugin: any) => plugin.need_update && plugin.hand_edited) ||
+      plugins.find((plugin: any) => plugin.need_update);
+    openTemplateDrawer(record, {
+      selectedConfigId: target?.name,
+      showTemplateList: !target
+    });
+  };
+
+  const reportCollectUpdateResult = (result: {
+    updated?: string[];
+    skipped?: Array<{ reason?: string }>;
+    failed?: unknown[];
+  }) => {
+    const updated = result?.updated?.length || 0;
+    const skipped = result?.skipped?.length || 0;
+    const failed = result?.failed?.length || 0;
+    if (failed || skipped) {
+      message.warning(
+        t('monitor.integrations.updateCollectConfigPartial', '', {
+          updated,
+          skipped,
+          failed
+        })
+      );
+      return;
+    }
+    message.success(t('monitor.integrations.updateCollectConfigSuccess'));
+  };
+
+  const updateCollectConfigs = async (
+    instanceIds: React.Key[],
+    record?: any
+  ) => {
+    const pluginId =
+      stalePluginId ||
+      record?.plugins?.find((plugin: any) => plugin.can_update)?.plugin_id;
+    setUpdatingKeys(instanceIds);
+    try {
+      const result = await updateCollectTemplateConfigs({
+        instance_ids: instanceIds,
+        ...(pluginId ? { monitor_plugin_id: pluginId } : {})
+      });
+      reportCollectUpdateResult(result || {});
+      await getAssetInsts(objectId);
+    } finally {
+      setUpdatingKeys([]);
+    }
+  };
+
+  const batchUpdateCollectConfigs = async () => {
+    const rows = tableData.filter((item) =>
+      selectedRowKeys.includes(item.instance_id as React.Key)
+    );
+    const updatable = rows.filter((item) => item.can_update);
+    if (!updatable.length) {
+      message.warning(t('monitor.integrations.noUpdatableCollectConfig'));
+      return;
+    }
+    await updateCollectConfigs(
+      updatable.map((item) => item.instance_id as React.Key)
+    );
+  };
+
+  const syncNeedUpdateQuery = (checked: boolean) => {
+    const params = new URLSearchParams(searchparams.toString());
+    if (checked) {
+      params.set('need_update', '1');
+    } else {
+      params.delete('need_update');
+      params.delete('monitor_plugin_id');
+      setStalePluginId('');
+    }
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  };
+
   // 跳转到集成列表页面进行接入
   const goToIntegration = () => {
     const targetUrl = `/monitor/integration/list?objId=${String(objectId)}`;
@@ -800,7 +955,19 @@ const Asset = () => {
             onPressEnter={() => getAssetInsts(objectId)}
             onClear={clearText}
           ></Input>
-          <div className="flex">
+          <div className="flex items-center">
+            <label className="mr-[8px] inline-flex items-center gap-[6px] text-[var(--color-text-2)]">
+              <Switch
+                size="small"
+                checked={needUpdateOnly}
+                onChange={(checked) => {
+                  setNeedUpdateOnly(checked);
+                  setPagination((prev) => ({ ...prev, current: 1 }));
+                  syncNeedUpdateQuery(checked);
+                }}
+              />
+              {t('monitor.integrations.needUpdateFilter')}
+            </label>
             <Button
               type="primary"
               icon={<PlusOutlined />}
@@ -847,7 +1014,10 @@ const Asset = () => {
         organizationList={organizationList}
         onSuccess={() => getAssetInsts(objectId)}
       />
-      <TemplateConfigDrawer ref={templateDrawerRef} onSuccess={() => {}} />
+      <TemplateConfigDrawer
+        ref={templateDrawerRef}
+        onSuccess={() => getAssetInsts(objectId)}
+      />
     </div>
   );
 };

@@ -300,7 +300,10 @@ class MonitorPluginViewSet(viewsets.ModelViewSet):
 
         # 与组件库的导入/恢复用同一套判定，避免只有监控侧权限的人撤销别人的导入。
         require_collector_pack_write(request)
-        result = CollectorReleaseService.restore_builtin(plugin.name)
+        result = CollectorReleaseService.restore_builtin(
+            plugin.name,
+            actor_context=_build_actor_context(request),
+        )
         return WebUtils.response_success(result)
 
     @action(methods=["get"], detail=False, url_path="export/(?P<pk>[^/.]+)")

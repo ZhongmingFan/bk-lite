@@ -496,7 +496,7 @@
     "etcd": "cc-etcd",
     "squid": "cc-squid",
     "keepalive": "cc-keepalive",
-    "tongweb": "cc-tongweb",
+    "tongweb": "cc-middleware",
     "tuxedo": "cc-tuxedo",
     "openresty": "cc-openresty",
     "memory": "cc-memory",

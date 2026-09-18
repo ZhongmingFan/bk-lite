@@ -36,7 +36,7 @@ export const BUILD_IN_MODEL: Array<{
   { key: 'etcd', icon: 'cc-etcd' },
   { key: 'squid', icon: 'cc-squid' },
   { key: 'keepalive', icon: 'cc-keepalive' },
-  { key: 'tongweb', icon: 'cc-tongweb' },
+  { key: 'tongweb', icon: 'cc-middleware' },
   { key: 'tuxedo', icon: 'cc-tuxedo' },
   { key: 'openresty', icon: 'cc-openresty' },
   { key: 'memory', icon: 'cc-memory' },
@@ -196,7 +196,7 @@ export const BUILD_IN_MODEL: Array<{
   },
   {
     key: 'sangforhci_account',
-    icon: 'cc-cloud-sangfor',
+    icon: 'cc-cloud-plat',
   },
   {
     key: 'nutanixhci_account',
@@ -280,7 +280,7 @@ export const BUILD_IN_MODEL: Array<{
   },
   {
     key: 'dameng',
-    icon: 'cc-dameng',
+    icon: 'cc-db',
   },
   {
     key: 'datacenter_dc',
@@ -296,7 +296,7 @@ export const BUILD_IN_MODEL: Array<{
   },
   {
     key: 'db2',
-    icon: 'cc-db2',
+    icon: 'cc-db',
   },
   {
     key: 'db_cluster',
@@ -344,7 +344,7 @@ export const BUILD_IN_MODEL: Array<{
   },
   {
     key: 'ibmmq',
-    icon: 'cc-ibmmq',
+    icon: 'cc-middleware',
   },
   {
     key: 'iis',
@@ -476,7 +476,7 @@ export const BUILD_IN_MODEL: Array<{
   },
   {
     key: 'websphere',
-    icon: 'cc-websphere',
+    icon: 'cc-middleware',
   },
   {
     key: 'zookeeper',
@@ -522,7 +522,7 @@ export const BUILD_IN_MODEL: Array<{
   },
   {
     key: 'kingbase',
-    icon: 'cc-kingbase',
+    icon: 'cc-db',
   },
   {
     key: 'vastbase',
@@ -530,7 +530,7 @@ export const BUILD_IN_MODEL: Array<{
   },
   {
     key: 'greenplum',
-    icon: 'cc-greenplum',
+    icon: 'cc-db',
   },
   {
     key: 'storage_disk',
@@ -589,16 +589,16 @@ export const BUILD_IN_MODEL: Array<{
   // IBM 中间件
   {
     key: 'ihs',
-    icon: 'cc-ihs',
+    icon: 'cc-middleware',
   },
   {
     key: 'cics',
-    icon: 'cc-cics',
+    icon: 'cc-middleware',
   },
   // 数据库
   {
     key: 'informix',
-    icon: 'cc-informix',
+    icon: 'cc-db',
   },
   {
     key: 'sybase',
@@ -643,11 +643,11 @@ export const BUILD_IN_MODEL: Array<{
   // 存储硬件
   {
     key: 'ibm_storwize',
-    icon: 'cc-ibm_storwize',
+    icon: 'cc-storage',
   },
   {
     key: 'ibm_ds',
-    icon: 'cc-ibm_ds',
+    icon: 'cc-storage',
   },
   {
     key: 'emc_symmetrix',
@@ -713,7 +713,7 @@ export const BUILD_IN_MODEL: Array<{
   },
   {
     key: 'domestic_linux',
-    icon: 'cc-domestic_linux',
+    icon: 'cc-host',
   },
   // 其他
   {
@@ -722,11 +722,11 @@ export const BUILD_IN_MODEL: Array<{
   },
   {
     key: 'zstack',
-    icon: 'cc-zstack',
+    icon: 'cc-cloud-plat',
   },
   {
     key: 'h3c_cas',
-    icon: 'cc-h3c_cas',
+    icon: 'cc-cloud-plat',
   },
 ];
 

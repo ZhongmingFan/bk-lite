@@ -5,7 +5,6 @@ import {
   CloseCircleFilled,
   ExclamationCircleFilled,
   ReloadOutlined,
-  PlayCircleOutlined,
   DashboardOutlined
 } from '@ant-design/icons';
 import CompactEmptyState from '@/components/compact-empty-state';
@@ -127,16 +126,6 @@ const ScriptTrialRunArea: React.FC<ScriptTrialRunAreaProps> = ({
               <Tag className="ml-1 text-[12px]">{instanceName}</Tag>
             )}
           </div>
-          <Button
-            type="primary"
-            size="small"
-            icon={<PlayCircleOutlined />}
-            loading={trialBusy}
-            disabled={!nodeSelected || trialBusy}
-            onClick={handleTrialClick}
-          >
-            {t('monitor.integrations.trialRun', '调试')}
-          </Button>
         </div>
         <div className="flex flex-col items-center justify-center py-6 px-4 rounded-md border border-dashed border-[var(--color-border-2)] bg-[var(--color-bg-2)]">
           <CompactEmptyState
@@ -237,16 +226,6 @@ const ScriptTrialRunArea: React.FC<ScriptTrialRunAreaProps> = ({
               <div className="mt-1 text-xs">{task.error_message}</div>
             ) : undefined
           }
-          action={
-            <Button
-              size="small"
-              loading={trialSubmitting}
-              disabled={trialBusy}
-              onClick={handleTrialClick}
-            >
-              {t('monitor.integrations.reTrialRun', '重新调试')}
-            </Button>
-          }
         />
       </div>
     );
@@ -333,17 +312,6 @@ const ScriptTrialRunArea: React.FC<ScriptTrialRunAreaProps> = ({
               )}
             </div>
           }
-          action={
-            <Button
-              size="small"
-              danger
-              loading={trialSubmitting}
-              disabled={trialBusy}
-              onClick={handleTrialClick}
-            >
-              {t('monitor.integrations.reTrialRun', '重新调试')}
-            </Button>
-          }
         />
       </div>
     );
@@ -401,15 +369,6 @@ const ScriptTrialRunArea: React.FC<ScriptTrialRunAreaProps> = ({
               '调试完成，未检测到输出指标'
             )}
           />
-          <Button
-            className="mt-3"
-            icon={<ReloadOutlined />}
-            loading={trialSubmitting}
-            disabled={!nodeSelected || trialBusy}
-            onClick={handleTrialClick}
-          >
-            {t('monitor.integrations.reTrialRun', '重新调试')}
-          </Button>
         </div>
       </div>
     );

@@ -745,7 +745,7 @@ export const useConfigRenderer = () => {
               {...widget_props}
               disabled={Boolean(locked || widget_props.disabled || (name === 'run_as' && isWindows))}
               placeholder={widget_props.placeholder || label}
-              className="mr-[10px]"
+              className={name === 'run_as' ? 'mr-0' : 'mr-[10px]'}
               style={formWidgetWidthStyle(widget_props.style)}
             />
           );
@@ -816,7 +816,11 @@ export const useConfigRenderer = () => {
                 ) : null}
                 {!showMutexConflict ? renderValueWarning(getFieldValue) : null}
                 {showInlineDescription && !showMutexConflict && (
-                  <span className={`align-middle text-[12px] text-[var(--color-text-3)] ${name === 'run_as' ? 'ml-3' : ''}`}>
+                  <span
+                    className={`align-middle text-[12px] text-[var(--color-text-3)] ${
+                      name === 'run_as' ? 'ml-3 inline-block' : ''
+                    }`}
+                  >
                     {description}
                   </span>
                 )}
@@ -831,7 +835,11 @@ export const useConfigRenderer = () => {
       <Form.Item key={name} required={required} label={renderLabel()}>
         {renderFieldBody()}
         {showInlineDescription && (
-          <span className={`align-middle text-[12px] text-[var(--color-text-3)] ${name === 'run_as' ? 'ml-3' : ''}`}>
+          <span
+            className={`align-middle text-[12px] text-[var(--color-text-3)] ${
+              name === 'run_as' ? 'ml-3 inline-block' : ''
+            }`}
+          >
             {description}
           </span>
         )}

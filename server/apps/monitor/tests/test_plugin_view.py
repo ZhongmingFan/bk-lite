@@ -255,7 +255,7 @@ class TestPluginList:
             display_name="Builtin database name",
             description="Builtin database description",
         )
-        for template_type in ("api", "pull", "snmp"):
+        for template_type in ("api", "pull", "snmp", "script"):
             MonitorPlugin.objects.create(
                 name=f"PVLocale{template_type}",
                 template_type=template_type,
@@ -270,7 +270,7 @@ class TestPluginList:
         rows = {row["name"]: row for row in response.json()["data"]}
         assert (rows["PVLocaleBuiltin"]["display_name"], rows["PVLocaleBuiltin"]["display_description"]) == expected_builtin
         assert rows["PVLocaleBuiltin"]["is_custom"] is False
-        for template_type in ("api", "pull", "snmp"):
+        for template_type in ("api", "pull", "snmp", "script"):
             row = rows[f"PVLocale{template_type}"]
             assert (row["display_name"], row["display_description"], row["is_custom"]) == (
                 f"{template_type} database name",

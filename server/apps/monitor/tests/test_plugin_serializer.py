@@ -17,6 +17,7 @@ class TestValidateTemplateType:
 
     def test_valid(self):
         assert MonitorPluginSerializer().validate_template_type("api") == "api"
+        assert MonitorPluginSerializer().validate_template_type("script") == "script"
 
 
 class TestValidate:
@@ -128,3 +129,25 @@ class TestCreate:
         assert plugin.collector == "push_api"
         assert plugin.is_pre is False
         assert plugin.status_query  # 自动生成默认状态查询
+
+    def test_script_create_sets_collect_fields_and_initializes_templates(self):
+        from apps.monitor.models import MonitorPluginConfigTemplate, MonitorPluginUITemplate
+
+        obj = MonitorObject.objects.create(name="PSScriptObj", level="base")
+        s = MonitorPluginSerializer(
+            data={
+                "name": "scriptplugin",
+                "template_type": "script",
+                "template_id": "script-1",
+                "display_name": "脚本插件",
+                "monitor_object": [obj.id],
+            }
+        )
+        assert s.is_valid(), s.errors
+        plugin = s.save()
+        assert plugin.collect_type == "script"
+        assert plugin.collector == "Telegraf"
+        assert plugin.is_pre is False
+        assert plugin.status_query
+        assert MonitorPluginConfigTemplate.objects.filter(plugin=plugin, type="script", config_type="child").exists()
+        assert MonitorPluginUITemplate.objects.filter(plugin=plugin).exists()

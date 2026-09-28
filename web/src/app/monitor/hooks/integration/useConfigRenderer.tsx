@@ -315,7 +315,11 @@ export const useConfigRenderer = () => {
               const scriptOs = getFieldValue('script_os');
               const windows = scriptOs === 'windows' || (scriptOs == null && isWindows);
               if (windows) return;
-              const str = String(value ?? '').trim().toLowerCase();
+              const effectiveValue =
+                value !== undefined && value !== null && value !== ''
+                  ? value
+                  : getFieldValue('run_as');
+              const str = String(effectiveValue ?? '').trim().toLowerCase();
               if (!str) {
                 throw new Error(
                   t(

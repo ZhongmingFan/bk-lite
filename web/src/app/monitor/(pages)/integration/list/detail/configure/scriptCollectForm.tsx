@@ -176,16 +176,23 @@ export const ScriptOsSegmented: React.FC<{
       ]}
       onChange={(next) => {
         const os = String(next);
-        onChange?.(os);
         const interpreters = interpretersForOs(os);
-        const current = String(form.getFieldValue('interpreter') || '');
+        const current = String(form?.getFieldValue('interpreter') || '');
         if (!interpreters.some((item) => item.value === current)) {
-          form.setFieldValue('interpreter', interpreters[0].value);
+          form?.setFieldValue('interpreter', interpreters[0].value);
         }
         if (os === 'windows') {
-          form.setFieldValue('run_as', '');
-        } else if (!String(form.getFieldValue('run_as') || '').trim()) {
-          form.setFieldValue('run_as', 'telegraf');
+          form?.setFields([{ name: 'run_as', errors: [] }]);
+        } else {
+          const currentRunAs = String(form?.getFieldValue('run_as') || '').trim();
+          const nextRunAs = currentRunAs || 'telegraf';
+          form?.setFields([{ name: 'run_as', value: nextRunAs, errors: [] }]);
+        }
+        onChange?.(os);
+        if (os === 'windows') {
+          form?.setFields([{ name: 'run_as', errors: [] }]);
+        } else {
+          form?.validateFields(['run_as']).catch(() => {});
         }
       }}
     />
@@ -251,8 +258,22 @@ export const ScriptRunAsInput: React.FC<{
   style?: React.CSSProperties;
   placeholder?: string;
 }> = ({ value, onChange, disabled, style, placeholder }) => {
+  const form = Form.useFormInstance();
   const os = Form.useWatch('script_os');
   const windows = os === 'windows';
+
+  React.useEffect(() => {
+    if (!form) return;
+    if (windows) {
+      form.setFields([{ name: 'run_as', errors: [] }]);
+    } else {
+      const current = form.getFieldValue('run_as');
+      if (current && String(current).trim()) {
+        form.validateFields(['run_as']).catch(() => {});
+      }
+    }
+  }, [windows, form]);
+
   return (
     <Input
       disabled={Boolean(disabled || windows)}

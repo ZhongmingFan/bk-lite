@@ -296,9 +296,8 @@ export const ScriptBodyEditor: React.FC<{
   return (
     <div style={{ maxWidth: 640 }} className="w-full">
       <CodeEditor
-        appearance="token"
         mode={os === 'windows' ? 'powershell' : 'sh'}
-        theme="textmate"
+        theme="monokai"
         height={height || '200px'}
         width="100%"
         value={value}

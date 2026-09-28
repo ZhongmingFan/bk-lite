@@ -10,8 +10,10 @@ import {
   Switch,
   Segmented,
   Spin,
+  Alert,
 } from 'antd';
 import { ExclamationCircleFilled, MinusCircleOutlined, PlusOutlined, SyncOutlined } from '@ant-design/icons';
+import CodeEditor from '@/components/code-editor';
 import Password from '@/components/password';
 import GroupTreeSelector from '@/components/group-tree-select';
 import { useTranslation } from '@/utils/i18n';
@@ -33,6 +35,7 @@ export type FormFieldOptionControls = Record<
     refreshTip?: string;
     /** 云地域：true=腾讯云多选，false=阿里云单选；用来覆盖 UI.json 残留的 mode。 */
     multiple?: boolean;
+    isWindows?: boolean;
   }
 >;
 
@@ -149,6 +152,10 @@ export const useConfigRenderer = () => {
     const optionControl = resolvedOptionsKey
       ? optionControls?.[resolvedOptionsKey]
       : undefined;
+    const isWindows = Boolean(
+      optionControl?.isWindows ||
+      optionControls?.run_as?.isWindows
+    );
     // 帮助文案只使用当前插件字段自身的 description/tooltip/guide_short，
     // 禁止按 name === "username" 去套 monitor.integrations.usernameDes 或 WMI 文案。
     const guideTip = guide_short || tooltip || description;
@@ -298,6 +305,7 @@ export const useConfigRenderer = () => {
         ? [
           {
             validator: async (_: unknown, value: unknown) => {
+              if (isWindows) return;
               const str = String(value ?? '').trim().toLowerCase();
               if (!str) {
                 throw new Error(
@@ -309,13 +317,13 @@ export const useConfigRenderer = () => {
               }
               if (
                 str === 'root' ||
-                str === '0' ||
-                /^uid\s*[:=]\s*0$/i.test(str)
+                /^0+$/.test(str) ||
+                /^uid\s*[:=]\s*0+$/i.test(str)
               ) {
                 throw new Error(
                   t(
                     'monitor.integrations.runAsNonRoot',
-                    '执行用户禁止为 root 或 UID 0'
+                    '不允许以 root 运行'
                   )
                 );
               }
@@ -592,7 +600,40 @@ export const useConfigRenderer = () => {
           );
         }
 
+        case 'code_editor':
+        case 'codeEditor':
+          return (
+            <div style={{ maxWidth: 640 }} className="w-full">
+              <CodeEditor
+                mode={widget_props.mode || 'sh'}
+                theme={widget_props.theme || 'textmate'}
+                height={widget_props.height || '200px'}
+                width="100%"
+                placeholder={widget_props.placeholder || t('monitor.integrations.scriptPlaceholder', '粘贴或输入脚本内容')}
+                headerOptions={{ copy: true, fullscreen: true }}
+                readOnly={Boolean(locked || widget_props.disabled || widget_props.readOnly)}
+                {...widget_props}
+              />
+            </div>
+          );
+
         case 'textarea':
+          if (name === 'script') {
+            return (
+              <div style={{ maxWidth: 640 }} className="w-full">
+                <CodeEditor
+                  mode={widget_props.mode || 'sh'}
+                  theme={widget_props.theme || 'textmate'}
+                  height={widget_props.height || '200px'}
+                  width="100%"
+                  placeholder={widget_props.placeholder || t('monitor.integrations.scriptPlaceholder', '粘贴或输入脚本内容')}
+                  headerOptions={{ copy: true, fullscreen: true }}
+                  readOnly={Boolean(locked || widget_props.disabled || widget_props.readOnly)}
+                  {...widget_props}
+                />
+              </div>
+            );
+          }
           return (
             <Input.TextArea
               {...widget_props}
@@ -667,11 +708,30 @@ export const useConfigRenderer = () => {
           );
 
         default:
+          if (name === 'run_as' && isWindows) {
+            return (
+              <div style={formWidgetWidthStyle(widget_props.style)}>
+                <Alert
+                  message={t('monitor.integrations.runAsWindowsHelper', 'Windows 下以 Telegraf 服务账户运行')}
+                  type="info"
+                  showIcon={false}
+                  className="mb-2 !bg-[var(--color-fill-1)] !border-[var(--color-border-1)] !text-[var(--color-text-3)] text-xs"
+                />
+                <Input
+                  {...widget_props}
+                  disabled
+                  placeholder={label}
+                  className="mr-[10px] w-full"
+                />
+              </div>
+            );
+          }
           return (
             <Input
-              placeholder={label}
+              {...widget_props}
+              placeholder={widget_props.placeholder || label}
               className="mr-[10px]"
-              style={formWidgetWidthStyle()}
+              style={formWidgetWidthStyle(widget_props.style)}
             />
           );
       }

@@ -77,19 +77,20 @@ DEFAULT_SCRIPT_UI_TEMPLATE = {
     "instance_id": "{{cloud_region}}_{{instance_type}}_script_{{instance_name}}",
     "form_fields": [
         {
-            "name": "script",
-            "label": "脚本内容",
-            "label_en": "Script Body",
-            "type": "textarea",
+            "name": "os_type",
+            "label": "操作系统",
+            "label_en": "Operating System",
+            "type": "segmented",
             "required": True,
-            "description": "监控采集执行的脚本正文",
-            "description_en": "Script body to execute for collection",
-            "widget_props": {
-                "placeholder": "粘贴或输入脚本内容",
-                "rows": 6,
-            },
+            "default_value": "linux",
+            "options": [
+                {"label": "Linux", "value": "linux"},
+                {"label": "Windows", "value": "windows"},
+            ],
+            "description": "脚本运行的目标节点操作系统类型",
+            "description_en": "Target operating system type for script execution",
             "transform_on_edit": {
-                "origin_path": "child.content.config.script",
+                "origin_path": "child.content.config.os_type",
                 "to_api": {},
             },
         },
@@ -97,16 +98,39 @@ DEFAULT_SCRIPT_UI_TEMPLATE = {
             "name": "interpreter",
             "label": "解释器",
             "label_en": "Interpreter",
-            "type": "input",
+            "type": "select",
             "required": True,
             "default_value": "/bin/sh",
-            "description": "脚本执行解释器，例如 /bin/sh、/bin/bash、/usr/bin/python3",
-            "description_en": "Script execution interpreter, e.g. /bin/sh, /bin/bash, /usr/bin/python3",
+            "description": "脚本执行解释器（Linux 支持 /bin/sh、/bin/bash、/usr/bin/python3 及自定义；Windows 支持 powershell、pwsh 及自定义）",
+            "description_en": "Script execution interpreter (Linux: /bin/sh, /bin/bash, /usr/bin/python3, custom; Windows: powershell, pwsh, custom)",
+            "options": [
+                {"label": "/bin/sh", "value": "/bin/sh"},
+                {"label": "/bin/bash", "value": "/bin/bash"},
+                {"label": "/usr/bin/python3", "value": "/usr/bin/python3"},
+            ],
             "widget_props": {
                 "placeholder": "/bin/sh",
             },
             "transform_on_edit": {
                 "origin_path": "child.content.config.interpreter",
+                "to_api": {},
+            },
+        },
+        {
+            "name": "script",
+            "label": "脚本内容",
+            "label_en": "Script Body",
+            "type": "code_editor",
+            "required": True,
+            "description": "监控采集执行的脚本正文",
+            "description_en": "Script body to execute for collection",
+            "widget_props": {
+                "placeholder": "粘贴或输入脚本内容",
+                "theme": "monokai",
+                "height": "220px",
+            },
+            "transform_on_edit": {
+                "origin_path": "child.content.config.script",
                 "to_api": {},
             },
         },
@@ -134,15 +158,15 @@ DEFAULT_SCRIPT_UI_TEMPLATE = {
         },
         {
             "name": "run_as",
-            "label": "执行用户 (Linux)",
-            "label_en": "Run As (Linux)",
+            "label": "执行用户",
+            "label_en": "Run As",
             "type": "input",
             "required": False,
             "default_value": "telegraf",
-            "description": "Linux 节点执行脚本的用户（禁止 root 或 UID 0，默认 telegraf）；Windows 节点将忽略此配置并以服务账号运行。",
+            "description": "Linux 节点执行脚本的用户（禁止 root 或 UID 0，默认 telegraf）；Windows 节点下以 Telegraf 服务账户运行。",
             "description_en": (
                 "User to execute the script on Linux nodes (cannot be root or UID 0, default telegraf); "
-                "Windows nodes will run as the service account."
+                "Windows nodes run under Telegraf service account."
             ),
             "widget_props": {
                 "placeholder": "telegraf",

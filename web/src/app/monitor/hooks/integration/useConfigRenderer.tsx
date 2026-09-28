@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Form,
   Input,
@@ -38,6 +38,156 @@ export type FormFieldOptionControls = Record<
     isWindows?: boolean;
   }
 >;
+
+const LINUX_INTERPRETER_OPTIONS = [
+  { label: '/bin/sh', value: '/bin/sh' },
+  { label: '/bin/bash', value: '/bin/bash' },
+  { label: '/usr/bin/python3', value: '/usr/bin/python3' },
+];
+
+const WINDOWS_INTERPRETER_OPTIONS = [
+  { label: 'powershell', value: 'powershell' },
+  { label: 'pwsh', value: 'pwsh' },
+];
+
+const CUSTOM_INTERPRETER_KEY = '__custom__';
+
+interface OsTypeSegmentedProps {
+  value?: string;
+  onChange?: (val: string) => void;
+  disabled?: boolean;
+}
+
+const OsTypeSegmented: React.FC<OsTypeSegmentedProps> = ({ value, onChange, disabled }) => {
+  const form = Form.useFormInstance();
+
+  const handleChange = (newVal: string | number) => {
+    const osVal = String(newVal);
+    onChange?.(osVal);
+    if (!form) return;
+    const currentInterpreter = form.getFieldValue('interpreter');
+    if (osVal === 'windows') {
+      const linuxPresets = ['/bin/sh', '/bin/bash', '/usr/bin/python3'];
+      if (!currentInterpreter || linuxPresets.includes(currentInterpreter)) {
+        form.setFieldValue('interpreter', 'powershell');
+      }
+    } else if (osVal === 'linux') {
+      const winPresets = ['powershell', 'pwsh', 'powershell.exe', 'pwsh.exe'];
+      if (!currentInterpreter || winPresets.includes(currentInterpreter)) {
+        form.setFieldValue('interpreter', '/bin/sh');
+      }
+      const currentRunAs = form.getFieldValue('run_as');
+      if (!currentRunAs) {
+        form.setFieldValue('run_as', 'telegraf');
+      }
+    }
+  };
+
+  return (
+    <Segmented
+      disabled={disabled}
+      value={value || 'linux'}
+      options={[
+        { label: 'Linux', value: 'linux' },
+        { label: 'Windows', value: 'windows' },
+      ]}
+      onChange={handleChange}
+      className="mr-[10px]"
+    />
+  );
+};
+
+interface InterpreterControlProps {
+  value?: string;
+  onChange?: (val: string) => void;
+  disabled?: boolean;
+  isWindows?: boolean;
+}
+
+const InterpreterControl: React.FC<InterpreterControlProps> = ({
+  value = '',
+  onChange,
+  disabled,
+  isWindows: propIsWindows,
+}) => {
+  const { t } = useTranslation();
+  const form = Form.useFormInstance();
+  const watchedOs = Form.useWatch('os_type', form);
+  const isWindows = watchedOs ? watchedOs === 'windows' : Boolean(propIsWindows);
+
+  const presets = isWindows ? WINDOWS_INTERPRETER_OPTIONS : LINUX_INTERPRETER_OPTIONS;
+  const presetValues = useMemo(() => presets.map((p) => p.value), [presets]);
+
+  const isPresetValue = presetValues.includes(value);
+  const [customMode, setCustomMode] = useState<boolean>(!isPresetValue && Boolean(value));
+  const [customText, setCustomText] = useState<string>(!isPresetValue ? value : '');
+
+  useEffect(() => {
+    if (presetValues.includes(value)) {
+      setCustomMode(false);
+    } else if (value && value !== CUSTOM_INTERPRETER_KEY) {
+      setCustomMode(true);
+      setCustomText(value);
+    }
+  }, [value, presetValues]);
+
+  const handleSelectChange = (val: string) => {
+    if (val === CUSTOM_INTERPRETER_KEY) {
+      setCustomMode(true);
+      onChange?.(customText || '');
+    } else {
+      setCustomMode(false);
+      onChange?.(val);
+    }
+  };
+
+  const handleCustomTextChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const text = e.target.value;
+    setCustomText(text);
+    onChange?.(text);
+  };
+
+  const options = [
+    ...presets,
+    { label: t('monitor.integrations.customInterpreter', '自定义'), value: CUSTOM_INTERPRETER_KEY },
+  ];
+
+  if (customMode) {
+    return (
+      <div className="flex items-center gap-2 mr-[10px]" style={{ width: 300 }}>
+        <Select
+          style={{ width: 100 }}
+          disabled={disabled}
+          value={CUSTOM_INTERPRETER_KEY}
+          options={options}
+          onChange={handleSelectChange}
+        />
+        <Input
+          style={{ flex: 1 }}
+          disabled={disabled}
+          placeholder={
+            isWindows
+              ? t('monitor.integrations.customInterpreterPlaceholder', '请输入自定义解释器路径')
+              : t('monitor.integrations.customInterpreterPlaceholder', '请输入自定义解释器路径')
+          }
+          value={customText}
+          onChange={handleCustomTextChange}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <Select
+      style={{ width: 300 }}
+      disabled={disabled}
+      value={isPresetValue ? value : (value ? CUSTOM_INTERPRETER_KEY : (isWindows ? 'powershell' : '/bin/sh'))}
+      options={options}
+      onChange={handleSelectChange}
+      className="mr-[10px]"
+    />
+  );
+};
 
 type SelectWithRefreshProps = React.ComponentProps<typeof Select> & {
   onRefresh: () => void;
@@ -603,15 +753,20 @@ export const useConfigRenderer = () => {
         case 'code_editor':
         case 'codeEditor':
           return (
-            <div style={{ maxWidth: 640 }} className="w-full">
+            <div style={{ maxWidth: 640 }} className="w-full rounded-md overflow-hidden border border-[#27272a] bg-[#1e1e1e] shadow-xs">
               <CodeEditor
                 mode={widget_props.mode || 'sh'}
-                theme={widget_props.theme || 'textmate'}
-                height={widget_props.height || '200px'}
+                theme={widget_props.theme || 'monokai'}
+                height={widget_props.height || '220px'}
                 width="100%"
                 placeholder={widget_props.placeholder || t('monitor.integrations.scriptPlaceholder', '粘贴或输入脚本内容')}
                 headerOptions={{ copy: true, fullscreen: true }}
                 readOnly={Boolean(locked || widget_props.disabled || widget_props.readOnly)}
+                setOptions={{
+                  showPrintMargin: false,
+                  tabSize: 2,
+                  fontSize: 13,
+                }}
                 {...widget_props}
               />
             </div>
@@ -620,15 +775,20 @@ export const useConfigRenderer = () => {
         case 'textarea':
           if (name === 'script') {
             return (
-              <div style={{ maxWidth: 640 }} className="w-full">
+              <div style={{ maxWidth: 640 }} className="w-full rounded-md overflow-hidden border border-[#27272a] bg-[#1e1e1e] shadow-xs">
                 <CodeEditor
                   mode={widget_props.mode || 'sh'}
-                  theme={widget_props.theme || 'textmate'}
-                  height={widget_props.height || '200px'}
+                  theme={widget_props.theme || 'monokai'}
+                  height={widget_props.height || '220px'}
                   width="100%"
                   placeholder={widget_props.placeholder || t('monitor.integrations.scriptPlaceholder', '粘贴或输入脚本内容')}
                   headerOptions={{ copy: true, fullscreen: true }}
                   readOnly={Boolean(locked || widget_props.disabled || widget_props.readOnly)}
+                  setOptions={{
+                    showPrintMargin: false,
+                    tabSize: 2,
+                    fontSize: 13,
+                  }}
                   {...widget_props}
                 />
               </div>
@@ -746,6 +906,197 @@ export const useConfigRenderer = () => {
         {renderNamedControl()}
       </>
     );
+
+    if (name === 'os_type') {
+      return (
+        <Form.Item key={name} required={true} label={renderLabel()}>
+          <Form.Item
+            noStyle
+            name={name}
+            rules={[{ required: true, message: t('common.required') }]}
+            initialValue={default_value || 'linux'}
+          >
+            <OsTypeSegmented disabled={Boolean(locked || widget_props.disabled)} />
+          </Form.Item>
+          {showInlineDescription && (
+            <span className="align-middle text-[12px] text-[var(--color-text-3)]">
+              {description}
+            </span>
+          )}
+        </Form.Item>
+      );
+    }
+
+    if (name === 'interpreter') {
+      return (
+        <Form.Item
+          noStyle
+          shouldUpdate={(prev, curr) => prev.os_type !== curr.os_type}
+          key={name}
+        >
+          {({ getFieldValue }) => {
+            const currentOs = getFieldValue('os_type') || (isWindows ? 'windows' : 'linux');
+            const isCurrentWin = currentOs === 'windows';
+            return (
+              <Form.Item required={true} label={renderLabel()}>
+                <Form.Item
+                  noStyle
+                  name={name}
+                  rules={[
+                    {
+                      required: true,
+                      validator: async (_: unknown, val: unknown) => {
+                        const str = String(val ?? '').trim();
+                        if (!str || str === CUSTOM_INTERPRETER_KEY) {
+                          throw new Error(
+                            t('monitor.integrations.interpreterRequired', '解释器不能为空')
+                          );
+                        }
+                      },
+                    },
+                  ]}
+                  initialValue={default_value || (isCurrentWin ? 'powershell' : '/bin/sh')}
+                >
+                  <InterpreterControl
+                    disabled={Boolean(locked || widget_props.disabled)}
+                    isWindows={isCurrentWin}
+                  />
+                </Form.Item>
+                {showInlineDescription && (
+                  <span className="align-middle text-[12px] text-[var(--color-text-3)]">
+                    {description}
+                  </span>
+                )}
+              </Form.Item>
+            );
+          }}
+        </Form.Item>
+      );
+    }
+
+    if (name === 'run_as') {
+      return (
+        <Form.Item
+          noStyle
+          shouldUpdate={(prev, curr) => prev.os_type !== curr.os_type}
+          key={name}
+        >
+          {({ getFieldValue }) => {
+            const currentOs = getFieldValue('os_type') || (isWindows ? 'windows' : 'linux');
+            const isCurrentWin = currentOs === 'windows';
+            return (
+              <Form.Item required={!isCurrentWin} label={renderLabel()}>
+                {isCurrentWin && (
+                  <Alert
+                    message={t('monitor.integrations.runAsWindowsHelper', 'Windows 下以 Telegraf 服务账户运行')}
+                    type="info"
+                    showIcon={false}
+                    className="mb-2 max-w-[640px] !bg-[var(--color-fill-1)] !border-[var(--color-border-1)] !text-[var(--color-text-3)] text-xs"
+                  />
+                )}
+                <Form.Item
+                  noStyle
+                  name={name}
+                  rules={[
+                    {
+                      validator: async (_: unknown, val: unknown) => {
+                        if (isCurrentWin) return;
+                        const str = String(val ?? '').trim().toLowerCase();
+                        if (!str) {
+                          throw new Error(
+                            t(
+                              'monitor.integrations.runAsRequiredLinux',
+                              'Linux 节点下执行用户不能为空'
+                            )
+                          );
+                        }
+                        if (
+                          str === 'root' ||
+                          /^0+$/.test(str) ||
+                          /^uid\s*[:=]\s*0+$/i.test(str)
+                        ) {
+                          throw new Error(
+                            t(
+                              'monitor.integrations.runAsNonRoot',
+                              '不允许以 root 运行'
+                            )
+                          );
+                        }
+                      },
+                    },
+                  ]}
+                  initialValue={default_value || 'telegraf'}
+                >
+                  <Input
+                    {...widget_props}
+                    disabled={Boolean(locked || widget_props.disabled || isCurrentWin)}
+                    placeholder={isCurrentWin ? 'telegraf' : (widget_props.placeholder || 'telegraf')}
+                    className="mr-[10px]"
+                    style={formWidgetWidthStyle(widget_props.style)}
+                  />
+                </Form.Item>
+                {showInlineDescription && (
+                  <span className="align-middle text-[12px] text-[var(--color-text-3)]">
+                    {description}
+                  </span>
+                )}
+              </Form.Item>
+            );
+          }}
+        </Form.Item>
+      );
+    }
+
+    if (name === 'script') {
+      return (
+        <Form.Item
+          noStyle
+          shouldUpdate={(prev, curr) => prev.interpreter !== curr.interpreter}
+          key={name}
+        >
+          {({ getFieldValue }) => {
+            const interpreter = String(getFieldValue('interpreter') || '');
+            const isPython = /python/i.test(interpreter);
+            const isPowershell = /powershell|pwsh/i.test(interpreter);
+            const editorMode = isPython ? 'python' : isPowershell ? 'powershell' : 'sh';
+
+            return (
+              <Form.Item required={required} label={renderLabel()}>
+                <Form.Item
+                  noStyle
+                  name={name}
+                  rules={formRules}
+                  initialValue={default_value}
+                >
+                  <div style={{ maxWidth: 640 }} className="w-full">
+                    <CodeEditor
+                      mode={editorMode}
+                      theme="monokai"
+                      height={widget_props.height || '220px'}
+                      width="100%"
+                      placeholder={widget_props.placeholder || t('monitor.integrations.scriptPlaceholder', '粘贴或输入脚本内容')}
+                      headerOptions={{ copy: true, fullscreen: true }}
+                      readOnly={Boolean(locked || widget_props.disabled || widget_props.readOnly)}
+                      setOptions={{
+                        showPrintMargin: false,
+                        tabSize: 2,
+                        fontSize: 13,
+                      }}
+                      {...widget_props}
+                    />
+                  </div>
+                </Form.Item>
+                {showInlineDescription && (
+                  <span className="align-middle text-[12px] text-[var(--color-text-3)]">
+                    {description}
+                  </span>
+                )}
+              </Form.Item>
+            );
+          }}
+        </Form.Item>
+      );
+    }
 
     if (dependency?.field || mutexPeerField || warningOnlyRules.length) {
       return (

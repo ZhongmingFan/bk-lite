@@ -870,9 +870,13 @@ const AutomaticConfiguration: React.FC<IntegrationAccessProps> = ({}) => {
         fingerprint,
         warning_type: warningType,
         error_message: warningType === 'rate_limit'
-          ? t('monitor.integrations.trialRunRateLimit', '试运行过于频繁，请稍后重试')
+          ? (isScriptTemplate
+            ? t('monitor.integrations.trialRunRateLimit', '调试过于频繁，请稍后重试')
+            : t('monitor.integrations.collectDetectRateLimit', '测试过于频繁，请稍后重试'))
           : warningType === 'no_permission'
-            ? t('monitor.integrations.trialRunNoPermission', '当前账号无权试运行该对象/节点')
+            ? (isScriptTemplate
+              ? t('monitor.integrations.trialRunNoPermission', '当前账号无权调试该对象/节点')
+              : t('monitor.integrations.collectDetectNoPermission', '当前账号无权测试该对象/节点'))
             : respMsg || t('common.operationFailed')
       });
     }
@@ -914,7 +918,9 @@ const AutomaticConfiguration: React.FC<IntegrationAccessProps> = ({}) => {
             if (!isScriptTemplate) showCollectDetectResult(task);
           }}
         >
-          {t('monitor.integrations.trialRunWarning', '警告')}
+          {isScriptTemplate
+            ? t('monitor.integrations.trialRunWarning', '警告')
+            : t('monitor.integrations.collectDetectWarning', '警告')}
         </Tag>
       );
     }
@@ -929,7 +935,7 @@ const AutomaticConfiguration: React.FC<IntegrationAccessProps> = ({}) => {
           }}
         >
           {isScriptTemplate
-            ? t('monitor.integrations.trialRun', '试运行中')
+            ? t('monitor.integrations.trialRun', '调试中')
             : t('monitor.integrations.collectDetectRunning')}
         </Tag>
       );
@@ -997,7 +1003,7 @@ const AutomaticConfiguration: React.FC<IntegrationAccessProps> = ({}) => {
               }}
             >
               {isScriptTemplate
-                ? t('monitor.integrations.trialRun', '试运行')
+                ? t('monitor.integrations.trialRun', '调试')
                 : t('monitor.integrations.collectDetect')}
             </Button>
           )}

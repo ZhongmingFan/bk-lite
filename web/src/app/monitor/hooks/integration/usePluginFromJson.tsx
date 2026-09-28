@@ -283,6 +283,42 @@ export const usePluginFromJson = () => {
       };
 
       const formFields = getFieldsForMode(config.form_fields || [], extra.mode);
+
+      if (
+        config.collect_type === 'script' ||
+        config.template_type === 'script'
+      ) {
+        const osFieldIndex = formFields.findIndex((f: any) => f.name === 'os_type');
+        let osField: any;
+        if (osFieldIndex >= 0) {
+          osField = formFields.splice(osFieldIndex, 1)[0];
+        } else {
+          osField = {
+            name: 'os_type',
+            label: t('monitor.integrations.osType', '操作系统'),
+            label_en: 'Operating System',
+            type: 'segmented',
+            required: true,
+            default_value: 'linux',
+            options: [
+              { label: 'Linux', value: 'linux' },
+              { label: 'Windows', value: 'windows' },
+            ],
+            transform_on_edit: {
+              origin_path: 'child.content.config.os_type',
+              to_api: {},
+            },
+          };
+        }
+        formFields.unshift(osField);
+
+        const interpreterIndex = formFields.findIndex((f: any) => f.name === 'interpreter');
+        if (interpreterIndex > 1) {
+          const interpreterField = formFields.splice(interpreterIndex, 1)[0];
+          formFields.splice(1, 0, interpreterField);
+        }
+      }
+
       const advancedFields = formFields?.filter((field: any) => field.advanced) || [];
       const basicFields = formFields?.filter((field: any) => !field.advanced) || [];
       const ADVANCED_SECTION_ORDER = ['request', 'auth', 'response', 'tls', 'interface_filter'];
@@ -459,13 +495,25 @@ export const usePluginFromJson = () => {
               acc[column.name] = column.default_value || null;
               return acc;
             }, {}) || {},
-          defaultForm:
-            formFields?.reduce((acc: any, field: any) => {
-              if ('default_value' in field) {
-                acc[field.name] = field.default_value;
-              }
-              return acc;
-            }, {}) || {},
+          defaultForm: (() => {
+            const defaults =
+              formFields?.reduce((acc: any, field: any) => {
+                if ('default_value' in field) {
+                  acc[field.name] = field.default_value;
+                }
+                return acc;
+              }, {}) || {};
+            if (
+              config.collect_type === 'script' ||
+              config.template_type === 'script'
+            ) {
+              defaults.os_type = defaults.os_type || 'linux';
+              defaults.interpreter = defaults.interpreter || '/bin/sh';
+              defaults.run_as = defaults.run_as || 'telegraf';
+              defaults.interval = defaults.interval || 60;
+            }
+            return defaults;
+          })(),
           getParams: (row: any, tableConfig: any) => {
             const normalizedRow = normalizePasswordFields(
               row,
@@ -545,6 +593,17 @@ export const usePluginFromJson = () => {
                 : childConfig.username
                   ? 'basic'
                   : 'none';
+            }
+            if (
+              config.collect_type === 'script' ||
+              config.template_type === 'script'
+            ) {
+              const childConfig = apiData?.child?.content?.config || {};
+              const interpreter = childConfig.interpreter || '';
+              const isWinInterpreter = /powershell|pwsh/i.test(interpreter);
+              formValues.os_type = childConfig.os_type || (isWinInterpreter ? 'windows' : 'linux');
+              formValues.interpreter = childConfig.interpreter || (formValues.os_type === 'windows' ? 'powershell' : '/bin/sh');
+              formValues.run_as = childConfig.run_as || (formValues.os_type === 'windows' ? '' : 'telegraf');
             }
             return formValues;
           },
@@ -810,6 +869,15 @@ export const usePluginFromJson = () => {
             }
             if (config.instance_type === 'minio') {
               applyMinioEditConfig(result, configForm, filledFormData);
+            }
+            if (
+              config.collect_type === 'script' ||
+              config.template_type === 'script'
+            ) {
+              const isWindowsOs = filledFormData.os_type === 'windows';
+              if (isWindowsOs && result?.child?.content?.config) {
+                delete result.child.content.config.run_as;
+              }
             }
             // 如果有 base，统一同步 child.env_config 到 base.env_config
             if (result.base && result.child?.env_config) {

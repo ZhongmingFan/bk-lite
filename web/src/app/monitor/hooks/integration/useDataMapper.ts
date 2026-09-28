@@ -468,6 +468,9 @@ export class DataMapper {
         processedFormData.request_headers || []
       );
     }
+    if (context.collect_type === 'script' && processedFormData.os_type === 'windows') {
+      delete processedFormData.run_as;
+    }
 
     // 构建configs数组：每个config_type生成一个config
     const configs = configTypes.map((type: string) => ({

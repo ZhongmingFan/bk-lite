@@ -2,6 +2,7 @@ import {
   BusinessMetricItem,
   collectReservedScriptTagKeys,
   isReservedScriptTagKey,
+  isSelfMetricName,
   VISIBLE_PLATFORM_TAG_KEYS
 } from './scriptMetricsParser';
 
@@ -269,15 +270,86 @@ export const formatDimensionTagSummary = (
     .map(([key, value]) => `${key}=${value}`)
     .join(' ');
 
-/** 确认只落库勾选行，并带上分组 / 单位 / 描述。 */
+/** 确认只落库勾选的业务指标，并带上分组 / 单位 / 描述。自监控指标不可勾选。 */
 export const pickSelectedBusinessMetrics = (
   items: BusinessMetricItem[],
   selected: Record<string, boolean>,
   catalogByKey: Record<string, ScriptMetricCatalogDraft> = {}
 ): BusinessMetricItem[] =>
   items
+    .filter((item) => !isSelfMetricName(item.name))
     .filter((item) => selected[item.key] !== false)
     .map((item) => applyCatalogDraft(item, catalogByKey[item.key]));
+
+/** 重新调试：刷新采样值，保留仍存在指标的勾选/分组/单位/描述，消失的视为未勾选。 */
+export const mergeRetainedTrialMetricState = ({
+  nextMetrics,
+  prevSelected,
+  prevCatalog
+}: {
+  nextMetrics: BusinessMetricItem[];
+  prevSelected: Record<string, boolean>;
+  prevCatalog: Record<string, ScriptMetricCatalogDraft>;
+}): {
+  selected: Record<string, boolean>;
+  catalog: Record<string, ScriptMetricCatalogDraft>;
+} => {
+  const selected: Record<string, boolean> = {};
+  const catalog: Record<string, ScriptMetricCatalogDraft> = {};
+  nextMetrics.forEach((item) => {
+    if (!item?.key || isSelfMetricName(item.name)) {
+      return;
+    }
+    selected[item.key] = Object.prototype.hasOwnProperty.call(
+      prevSelected,
+      item.key
+    )
+      ? Boolean(prevSelected[item.key])
+      : true;
+    if (prevCatalog[item.key]) {
+      catalog[item.key] = { ...prevCatalog[item.key] };
+    }
+  });
+  return { selected, catalog };
+};
+
+export const excludeSelfMonitorMetrics = (
+  metrics: BusinessMetricItem[]
+): BusinessMetricItem[] =>
+  metrics.filter((item) => item?.name && !isSelfMetricName(item.name));
+
+export const applyDefaultCatalogDrafts = (
+  metrics: BusinessMetricItem[],
+  catalogByKey: Record<string, ScriptMetricCatalogDraft>,
+  defaultGroupId?: number | null,
+  defaultUnitPath?: string[]
+): { catalog: Record<string, ScriptMetricCatalogDraft>; changed: boolean } => {
+  const next = { ...catalogByKey };
+  let changed = false;
+  metrics.forEach((item) => {
+    if (!item?.key || isSelfMetricName(item.name)) {
+      return;
+    }
+    const draft = { ...(next[item.key] || {}) };
+    let patched = false;
+    if (draft.metric_group == null && defaultGroupId) {
+      draft.metric_group = defaultGroupId;
+      patched = true;
+    }
+    if (
+      (draft.unit == null || (Array.isArray(draft.unit) && !draft.unit.length)) &&
+      defaultUnitPath
+    ) {
+      draft.unit = defaultUnitPath;
+      patched = true;
+    }
+    if (patched) {
+      next[item.key] = draft;
+      changed = true;
+    }
+  });
+  return { catalog: changed ? next : catalogByKey, changed };
+};
 
 export const buildScriptMetricRegisterPayload = (
   item: BusinessMetricItem,
@@ -344,11 +416,12 @@ export const persistScriptMetrics = async ({
   metrics: BusinessMetricItem[];
   client: PersistScriptMetricsClient;
 }): Promise<void> => {
-  if (!metrics.length) {
+  const persistableMetrics = excludeSelfMonitorMetrics(metrics);
+  if (!persistableMetrics.length) {
     return;
   }
   const { get, post, patch, t } = client;
-  const reservedKeys = collectReservedTagViolations(metrics);
+  const reservedKeys = collectReservedTagViolations(persistableMetrics);
   if (reservedKeys.length) {
     throw new Error(formatReservedTagRenameMessage(reservedKeys, t));
   }
@@ -394,7 +467,7 @@ export const persistScriptMetrics = async ({
       }
     });
 
-    const uniqueMetrics = uniqueMetricsByName(metrics);
+    const uniqueMetrics = uniqueMetricsByName(persistableMetrics);
     if (!uniqueMetrics.length) {
       return;
     }

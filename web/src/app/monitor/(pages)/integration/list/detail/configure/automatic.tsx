@@ -90,6 +90,7 @@ import ScriptTrialRunArea from './scriptTrialRunArea';
 import { applyScriptCollectSubmit, syncScriptRunAsForOs } from './scriptCollectForm';
 import {
   collectReservedTagViolations,
+  excludeSelfMonitorMetrics,
   persistScriptMetrics
 } from './scriptMetricPersist';
 import {
@@ -488,7 +489,7 @@ const AutomaticConfiguration: React.FC<IntegrationAccessProps> = ({}) => {
     await persistScriptMetrics({
       pluginId: targetPluginId,
       objectId: targetObjectId,
-      metrics: metricsToPersist,
+      metrics: excludeSelfMonitorMetrics(metricsToPersist),
       client: { get, post, patch, t }
     });
   };
@@ -1482,13 +1483,31 @@ const AutomaticConfiguration: React.FC<IntegrationAccessProps> = ({}) => {
     try {
       setConfirmLoading(true);
       const collectResult = await updateNodeChildConfig(params);
+      let didPersistMetrics = false;
       if (
         isScriptTemplate &&
         scriptDebugHasBusinessMetrics &&
         selectedScriptMetrics.length > 0
       ) {
-        await persistSelectedScriptMetrics(pluginId, objectId, selectedScriptMetrics);
+        await persistSelectedScriptMetrics(
+          pluginId,
+          objectId,
+          excludeSelfMonitorMetrics(selectedScriptMetrics)
+        );
+        didPersistMetrics = true;
       }
+      const goIntegrationList = () => {
+        const nextSearch = new URLSearchParams({
+          objId: objectId
+        });
+        router.push(`/monitor/integration/list?${nextSearch.toString()}`);
+      };
+      const goPersistedMetrics = () => {
+        const metricSearch = new URLSearchParams(searchParams.toString());
+        router.push(
+          `/monitor/integration/list/detail/metric?${metricSearch.toString()}`
+        );
+      };
       if (templatesToApply.length) {
         const policyPayload = buildCollectionPolicyApplyPayload({
           monitorObjectId: objectId,
@@ -1526,13 +1545,32 @@ const AutomaticConfiguration: React.FC<IntegrationAccessProps> = ({}) => {
             );
           }
         }
+      } else if (didPersistMetrics) {
+        message.success(
+          t('monitor.integrations.scriptMetricsPersistSuccess', '指标已保存')
+        );
       } else {
         message.success(t('common.addSuccess'));
       }
-      const nextSearch = new URLSearchParams({
-        objId: objectId
-      });
-      router.push(`/monitor/integration/list?${nextSearch.toString()}`);
+      if (didPersistMetrics) {
+        Modal.confirm({
+          title: t('common.addSuccess'),
+          content: t(
+            'monitor.integrations.scriptMetricsPersistSuccessHint',
+            '可前往指标页查看刚保存的指标'
+          ),
+          okText: t(
+            'monitor.integrations.goViewPersistedMetrics',
+            '去查看指标'
+          ),
+          cancelText: t('common.back'),
+          centered: true,
+          onOk: goPersistedMetrics,
+          onCancel: goIntegrationList
+        });
+      } else {
+        goIntegrationList();
+      }
     } catch (error: any) {
       const errorText =
         error?.response?.data?.message ||
@@ -1542,6 +1580,19 @@ const AutomaticConfiguration: React.FC<IntegrationAccessProps> = ({}) => {
         typeof errorText === 'string' &&
         errorText.includes(reservedTagRenameText)
       ) {
+        return;
+      }
+      if (
+        isScriptTemplate &&
+        typeof errorText === 'string' &&
+        errorText.includes('已存在采集配置')
+      ) {
+        message.warning(
+          t(
+            'monitor.integrations.scriptCollectConfigExistsUpdating',
+            '该实例已有脚本采集配置，将更新现有配置'
+          )
+        );
         return;
       }
       message.error(errorText);

@@ -32,7 +32,23 @@
         oid = "1.3.6.1.2.1.1.5.0"
         name = "source"
         is_tag = true
-# @bk_include_ifmib_table
+
+    # VoiceGateway 不在 Switch/Router/Firewall/Loadbalance IF-MIB 内置对象集，子模板显式采集 ifXTable 64 位 HC。
+    [[inputs.snmp.table]]
+        oid = "1.3.6.1.2.1.31.1.1"
+        name = "interface"
+        inherit_tags = ["source"]
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.2.1.31.1.1.1.1"
+        name = "ifDescr"
+        is_tag = true
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.2.1.31.1.1.1.6"
+        name = "ifHCInOctets"
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.2.1.31.1.1.1.10"
+        name = "ifHCOutOctets"
+
     # ---- Dialogic IMG 2020 private stats（PEN 3028 · …3028.6.1.7），table.field 禁止 .0 ----
     # CPU Busy %：列 1.3.6.1.4.1.3028.6.1.7.1.1.1.4。
     [[inputs.snmp.table]]
@@ -50,11 +66,15 @@
     [[inputs.snmp.table.field]]
         oid = "1.3.6.1.4.1.3028.6.1.7.1.1.1.5"
         name = "free"
-    # Temperature ℃：列 …1.3.1.5，INDEX location。
+    # Temperature ℃：列 …1.3.1.5，INDEX location；名称列 …1.3.1.4 作 tag。
     [[inputs.snmp.table]]
         name = "device_temperature"
         inherit_tags = ["source"]
         index_as_tag = true
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.4.1.3028.6.1.7.1.3.1.4"
+        name = "location"
+        is_tag = true
     [[inputs.snmp.table.field]]
         oid = "1.3.6.1.4.1.3028.6.1.7.1.3.1.5"
         name = "celsius"

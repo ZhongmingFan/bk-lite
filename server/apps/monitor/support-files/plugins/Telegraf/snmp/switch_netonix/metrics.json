@@ -2,7 +2,7 @@
   "collector": "Telegraf",
   "collect_type": "snmp_netonix",
   "plugin": "Switch Netonix SNMP",
-  "plugin_desc": "Netonix WISP 交换机专用 SNMP 采集（NETONIX-SWITCH-MIB，IANA 私有企业号 46242）。在标准 IF-MIB 接口指标之外，额外采集 Netonix 私有 OID 的机箱温度（NETONIX-SWITCH-MIB temp，专用温度表，°C）。NETONIX-SWITCH-MIB 不提供 CPU/内存 OID；风扇为转速（RPM）而非状态枚举、PoE 为端口级状态，均不属于设备级健康状态，故本插件仅采集温度（其余维度 N/A）。适用品牌型号——Netonix WISP Switch 系列 PoE 交换机。",
+  "plugin_desc": "Netonix 户外 PoE 交换机专用 SNMP 采集（IANA 私有企业号 46242）。在标准 IF-MIB 接口指标之外，额外采集机箱温度表（tempDescription + temp，℃）、风扇转速（fanSpeed，RPM）、电压表（voltageDescription + voltage，VoltageTC ÷100 → V）和总功耗标量（totalPowerConsumption，PowerTC ÷10 → W）；可选采集 DCDC 输入电流（CurrentTC ÷10 → A）与 DCDC 效率（%）。无私有 CPU/内存 OID，本插件不臆造这两项。适用品牌型号——Netonix WISP Switch 系列 PoE 交换机。",
   "support_collect_detect": true,
   "status_query": "any({instance_type='switch', collect_type='snmp_netonix'}) by (instance_id)",
   "name": "Switch",
@@ -15,7 +15,10 @@
   ],
   "supplementary_indicators": [
     "snmp_uptime",
-    "device_temperature_celsius"
+    "device_temperature_celsius",
+    "device_fan_speed",
+    "device_voltage_volts",
+    "device_power_watts"
   ],
   "metrics": [
     {
@@ -27,6 +30,10 @@
       "unit": "celsius",
       "dimensions": [
         {
+          "name": "tempDescription",
+          "description": "Temperature sensor description"
+        },
+        {
           "name": "index",
           "description": "SNMP table row index"
         }
@@ -34,7 +41,86 @@
       "instance_id_keys": [
         "instance_id"
       ],
-      "description": "This metric reports the chassis temperature in degrees Celsius of the Netonix switch (NETONIX-SWITCH-MIB temp, a dedicated temperature table), aggregated as the maximum across sensors. High temperatures can indicate cooling failure or airflow obstruction and risk thermal shutdown."
+      "description": "This metric reports the chassis temperature in degrees Celsius of the Netonix switch (temp table, Integer32 °C), tagged by tempDescription. High temperatures can indicate cooling failure or airflow obstruction and risk thermal shutdown."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "device_fan_speed",
+      "query": "device_fan_speed{instance_type='switch', __$labels__}",
+      "display_name": "Fan Speed",
+      "data_type": "Number",
+      "unit": "counts",
+      "dimensions": [
+        {
+          "name": "index",
+          "description": "fanIndex"
+        }
+      ],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "This metric reports the fan rotation speed in RPM of the Netonix switch (fanSpeed, Integer32, indexed by fanIndex). Abnormally low or zero RPM indicates a stalled or failed fan and a risk of overheating; abnormally high RPM may indicate the device is compensating for high temperature. The private MIB exposes RPM only, not a fan-state enum."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "device_voltage_volts",
+      "query": "device_voltage_volts{instance_type='switch', __$labels__}",
+      "display_name": "Input Voltage",
+      "data_type": "Number",
+      "unit": "volts",
+      "dimensions": [
+        {
+          "name": "voltageDescription",
+          "description": "Voltage sensor description"
+        },
+        {
+          "name": "index",
+          "description": "SNMP table row index"
+        }
+      ],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "This metric reports the supply voltage in volts of the Netonix switch (voltage table, VoltageTC scaled by 1/100 via starlark), tagged by voltageDescription. A reading far from the rated input voltage indicates unstable power or a failing supply."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "device_power_watts",
+      "query": "device_power_watts{instance_type='switch', __$labels__}",
+      "display_name": "Total Power Consumption",
+      "data_type": "Number",
+      "unit": "watts",
+      "dimensions": [],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "This metric reports the chassis total power consumption in watts of the Netonix switch (totalPowerConsumption scalar, PowerTC scaled by 1/10 via starlark). A sudden rise may indicate PoE load growth, a shorted powered device, or a failing PSU."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "device_dcdc_input_current",
+      "query": "device_dcdc_input_current{instance_type='switch', __$labels__}",
+      "display_name": "DCDC Input Current",
+      "data_type": "Number",
+      "unit": "none",
+      "dimensions": [],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "This optional metric reports the DCDC input current in amperes of the Netonix switch (dcdcInputCurrent scalar, CurrentTC scaled by 1/10 via starlark). It helps correlate power draw with input voltage on outdoor PoE switches."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "device_dcdc_efficiency",
+      "query": "device_dcdc_efficiency{instance_type='switch', __$labels__}",
+      "display_name": "DCDC Efficiency",
+      "data_type": "Number",
+      "unit": "percent",
+      "dimensions": [],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "This optional metric reports the DCDC conversion efficiency of the Netonix switch (dcdcEfficiency scalar, Integer32 percent). A sustained drop may indicate converter aging or overload."
     },
     {
       "metric_group": "Traffic",

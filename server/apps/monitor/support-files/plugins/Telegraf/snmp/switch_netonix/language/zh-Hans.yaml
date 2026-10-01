@@ -1,6 +1,6 @@
 Switch Netonix SNMP:
   name: Netonix（Telegraf）
-  desc: 面向 Netonix 交换机的 SNMP 监控模板,可采集 每端口入向流量速率、每端口出向流量速率和运行时长。
+  desc: 面向 Netonix 交换机的 SNMP 监控模板，可采集机箱温度、风扇转速、供电电压、总功耗、每端口入向/出向流量速率和运行时长。无私有 CPU/内存 OID。
 monitor_object:
   Switch: 交换机
 monitor_object_type:
@@ -10,6 +10,15 @@ monitor_object_metric:
     device_voltage_volts:
       name: 输入电压
       desc: 该指标报告设备输入电压读数，单位伏特。电压偏离额定范围可能意味着供电不稳，存在硬件风险。
+    device_power_watts:
+      name: 总功耗
+      desc: 该指标报告设备整机功耗，单位瓦特。功耗异常升高可能表示 PoE 负载增大、受电设备短路或电源模块异常。
+    device_dcdc_input_current:
+      name: DCDC 输入电流
+      desc: 该指标报告设备 DCDC 输入电流，单位安培。可与供电电压一起判断户外 PoE 交换机的取电情况。
+    device_dcdc_efficiency:
+      name: DCDC 效率
+      desc: 该指标报告设备 DCDC 转换效率，单位百分比。效率持续下降可能表示变换器老化或过载。
     device_optical_rx_power:
       name: 光模块接收功率
       desc: 该指标报告光模块（SFP/SFP+）接收光功率读数。接收功率过低可能意味着链路衰减、光纤污染或对端发送异常，可能导致丢包或链路中断。

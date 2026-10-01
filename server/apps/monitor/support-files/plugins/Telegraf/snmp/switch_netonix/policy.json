@@ -26,6 +26,51 @@
         }
       ],
       "group_algorithm": "avg"
+    },
+    {
+      "name": "Netonix交换机风扇转速过低",
+      "alert_name": "交换机${resource_name} 风扇转速过低",
+      "description": "监控 Netonix 交换机风扇转速（RPM）。转速过低或为 0 表示风扇卡转或停转，设备面临过热风险。",
+      "metric_name": "device_fan_speed",
+      "algorithm": "last_over_time",
+      "threshold": [
+        {
+          "level": "critical",
+          "value": 100,
+          "method": "<"
+        },
+        {
+          "level": "warning",
+          "value": 500,
+          "method": "<"
+        }
+      ],
+      "group_algorithm": "avg"
+    },
+    {
+      "name": "Netonix交换机功耗过高",
+      "alert_name": "交换机${resource_name} 功耗过高",
+      "description": "监控 Netonix 交换机总功耗（W）。功耗异常升高可能表示 PoE 负载增大、受电设备短路或电源模块异常。",
+      "metric_name": "device_power_watts",
+      "algorithm": "last_over_time",
+      "threshold": [
+        {
+          "level": "critical",
+          "value": 200,
+          "method": ">"
+        },
+        {
+          "level": "error",
+          "value": 150,
+          "method": ">"
+        },
+        {
+          "level": "warning",
+          "value": 120,
+          "method": ">"
+        }
+      ],
+      "group_algorithm": "avg"
     }
   ]
 }

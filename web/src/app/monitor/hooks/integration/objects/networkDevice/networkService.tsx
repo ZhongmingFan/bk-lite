@@ -93,6 +93,7 @@ export const useNetworkServiceConfig = () => {
       'NetworkService Nomadix SNMP': 'snmp_nomadix',
       'NetworkService Socomec iPDU UPS SNMP': 'snmp_socomec',
       'NetworkService Liebert PDU UPS Environmental SNMP': 'snmp_liebert',
+      'NetworkService Dataprobe iBoot-PDU SNMP': 'snmp_dataprobe',
       'NetworkService NTI ENVIROMUX SNMP': 'snmp_nti'
     }
   };

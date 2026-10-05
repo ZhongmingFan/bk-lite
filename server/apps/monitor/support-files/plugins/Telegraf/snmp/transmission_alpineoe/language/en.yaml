@@ -1,0 +1,98 @@
+Transmission Alpine Optoelectronics SNMP:
+  name: Alpine Optoelectronics (Telegraf)
+  desc: "SNMP monitoring template for Alpine Optoelectronics TDCM-EDFA transmission chassis. It reports fan speed and state, PSU input/output state, output voltage, slot temperature, EDFA temperature, and uptime."
+monitor_object:
+  Transmission: Transmission
+monitor_object_type:
+  Network Device: Network Equipment
+monitor_object_metric:
+  Transmission:
+    snmp_uptime:
+      name: System Uptime
+      desc: This metric indicates the uptime of the device since the last restart,
+        derived from sysUpTime. Monitoring uptime helps administrators understand
+        device stability and identify unexpected reboots or failures.
+    interface_ifHCInOctets:
+      name: Interface Incoming Traffic Rate
+      desc: This metric indicates the average rate of bytes received over the past
+        5 minutes, measured in bytes per second, from the 64-bit IF-MIB ifHCInOctets
+        counter (ifXTable). The 64-bit counter avoids the rapid wrap of the 32-bit
+        ifInOctets on high-speed ports, keeping the rate accurate.
+    interface_ifHCOutOctets:
+      name: Interface Outgoing Traffic Rate
+      desc: This metric calculates the average rate of bytes sent over the past 5
+        minutes, measured in bytes per second, from the 64-bit IF-MIB ifHCOutOctets
+        counter (ifXTable). The 64-bit counter avoids the rapid wrap of the 32-bit
+        ifOutOctets on high-speed ports, keeping the rate accurate.
+    device_total_incoming_traffic:
+      name: Device Total Incoming Traffic Rate
+      desc: This metric indicates the average rate of total bytes received by the
+        entire device over the past 5 minutes, measured in bytes per second, summed
+        across all interfaces from the 64-bit ifHCInOctets counter. It helps administrators
+        obtain an overview of incoming traffic for overall monitoring and capacity
+        planning.
+    device_total_outgoing_traffic:
+      name: Device Total Outgoing Traffic Rate
+      desc: This metric represents the average rate of total bytes sent by the entire
+        device over the past 5 minutes, measured in bytes per second, summed across
+        all interfaces from the 64-bit ifHCOutOctets counter. It helps administrators
+        assess sending performance for traffic management and optimization.
+    device_cpu_usage:
+      name: CPU Usage
+      desc: CPU utilization of the transmission device reported directly as a 0-100
+        percentage. Sustained high CPU usage can indicate wireless backhaul traffic
+        pressure, control-plane load or abnormal traffic.
+    device_memory_usage:
+      name: Memory Usage
+      desc: Memory utilization of the transmission device reported directly as a 0-100
+        percentage. Sustained high memory usage may indicate control-plane resource
+        pressure or unstable device services.
+    device_temperature_celsius:
+      name: Temperature
+      desc: Environmental temperature of the Smartoptics DCP chassis in degrees
+        Celsius. The raw sensor value is in tenths of a degree and is divided by
+        10. High values may indicate cooling problems, high ambient temperature or
+        overloaded hardware.
+    device_fan_state:
+      name: Fan Status
+      desc: Operational state of each Smartoptics DCP fan. A non-normal state
+        indicates a cooling-module alarm and may lead to overheating. Absent fans
+        are treated as healthy.
+    device_fan_speed:
+      name: Fan Speed
+      desc: Optional fan rotation speed in RPM of the Smartoptics DCP chassis, taken
+        as the maximum across fans. Abnormally low or zero RPM indicates a stalled
+        or failed fan. Models without a speed column omit this metric.
+    device_power_watts:
+      name: Power Consumption
+      desc: Optional chassis power consumption in watts of the Smartoptics DCP
+        device. Models without a consumption sensor omit this metric.
+    device_psu_state:
+      name: Power Supply Status
+      desc: Operational state of each transmission device power supply. A non-normal
+        state indicates offline power, missing input, over-temperature, hardware fault,
+        or alert condition that should be investigated.
+    device_psu_input_state:
+      name: PSU Input State
+      desc: Operational state of each power supply input, normalized to normal or abnormal. Off or missing input is abnormal.
+    device_psu_output_state:
+      name: PSU Output State
+      desc: Operational state of each power supply output, normalized to normal or abnormal. Voltage high or low is abnormal.
+    device_voltage_volts:
+      name: Output Voltage
+      desc: Output voltage reading of each power supply in volts. Values outside the rated range may indicate unstable power.
+    slot_temperature_celsius:
+      name: Slot Temperature
+      desc: Temperature reading of each chassis slot in degrees Celsius. Abnormally high values may indicate blocked airflow or excessive ambient heat.
+    edfa_temperature_celsius:
+      name: EDFA Temperature
+      desc: Temperature reading of the EDFA optical amplifier module in degrees Celsius. Abnormally high values may trigger thermal protection or affect optical power stability.
+monitor_object_metric_group:
+  Transmission:
+    Base: Base
+    Traffic: Traffic
+    CPU: CPU
+    Memory: Memory
+    Temperature: Temperature
+    Hardware Status: Hardware Status
+    Power: Power

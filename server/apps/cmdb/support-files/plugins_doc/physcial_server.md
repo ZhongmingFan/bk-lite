@@ -1,10 +1,11 @@
 ### 说明
-采集物理服务器的硬件清单信息（序列号、CPU、主板、内存、磁盘、网卡、GPU），标准化同步至 CMDB。采集为**只读**。本插件提供两种采集方式，你可按环境选择：
+采集物理服务器的硬件清单信息，标准化同步至 CMDB。采集为**只读**。本插件提供三种采集方式，你可按环境选择：
 
 1. **物理服务器 SSH（JOB）**：通过主机侧命令采集完整硬件资产信息。
 2. **【BETA】物理服务器 IPMI（protocol）**：经 BMC 管理口采集基础身份信息，用于带外资产补充。
+3. **【BETA】物理服务器 Redfish（protocol）**：经 BMC 的标准 HTTPS API 采集基础身份信息。
 
-> `physcial_server.ip_addr` 在 IPMI 采集场景下表示 **BMC 管理口 IP**，不是业务网口地址。
+三种方式统一以采集目标 IP 构建 `physcial_server.inst_name`。同一 IP 首次成功写入的任务拥有该实例；其他任务受 `collect_task` 过滤和实例名唯一约束，不会更新或重复创建该实例。
 
 ---
 
@@ -82,3 +83,53 @@
 | board_serial | 主板序列号 |
 
 > 补充说明：IPMI 方式仅补充基础身份字段，不创建 `memory` / `disk` / `nic` / `gpu` 关联实例；`asset_code`、`board_serial` 等字段依赖厂商 FRU 实现，可能为空。
+
+---
+
+## 方式三：物理服务器 Redfish（protocol，BETA）
+
+### 说明
+Redfish 是服务器 BMC 提供的标准 REST API。本方式通过 HTTPS Basic Auth 读取 `/redfish/v1/` 与唯一的 `ComputerSystem` 资源，不依赖目标操作系统，也不执行写操作。
+
+### 前置要求（Redfish 方式）
+1. **网络连通**：接入点到 BMC 的 HTTPS 端口连通，默认 `443`。
+2. **账号权限**：使用可读取 Redfish 资产清单的只读或最小权限 BMC 账号。
+3. **证书要求**：默认校验服务端 TLS 证书；BMC 使用自签名证书且无法建立可信证书链时，可在任务凭据中明确关闭校验。关闭后仍使用 HTTPS 加密，但无法验证 BMC 身份，存在中间人风险。
+4. **目标约束**：一个目标 IP 必须只暴露一台 `ComputerSystem`，以符合“一 IP 一物理服务器资产”的实例规则。
+
+### 凭据字段说明（Redfish 方式）
+- `host`：BMC 管理口 IP，也是统一实例名的来源。
+- `port`：Redfish HTTPS 端口，默认 `443`。
+- `username`：Redfish/BMC 用户名。
+- `password`：Redfish/BMC 密码。落库自动加密，下发时通过环境变量引用。
+- `verify_tls`：是否校验服务端证书，默认 `true`；仅在受信任管理网络中接入自签名证书时关闭。
+
+### 采集内容（Redfish 方式）
+| Key 名称 | Redfish 来源 | 含义 |
+| :--- | :--- | :--- |
+| ip_addr | 采集目标 | BMC 管理口 IP |
+| port | 采集配置 | Redfish HTTPS 端口 |
+| serial_number | ComputerSystem.SerialNumber | 整机序列号 |
+| model | ComputerSystem.Model | 产品型号 |
+| brand | ComputerSystem.Manufacturer | 厂商 |
+| asset_code | ComputerSystem.AssetTag | 资产标签 |
+| cpu_vendor | 第一颗 CPU Processor.Manufacturer | CPU 厂商 |
+| cpu_model | 第一颗 CPU Processor.Model | CPU 型号 |
+| cpu_cores | CPU Processor.TotalCores 之和 | CPU 物理核心数，入库字段 `cpu_core` |
+| cpu_threads | CPU Processor.TotalThreads 之和 | CPU 线程数 |
+| cpu_arch | 第一颗 CPU InstructionSet | CPU 架构 |
+| board_vendor | SystemBoard Assembly.Vendor | 主板厂商 |
+| board_model | SystemBoard Assembly.Model | 主板型号 |
+| board_serial | SystemBoard Assembly.SerialNumber | 主板序列号 |
+| power_state | ComputerSystem.PowerState | 电源状态。`On`/`Off` 规范大小写；其他非空值原样保留 |
+| health | ComputerSystem.Status.Health | 整机健康快照。只写 `OK`/`Warning`/`Critical`/`Unknown` |
+
+**关联子项（以包含/关联挂在物理服务器下）**
+- `memory`：`mem_locator`、`mem_part_number`、`mem_type`、`mem_size`（整数 GB）、`mem_sn`
+- `disk`：`disk_vendor`、`disk`（整数 GB）、`disk_type`、`disk_sn`、`health`（`Status.Health`，Absent 整盘跳过）、`disk_life_percent`（`PredictedMediaLifeLeftPercent`）
+- `nic`：`nic_mac`、`nic_vendor`、`nic_model`、`nic_type`、`nic_iface`（功能/适配器 `Name` 或 `Id`）、`nic_speed_mbps`（优先当前链路，否则最大速率）
+- `gpu`：`gpu_name`、`gpu_type`、`gpu_desc`
+- `storage_controller`：`sc_id`（`Id`，否则 `MemberId`）、`sc_name`、`sc_vendor`、`sc_model`、`sc_sn`、`sc_firmware`、`health`（`Storage.StorageControllers`）
+- `psu`：`psu_name`、`psu_vendor`、`psu_model`、`psu_sn`、`psu_capacity_watts`、`health`（`Power.PowerSupplies`，不写瞬时功耗）
+
+> 补充说明：子实例挂在 BMC IP；`nic_pci_addr` 留空；没有 SystemBoard 时不写主板字段；标准资源没有的字段留空；`Power` 或 `StorageControllers` 缺失时跳过对应子项，任务仍成功；缺少的子实例不会自动删除；不采集 OEM、EthernetInterfaces、风扇以及能耗/温度/电压/转速。

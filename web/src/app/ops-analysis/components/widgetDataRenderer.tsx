@@ -43,11 +43,11 @@ import {
   supportsComponentSwitch,
 } from "@/app/ops-analysis/utils/componentParamSwitch";
 import { useParamInputOptions } from "@/app/ops-analysis/hooks/useParamInputOptions";
-import { fetchCompareData } from "@/app/ops-analysis/utils/compareQuery";
+import { fetchCompareData, validateGaugeData } from "@/app/ops-analysis/utils/compareQuery";
 import { useDataSourceApi, withRuntimeSourceDataErrorSuppression } from "@/app/ops-analysis/api/dataSource";
 import { ChartDataTransformer } from "@/app/ops-analysis/utils/chartDataTransform";
 import { getRequestErrorMessage, classifyWidgetQueryError } from "@/app/ops-analysis/utils/requestError";
-import { getValueByPath } from "@/app/ops-analysis/utils/objectPath";
+import { buildTopNItems } from "@/app/ops-analysis/utils/topNData";
 import { buildWidgetRequestCacheKey } from "@/app/ops-analysis/utils/widgetRequestCache";
 import { useDashboardRuntimeScheduler } from "@/app/ops-analysis/context/dashboardRuntimeScheduler";
 import {
@@ -92,38 +92,16 @@ const validateTopNData = (
   }
 
   if (!Array.isArray(data)) {
-    return { isValid: false, message: errorMessage || "数据格式不匹配" };
+    return { isValid: false, message: errorMessage || "dashboard.dataFormatMismatch" };
   }
 
-  const labelField = config?.topNLabelField;
-  const valueField = config?.topNValueField;
+  const hasNamedRows =
+    buildTopNItems(data, config?.topNLabelField, config?.topNValueField)
+      .length > 0;
 
-  const hasValidData = data.some((item) => {
-    if (Array.isArray(item) && item.length >= 2) {
-      const rawName = getValueByPath(item, labelField);
-      const rawValue = getValueByPath(item, valueField);
-      const name =
-        rawName === undefined || rawName === null ? "" : String(rawName).trim();
-      const value = Number(rawValue);
-      return !!name && !Number.isNaN(value);
-    }
-
-    if (!item || typeof item !== "object") {
-      return false;
-    }
-
-    const rawName = getValueByPath(item, labelField);
-    const rawValue = getValueByPath(item, valueField);
-
-    const name =
-      rawName === undefined || rawName === null ? "" : String(rawName).trim();
-    const value = Number(rawValue);
-    return !!name && !Number.isNaN(value);
-  });
-
-  return hasValidData
+  return hasNamedRows
     ? { isValid: true }
-    : { isValid: false, message: errorMessage || "数据格式不匹配" };
+    : { isValid: false, message: errorMessage || "dashboard.dataFormatMismatch" };
 };
 
 const DEFAULT_RUNTIME_PRIORITY: RuntimeRequestPriority = {
@@ -133,67 +111,6 @@ const DEFAULT_RUNTIME_PRIORITY: RuntimeRequestPriority = {
   order: 0,
 };
 
-const validateGaugeData = (
-  data: unknown,
-  config?: ValueConfig,
-): { isValid: boolean; message?: string } => {
-  if (!data || (Array.isArray(data) && data.length === 0)) {
-    return { isValid: true };
-  }
-
-  const selectedField = config?.selectedFields?.[0];
-  const failMessage =
-    "数据结构不符：仪表盘期望 number，或包含数值字段的对象/数组（可通过“展示字段”指定）";
-
-  const hasNumericValue = (value: unknown) => {
-    if (typeof value === "number") return Number.isFinite(value);
-    if (typeof value === "string") {
-      const parsed = Number(value);
-      return Number.isFinite(parsed);
-    }
-    return false;
-  };
-
-  if (Array.isArray(data)) {
-    const firstItem = data[0];
-    if (selectedField && firstItem && typeof firstItem === "object") {
-      return hasNumericValue(getValueByPath(firstItem, selectedField))
-        ? { isValid: true }
-        : { isValid: false, message: failMessage };
-    }
-
-    if (hasNumericValue(firstItem)) {
-      return { isValid: true };
-    }
-
-    if (firstItem && typeof firstItem === "object") {
-      const values = Object.values(firstItem as Record<string, unknown>);
-      return values.some((item) => hasNumericValue(item))
-        ? { isValid: true }
-        : { isValid: false, message: failMessage };
-    }
-
-    return { isValid: false, message: failMessage };
-  }
-
-  if (typeof data === "object") {
-    if (selectedField) {
-      return hasNumericValue(getValueByPath(data, selectedField))
-        ? { isValid: true }
-        : { isValid: false, message: failMessage };
-    }
-
-    const values = Object.values(data as Record<string, unknown>);
-    return values.some((item) => hasNumericValue(item))
-      ? { isValid: true }
-      : { isValid: false, message: failMessage };
-  }
-
-  return hasNumericValue(data)
-    ? { isValid: true }
-    : { isValid: false, message: failMessage };
-};
-
 const validateEventTableData = (
   data: unknown,
 ): { isValid: boolean; message?: string } => {
@@ -201,8 +118,7 @@ const validateEventTableData = (
     return { isValid: true };
   }
 
-  const failMessage =
-    "数据结构不符：事件表期望数组，或包含 items 数组的分页结构";
+  const failMessage = "dashboard.eventTableStructureMismatch";
 
   const list = Array.isArray(data)
     ? data
@@ -231,8 +147,9 @@ const validateEventTableData = (
 
 const validateEventTimelineData = (
   data: unknown,
+  config?: ValueConfig,
 ): { isValid: boolean; message?: string } =>
-  validateEventTimelinePayload(data);
+  validateEventTimelinePayload(data, config?.eventTimeline);
 
 const validateRadarData = (
   data: unknown,
@@ -251,15 +168,14 @@ const validateRadarData = (
   if (series.unsupported === "multi_series") {
     return {
       isValid: false,
-      message: "雷达图当前仅支持单实体多维数据，不支持多实体对比输入",
+      message: "dashboard.radarMultiSeriesUnsupported",
     };
   }
 
   if (series.indicatorLabels.length === 0) {
     return {
       isValid: false,
-      message:
-        "数据结构不符：雷达图期望 [{name,value}] 或对象 + 指标字段映射",
+      message: "dashboard.radarStructureMismatch",
     };
   }
 
@@ -291,6 +207,9 @@ export interface WidgetWrapperProps {
   ) => void;
   /** 预览等旁路需要同一份取数结果时使用；不影响画布渲染。 */
   onRawData?: (data: unknown) => void;
+  /** 字段刷新已经拿到的样本。版本增加时直接画这批数据，不再请求一次。 */
+  suppliedRawData?: unknown;
+  suppliedRawDataVersion?: number;
 }
 
 const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
@@ -315,6 +234,8 @@ const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
   surface = 'dashboard',
   onTopologyLayoutChange,
   onRawData,
+  suppliedRawData,
+  suppliedRawDataVersion = 0,
 }) => {
   const { t } = useTranslation();
   const headerRuntimeSlot = useWidgetHeaderRuntimeSlot();
@@ -343,10 +264,20 @@ const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
   const isSceneWidget = isSelfFetchSceneWidget(
     config?.sceneWidgetType || chartType,
   );
+  const appliedSupplyVersionRef = useRef(0);
+  useEffect(() => {
+    if (!suppliedRawDataVersion || suppliedRawDataVersion === appliedSupplyVersionRef.current) {
+      return;
+    }
+    appliedSupplyVersionRef.current = suppliedRawDataVersion;
+    setRawData(suppliedRawData);
+    setLoading(false);
+  }, [suppliedRawData, suppliedRawDataVersion]);
   useEffect(() => {
     if (isSceneWidget) return;
+    if (loading || tableLoading) return;
     onRawData?.(rawData);
-  }, [isSceneWidget, onRawData, rawData]);
+  }, [isSceneWidget, onRawData, rawData, loading, tableLoading]);
   const effectiveComponentParams = useMemo(() => {
     const overrides = config?.dataSourceParams || [];
     if (!dataSource?.params?.length) return overrides;
@@ -507,9 +438,9 @@ const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
         headerRuntimeSlot,
       )
       : null;
-  const inlineComponentSwitchControl = chartType === "room3D"
-    ? componentSwitchControl
-    : headerRuntimeSlot ? null : componentSwitchControl;
+  const inlineComponentSwitchControl = headerRuntimeSlot
+    ? null
+    : componentSwitchControl;
 
   const fetchIdRef = useRef(0);
   const inflightCountRef = useRef(0);
@@ -650,6 +581,7 @@ const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
       filterBindings: config?.filterBindings,
       filterDefinitions,
       resolutionContext: dateRangeResolutionContext,
+      t,
     });
   }, [
     requestEnabled,
@@ -659,6 +591,7 @@ const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
     unifiedFilterValues,
     filterDefinitions,
     dateRangeResolutionContext,
+    t,
   ]);
 
   const requestSignatureParams = useMemo(() => {
@@ -674,6 +607,7 @@ const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
       filterBindings: config?.filterBindings,
       filterDefinitions,
       resolutionContext: dateRangeResolutionContext,
+      t,
     });
   }, [
     requestEnabled,
@@ -683,6 +617,7 @@ const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
     unifiedFilterValues,
     filterDefinitions,
     dateRangeResolutionContext,
+    t,
   ]);
 
   const requestSignature = useMemo(() => {
@@ -750,14 +685,22 @@ const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
 
   const validateChartData = useCallback(
     (data: unknown, type?: string) => {
+      const localizeStructureMessage = (
+        result: { isValid: boolean; message?: string },
+      ) => {
+        if (!result.isValid && result.message?.startsWith("dashboard.")) {
+          return { ...result, message: t(result.message) };
+        }
+        return result;
+      };
       const errorMessage = t("dashboard.dataFormatMismatch");
       if (type === "topologyMap") {
         return validateTopologyMapWidgetData(data, errorMessage);
       }
       if (type === "cardList") {
-        return validateCardListPayload(data, {
+        return localizeStructureMessage(validateCardListPayload(data, {
           titleField: config?.cardList?.titleField || "",
-        });
+        }));
       }
 
       const isDataEmpty = () =>
@@ -769,22 +712,31 @@ const WidgetWrapper: React.FC<WidgetWrapperProps> = ({
 
       switch (type) {
         case "pie":
-          return ChartDataTransformer.validatePieData(data, errorMessage);
+          return ChartDataTransformer.validatePieData(data, errorMessage, {
+            dimensionField: config?.dimensionField,
+            valueField: config?.valueField,
+          });
         case "line":
         case "bar":
-          return ChartDataTransformer.validateLineBarData(data, errorMessage);
+          return ChartDataTransformer.validateLineBarData(data, errorMessage, {
+            dimensionField: config?.dimensionField,
+            valueField: config?.valueField,
+          });
         case "topN":
           return validateTopNData(data, config, errorMessage);
         case "gauge":
-          return validateGaugeData(data, config);
+          return localizeStructureMessage(validateGaugeData(data, config));
         case "eventTable":
-          return validateEventTableData(data);
+          return localizeStructureMessage(validateEventTableData(data));
         case "eventTimeline":
-          return validateEventTimelineData(data);
+          return localizeStructureMessage(validateEventTimelineData(data, config));
         case "radar":
-          return validateRadarData(data, config);
+          return localizeStructureMessage(validateRadarData(data, config));
         case "multiValue":
-          const result = validateMultiValueData(data, errorMessage);
+          const result = validateMultiValueData(data, errorMessage, {
+            labelField: config?.multiValueLabelField,
+            valueField: config?.multiValueValueField,
+          });
           return { isValid: result.isValid, message: result.errorMessage };
         case "table":
           return { isValid: true };

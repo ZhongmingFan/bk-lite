@@ -28,6 +28,11 @@ const virtualModules = new Map([
     export const parseLlmContextUsage = () => null;
     export const contextUsagePercent = () => 0;
     export const formatContextTokens = (tokens) => String(tokens);
+    export const createTranslator = () => (key, fallback) => fallback ?? key;
+    export const setWebChatLocale = () => 'zh';
+    export const getWebChatLocale = () => 'zh';
+    export const normalizeLocale = () => 'zh';
+    export const translate = (key, fallback) => fallback ?? key;
     let nextId = 0;
     export const generateId = () => 'message-' + ++nextId;`,
   ],
@@ -69,6 +74,7 @@ const virtualModules = new Map([
     `import React from 'react'; export const PillComposer = (props) => React.createElement(
       React.Fragment,
       null,
+      props.leftExtra,
       React.createElement('button', { 'data-test': 'stop', onClick: props.onCancel }, 'stop'),
       React.createElement('button', { 'data-test': 'submit', onClick: () => props.onSubmit('hi') }, 'submit')
     );`,

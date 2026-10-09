@@ -1,18 +1,25 @@
 'use client';
 
-import React, { useMemo, useEffect, useCallback, useState } from 'react';
+import React, { useMemo, useEffect, useState } from 'react';
 import Link from 'next/link';
 import Icon from '@/components/icon';
 import sideMenuStyle from './index.module.scss';
-import { useModelApi, useInstanceApi } from '@/app/cmdb/api';
+import { useInstanceApi } from '@/app/cmdb/api';
 import EllipsisWithTooltip from '@/components/ellipsis-with-tooltip';
 import { usePathname, useSearchParams, useRouter } from 'next/navigation';
 import {
   ArrowLeftOutlined, ApartmentOutlined, AppstoreOutlined, HddOutlined,
 } from '@ant-design/icons';
 import { MenuItem } from '@/types/index';
-import { useRelationships } from '@/app/cmdb/context/relationships';
 import { useTranslation } from '@/utils/i18n';
+import { useRelationships } from '@/app/cmdb/context/relationships';
+import {
+  buildRelationshipTabHref,
+  DEFAULT_RELATIONSHIP_TAB,
+  isRelationshipMenuActive,
+} from '../../relationshipViewNavigation';
+import { buildRelationshipMenuSections } from '../../relationshipMenuData';
+import { useCmdbPublicMenuItems } from '@/app/cmdb/hooks/useCmdbPublicMenuItems';
 
 interface SideMenuProps {
   menuItems: MenuItem[];
@@ -21,31 +28,6 @@ interface SideMenuProps {
   showProgress?: boolean;
   taskProgressComponent?: React.ReactNode;
   onBackButtonClick?: () => void;
-}
-
-interface ListItem {
-  text: string;
-  value?: number;
-  model_asst_id: string;
-}
-
-interface RelationSection {
-  title: string;
-  children: ListItem[];
-}
-interface ModelAssociation {
-  _id: number;
-  _label: string;
-  is_pre: boolean;
-  mapping: string;
-  model_asst_id: string;
-  asst_id: string;
-  src_id: number;
-  src_model_id: string;
-  src_model_name?: string;
-  dst_id: number;
-  dst_model_id: string;
-  dst_model_name?: string;
 }
 
 const SideMenu: React.FC<SideMenuProps> = ({
@@ -59,23 +41,18 @@ const SideMenu: React.FC<SideMenuProps> = ({
   const ASSET_NAME = 'asset_relationships';
   const IP_VIEW_NAME = 'asset_ip_view';
 
-  const { getModelAssociations } = useModelApi();
-
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const router = useRouter();
   const modelId = searchParams.get('model_id');
-  const { setSelectedAssoId, assoInstances, assoTypes } =
-    useRelationships();
-  const [allAssociations, setAllAssociations] = useState<ModelAssociation[]>(
-    []
-  );
+  const { setSelectedAssoId, assoInstances, assoTypes } = useRelationships();
 
   // 左侧快捷入口：网络拓扑 / 应用拓扑 / 机房视图 / 机柜视图，直达关联关系页对应子视图（缩短操作路径）
   const { getTopoThemes } = useInstanceApi();
   const { t } = useTranslation();
   const [themes, setThemes] = useState<string[]>([]);
   const currentTab = searchParams.get('tab') || '';
+  const publicItems = useCmdbPublicMenuItems();
 
   useEffect(() => {
     if (!modelId) return;
@@ -90,7 +67,6 @@ const SideMenu: React.FC<SideMenuProps> = ({
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelId]);
 
   const relItem = menuItems.find((m) => m.name === ASSET_NAME);
@@ -119,9 +95,14 @@ const SideMenu: React.FC<SideMenuProps> = ({
   };
 
   const handleItemClick = (modelAsstId: string, item: MenuItem) => {
-    if (!isActive(item.url)) {
-      const newUrl = buildUrlWithParams(item.url);
-      router.push(newUrl);
+    if (!isActive(item.url) || currentTab !== DEFAULT_RELATIONSHIP_TAB) {
+      router.push(
+        buildRelationshipTabHref(
+          item.url,
+          searchParams,
+          DEFAULT_RELATIONSHIP_TAB
+        )
+      );
     }
     setSelectedAssoId(modelAsstId);
   };
@@ -131,86 +112,18 @@ const SideMenu: React.FC<SideMenuProps> = ({
     return `${path}?${params.toString()}`;
   };
 
+  const shortcutTabs = shortcuts.map((shortcut) => shortcut.tab);
+
   const isActive = (path: string): boolean => {
     if (pathname === null) return false;
     return pathname.startsWith(path);
   };
 
-  useEffect(() => {
-    fetchAllAssociations(modelId || '');
-  }, []);
-
-  const fetchAllAssociations = useCallback(
-    async (modelId: string) => {
-      if (!modelId) return;
-      try {
-        const data = await getModelAssociations(modelId);
-        setAllAssociations(Array.isArray(data) ? data : []);
-      } catch {
-        setAllAssociations([]);
-      }
-    },
-    [getModelAssociations]
-  );
-
-  const relationData = useMemo<RelationSection[]>(() => {
-    if (!assoInstances?.length) return [];
-
-    const filterAssoList: any = allAssociations.filter((item) => {
-      return assoInstances.every(
-        (asso) => asso.model_asst_id !== item.model_asst_id
-      );
-    });
-    const groupedData = assoInstances
-      .concat(filterAssoList)
-      .reduce((acc, item) => {
-        const title =
-          assoTypes.find((type) => type.asst_id === item.asst_id)?.asst_name ||
-          '--';
-        if (!acc.has(title)) {
-          acc.set(title, []);
-        }
-
-        const text =
-          item.dst_model_id === modelId
-            ? item.src_model_name || item.src_model_id
-            : item.dst_model_name || item.dst_model_id;
-
-        acc.get(title)?.push({
-          model_asst_id: item.model_asst_id,
-          text,
-          value: item.inst_list?.length || 0,
-        });
-
-        return acc;
-      }, new Map());
-
-    return Array.from(groupedData.entries()).map(([title, children]) => {
-      const dedupedMap = new Map<string, ListItem>();
-
-      children.forEach((child: ListItem) => {
-        const dedupKey = child.model_asst_id;
-        const existing = dedupedMap.get(dedupKey);
-
-        if (!existing) {
-          dedupedMap.set(dedupKey, child);
-          return;
-        }
-
-        const existingValue = existing.value || 0;
-        const currentValue = child.value || 0;
-
-        if (currentValue > existingValue) {
-          dedupedMap.set(dedupKey, child);
-        }
-      });
-
-      return {
-        title,
-        children: Array.from(dedupedMap.values()),
-      };
-    });
-  }, [assoInstances, assoTypes, allAssociations]);
+  const isMenuItemActive = (item: MenuItem): boolean => {
+    const pathMatches = isActive(item.url);
+    if (item.name !== ASSET_NAME) return pathMatches;
+    return isRelationshipMenuActive(pathMatches, currentTab, shortcutTabs);
+  };
 
   const orderedMenuItems = useMemo(() => {
     const items = [...menuItems];
@@ -223,6 +136,15 @@ const SideMenu: React.FC<SideMenuProps> = ({
     items.splice(relationIndex, 0, ipViewItem);
     return items;
   }, [menuItems]);
+
+  const relationData = useMemo(
+    () => buildRelationshipMenuSections({
+      instances: assoInstances || [],
+      assoTypes,
+      modelId: modelId || '',
+    }),
+    [assoInstances, assoTypes, modelId]
+  );
 
   return (
     <aside
@@ -261,10 +183,16 @@ const SideMenu: React.FC<SideMenuProps> = ({
                 );
               })}
               <li
-                className={`rounded-md mb-1 ${isActive(item.url) ? sideMenuStyle.active : ''}`}
+                className={`rounded-md mb-1 ${isMenuItemActive(item) ? sideMenuStyle.active : ''}`}
               >
                 <Link
-                  href={buildUrlWithParams(item.url)}
+                  href={item.name === ASSET_NAME
+                    ? buildRelationshipTabHref(
+                      item.url,
+                      searchParams,
+                      DEFAULT_RELATIONSHIP_TAB
+                    )
+                    : buildUrlWithParams(item.url)}
                   className="group flex items-center h-9 rounded-md py-2 text-sm font-normal px-3"
                 >
                   {item.icon && (
@@ -273,7 +201,7 @@ const SideMenu: React.FC<SideMenuProps> = ({
                   {item.title}
                 </Link>
               </li>
-              {item.name === ASSET_NAME && !!relationData?.length && (
+              {item.name === ASSET_NAME && !!relationData.length && (
                 <div
                   className={`ml-4 mt-2 mb-2 pb-1 border-b border-[var(--color-border-2)] ${sideMenuStyle.relationList}`}
                 >
@@ -283,31 +211,43 @@ const SideMenu: React.FC<SideMenuProps> = ({
                         {section.title}
                       </div>
                       <div className="ml-3">
-                        {section.children.map(
-                          (subItem: ListItem, itemIndex: number) => (
-                            <div
-                              key={itemIndex}
-                              className="flex justify-between items-center p-1 cursor-pointer hover:bg-gray-100 rounded-md"
-                              onClick={() =>
-                                handleItemClick(subItem.model_asst_id, item)
-                              }
-                            >
-                              <EllipsisWithTooltip
-                                text={subItem.text}
-                                className="w-[100px] overflow-hidden text-ellipsis whitespace-nowrap"
-                              />
-                              <span className="bg-gray-100 px-2 py-0.5 rounded text-xs text-gray-600">
-                                {subItem.value}
-                              </span>
-                            </div>
-                          )
-                        )}
+                        {section.children.map((subItem) => (
+                          <div
+                            key={subItem.model_asst_id}
+                            className="flex justify-between items-center p-1 cursor-pointer hover:bg-gray-100 rounded-md"
+                            onClick={() =>
+                              handleItemClick(subItem.model_asst_id, item)
+                            }
+                          >
+                            <EllipsisWithTooltip
+                              text={subItem.text}
+                              className="w-[100px] overflow-hidden text-ellipsis whitespace-nowrap"
+                            />
+                            <span className="bg-gray-100 px-2 py-0.5 rounded text-xs text-gray-600">
+                              {subItem.value}
+                            </span>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   ))}
                 </div>
               )}
             </React.Fragment>
+          ))}
+          {publicItems.map((item) => (
+            <li
+              key={item.key}
+              className={`rounded-md mb-1 ${isActive(item.url) ? sideMenuStyle.active : ''}`}
+            >
+              <Link
+                href={buildUrlWithParams(item.url)}
+                className="group flex items-center h-9 rounded-md py-2 text-sm font-normal px-3"
+              >
+                <ApartmentOutlined className="text-base pr-1.5" />
+                {t(item.titleKey)}
+              </Link>
+            </li>
           ))}
         </ul>
         {showProgress && <>{taskProgressComponent}</>}

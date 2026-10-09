@@ -66,6 +66,22 @@ const useIntegrationApi = () => {
       updateMonitorMetrics: async (data: OrderParam[]) => {
         return await post('/monitor/api/metrics/set_order/', data);
       },
+      batchUpdateMonitorMetrics: async (data: {
+        monitor_plugin: number;
+        items: Array<{
+          id: number;
+          display_name?: string;
+          metric_group?: number;
+          unit?: string;
+          data_type?: string;
+          description?: string;
+          dimensions?: string[];
+        }>;
+      }) => {
+        return await post('/monitor/api/metrics/batch_update/', data, {
+          suppressErrorNotification: true,
+        });
+      },
       updateNodeChildConfig: async (data: NodeConfigParam) => {
         return await post(
           '/monitor/api/node_mgmt/batch_setting_node_child_config/',
@@ -110,6 +126,11 @@ const useIntegrationApi = () => {
       getConfigContent: async (data: { ids: string[] }) => {
         return await post('/monitor/api/node_mgmt/get_config_content/', data);
       },
+      getPluginChildConfig: async (data: {
+        monitor_plugin_id: string | number;
+      }) => {
+        return await post('/monitor/api/node_mgmt/get_plugin_child_config/', data);
+      },
       updateMonitorInstance: async (data: InstanceInfo) => {
         return await post(
           '/monitor/api/monitor_instance/update_monitor_instance/',
@@ -148,6 +169,19 @@ const useIntegrationApi = () => {
       deleteCustomTemplate: async (id: React.Key) => {
         return await del(`/monitor/api/monitor_plugin/${String(id)}/`);
       },
+      restoreBuiltinPlugin: async (id: React.Key) => {
+        return await post(`/monitor/api/monitor_plugin/${String(id)}/restore_builtin/`);
+      },
+      updateCollectTemplateConfigs: async (data: {
+        instance_ids: React.Key[];
+        monitor_plugin_id?: React.Key;
+        discard_hand_edited?: boolean;
+      }) => {
+        return await post(
+          '/monitor/api/node_mgmt/update_collect_template_configs/',
+          data
+        );
+      },
       getUiTemplateByParams: async (params: {
         collector: string;
         collect_type: string;
@@ -179,6 +213,9 @@ const useIntegrationApi = () => {
           page_size?: number;
           name?: string;
           vm_params?: Record<string, string | string[]>;
+          unassigned?: boolean;
+          need_update?: boolean;
+          monitor_plugin_id?: React.Key;
         } = {},
         config?: AxiosRequestConfig
       ) => {
@@ -195,6 +232,7 @@ const useIntegrationApi = () => {
           id?: string;
           name?: string;
           monitor_object_id?: React.Key;
+          interval?: number;
         } = {}
       ) => {
         return await post(
@@ -275,6 +313,28 @@ const useIntegrationApi = () => {
       },
       getCollectDetectTask: async (taskId: React.Key) => {
         return await get(`/monitor/api/collect_detect/${String(taskId)}/`);
+      },
+      listQcloudRegions: async (data: {
+        username?: string;
+        password?: string;
+        collect_config_id?: string;
+        collect_config_ids?: string[];
+        cloud_region_id?: number | string;
+      }) => {
+        return await post('/monitor/api/monitor_plugin/qcloud_regions/', data, {
+          suppressErrorNotification: true,
+        });
+      },
+      listAliyunRegions: async (data: {
+        username?: string;
+        password?: string;
+        collect_config_id?: string;
+        collect_config_ids?: string[];
+        cloud_region_id?: number | string;
+      }) => {
+        return await post('/monitor/api/monitor_plugin/aliyun_regions/', data, {
+          suppressErrorNotification: true,
+        });
       },
     } satisfies FlowIntegrationApi),
     [del, get, post, put]

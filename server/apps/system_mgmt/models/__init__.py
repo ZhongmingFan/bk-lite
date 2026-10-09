@@ -9,6 +9,7 @@ from .login_auth_binding import *  # noqa
 from .login_module import *  # noqa
 from .menu import *  # noqa
 from .network_white_list import NetworkWhiteList  # noqa
+from .openapi_call_log import OpenAPICallLog  # noqa
 from .operation_log import *  # noqa
 from .provider_pack import UploadedProviderPack  # noqa
 from .role import *  # noqa
@@ -17,3 +18,5 @@ from .system_settings import *  # noqa
 from .user import *  # noqa
 from .user_login_log import *  # noqa
 from .user_sync_source import *  # noqa
+from .credential import *  # noqa
+from .system_api_token import SystemAPIToken  # noqa

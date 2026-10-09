@@ -4,7 +4,7 @@
 # @Author: windyzhao
 
 import json
-from typing import List, Dict
+from typing import Dict, List
 
 from django.db import transaction
 from django.db.models import Max
@@ -134,6 +134,10 @@ class FieldGroupService:
                             False,
                         )
 
+                    from apps.cmdb.display_field import ExcludeFieldsCache
+
+                    ExcludeFieldsCache.invalidate_model_attrs(model_id)
+
         return group
 
     @staticmethod
@@ -189,6 +193,10 @@ class FieldGroupService:
                         [],
                         False,
                     )
+
+                from apps.cmdb.display_field import ExcludeFieldsCache
+
+                ExcludeFieldsCache.invalidate_model_attrs(model_id)
 
             # 删除分组
             group.delete()
@@ -330,10 +338,13 @@ class FieldGroupService:
         groups_count = groups.count()
 
         # 3. 解析属性（系统联动 ID 不对用户暴露于分组表单/模型设计）
+        from apps.cmdb.language.service import apply_attr_translations, group_display_name
         from apps.cmdb.services.module_ingest import filter_user_facing_attrs
 
-        attrs = filter_user_facing_attrs(
-            ModelManage.parse_attrs(model_info.get("attrs", "[]"))
+        attrs = apply_attr_translations(
+            filter_user_facing_attrs(ModelManage.parse_attrs(model_info.get("attrs", "[]"))),
+            model_id,
+            language,
         )
         # 4. 按分组组织属性
         groups_data = []
@@ -351,6 +362,7 @@ class FieldGroupService:
                 {
                     "id": group.id,
                     "group_name": group.group_name,
+                    "display_name": group_display_name(group.group_name, language),
                     "order": group.order,
                     "is_collapsed": group.is_collapsed,
                     "description": group.description,
@@ -392,6 +404,74 @@ class FieldGroupService:
             raise BaseAppException(f"分组'{group_name}'不存在")
 
     @staticmethod
+    def _original_attrs_json(model_info: dict) -> str:
+        attrs = model_info.get("attrs", "[]")
+        if isinstance(attrs, str):
+            return attrs
+        return json.dumps(attrs)
+
+    @staticmethod
+    def _snapshot_group_attr_orders(model_id: str, group_names) -> Dict[str, List]:
+        snapshots: Dict[str, List] = {}
+        for group_name in group_names:
+            if not group_name:
+                continue
+            try:
+                group = FieldGroup.objects.get(model_id=model_id, group_name=group_name)
+            except FieldGroup.DoesNotExist:
+                continue
+            snapshots[group_name] = list(group.attr_orders or [])
+        return snapshots
+
+    @staticmethod
+    def _restore_graph_and_group_orders(
+        model_id: str,
+        model_node_id,
+        original_attrs_json: str,
+        group_snapshots: Dict[str, List],
+    ) -> None:
+        with GraphClient() as ag:
+            ag.set_entity_properties(MODEL, [model_node_id], {"attrs": original_attrs_json}, {}, [], False)
+        for group_name, orders in group_snapshots.items():
+            group = FieldGroup.objects.get(model_id=model_id, group_name=group_name)
+            group.attr_orders = list(orders)
+            group.save(update_fields=["attr_orders"])
+        from apps.cmdb.display_field import ExcludeFieldsCache
+
+        ExcludeFieldsCache.invalidate_model_attrs(model_id)
+
+    @staticmethod
+    def _write_graph_then_sql(
+        model_id: str,
+        model_node_id,
+        original_attrs_json: str,
+        new_attrs_json: str,
+        group_snapshots: Dict[str, List],
+        sql_writer,
+    ) -> None:
+        graph_written = False
+        try:
+            with GraphClient() as ag:
+                ag.set_entity_properties(MODEL, [model_node_id], {"attrs": new_attrs_json}, {}, [], False)
+            graph_written = True
+            from apps.cmdb.display_field import ExcludeFieldsCache
+
+            ExcludeFieldsCache.invalidate_model_attrs(model_id)
+            sql_writer()
+        except Exception as exc:
+            if graph_written:
+                try:
+                    FieldGroupService._restore_graph_and_group_orders(
+                        model_id, model_node_id, original_attrs_json, group_snapshots
+                    )
+                except Exception as compensate_exc:
+                    logger.exception(f"字段分组跨存储回滚失败: {compensate_exc}")
+                    raise BaseAppException(
+                        f"字段分组更新失败，回滚可能未完成：{exc}；补偿错误：{compensate_exc}"
+                    ) from exc
+            raise
+
+    @staticmethod
     def batch_update_attrs_group(model_id: str, updates: List[Dict]) -> Dict:
         """
         批量更新字段分组
@@ -416,11 +496,12 @@ class FieldGroupService:
             raise BaseAppException("模型不存在")
 
         # 2. 校验所有目标分组是否存在
-        unique_group_names = set(item["group_name"] for item in updates)
+        unique_group_names = {item["group_name"] for item in updates}
         for group_name in unique_group_names:
             FieldGroupService.validate_group_exists(model_id, group_name)
 
         # 3. 解析属性
+        original_attrs_json = FieldGroupService._original_attrs_json(model_info)
         attrs = ModelManage.parse_attrs(model_info.get("attrs", "[]"))
 
         # 4. 批量更新
@@ -438,29 +519,31 @@ class FieldGroupService:
             else:
                 raise BaseAppException(f"字段'{attr_id}'不存在")
 
-        # 5. 保存到FalkorDB
-        with GraphClient() as ag:
-            ag.set_entity_properties(MODEL, [model_info["_id"]], {"attrs": json.dumps(attrs)}, {}, [], False)
+        group_snapshots = FieldGroupService._snapshot_group_attr_orders(model_id, unique_group_names)
 
-        # 更新模型属性缓存
-        from apps.cmdb.display_field import ExcludeFieldsCache
+        def _write_attr_orders():
+            for group_name in unique_group_names:
+                group = FieldGroup.objects.get(model_id=model_id, group_name=group_name)
+                group_attr_ids = [attr.get("attr_id") for attr in attrs if attr.get("attr_group") == group_name]
 
-        ExcludeFieldsCache.update_on_model_change(model_id)
+                # 保留原有顺序，添加新的到末尾
+                existing_orders = group.attr_orders or []
+                new_orders = [aid for aid in existing_orders if aid in group_attr_ids]
+                for aid in group_attr_ids:
+                    if aid not in new_orders:
+                        new_orders.append(aid)
 
-        # 6. 更新各个分组的attr_orders（添加新属性到末尾）
-        for group_name in unique_group_names:
-            group = FieldGroup.objects.get(model_id=model_id, group_name=group_name)
-            group_attr_ids = [attr.get("attr_id") for attr in attrs if attr.get("attr_group") == group_name]
+                group.attr_orders = new_orders
+                group.save(update_fields=["attr_orders"])
 
-            # 保留原有顺序，添加新的到末尾
-            existing_orders = group.attr_orders or []
-            new_orders = [aid for aid in existing_orders if aid in group_attr_ids]
-            for aid in group_attr_ids:
-                if aid not in new_orders:
-                    new_orders.append(aid)
-
-            group.attr_orders = new_orders
-            group.save(update_fields=["attr_orders"])
+        FieldGroupService._write_graph_then_sql(
+            model_id,
+            model_info["_id"],
+            original_attrs_json,
+            json.dumps(attrs),
+            group_snapshots,
+            _write_attr_orders,
+        )
 
         return {
             "success": True,
@@ -500,6 +583,7 @@ class FieldGroupService:
         FieldGroupService.validate_group_exists(model_id, new_group_name)
 
         # 3. 解析属性
+        original_attrs_json = FieldGroupService._original_attrs_json(model_info)
         attrs = ModelManage.parse_attrs(model_info.get("attrs", "[]"))
 
         # 4. 查找并更新属性
@@ -515,49 +599,48 @@ class FieldGroupService:
         if not found:
             raise BaseAppException(f"字段'{attr_id}'不存在")
 
-        # 5. 保存到FalkorDB
-        with GraphClient() as ag:
-            ag.set_entity_properties(MODEL, [model_info["_id"]], {"attrs": json.dumps(attrs)}, {}, [], False)
-
-        # 更新模型属性缓存
-        from apps.cmdb.display_field import ExcludeFieldsCache
-
-        ExcludeFieldsCache.update_on_model_change(model_id)
-
-        # 6. 更新分组的attr_orders
-        # 从旧分组移除
+        related_groups = {new_group_name}
         if old_group:
-            try:
-                old_group_obj = FieldGroup.objects.get(model_id=model_id, group_name=old_group)
-                if old_group_obj.attr_orders and attr_id in old_group_obj.attr_orders:
-                    old_group_obj.attr_orders.remove(attr_id)
-                    old_group_obj.save(update_fields=["attr_orders"])
-            except FieldGroup.DoesNotExist:
-                pass
+            related_groups.add(old_group)
+        group_snapshots = FieldGroupService._snapshot_group_attr_orders(model_id, related_groups)
 
-        # 添加到新分组的指定位置
-        new_group_obj = FieldGroup.objects.get(model_id=model_id, group_name=new_group_name)
-        if not new_group_obj.attr_orders:
-            new_group_obj.attr_orders = []
+        def _write_attr_orders():
+            if old_group:
+                try:
+                    old_group_obj = FieldGroup.objects.get(model_id=model_id, group_name=old_group)
+                    if old_group_obj.attr_orders and attr_id in old_group_obj.attr_orders:
+                        old_group_obj.attr_orders.remove(attr_id)
+                        old_group_obj.save(update_fields=["attr_orders"])
+                except FieldGroup.DoesNotExist:
+                    pass
 
-        # 如果属性已存在,先移除(避免重复)
-        if attr_id in new_group_obj.attr_orders:
-            new_group_obj.attr_orders.remove(attr_id)
+            new_group_obj = FieldGroup.objects.get(model_id=model_id, group_name=new_group_name)
+            if not new_group_obj.attr_orders:
+                new_group_obj.attr_orders = []
 
-        # 插入到指定位置
-        if order_id is None:
-            # 未指定位置,插入到末尾
-            new_group_obj.attr_orders.append(attr_id)
-        else:
-            # 指定了位置,插入到对应位置(如果超出范围,则插入到末尾)
-            if order_id < 0:
-                insert_position = 0
-            elif order_id >= len(new_group_obj.attr_orders):
-                insert_position = len(new_group_obj.attr_orders)
+            if attr_id in new_group_obj.attr_orders:
+                new_group_obj.attr_orders.remove(attr_id)
+
+            if order_id is None:
+                new_group_obj.attr_orders.append(attr_id)
             else:
-                insert_position = order_id
-            new_group_obj.attr_orders.insert(insert_position, attr_id)
-        new_group_obj.save(update_fields=["attr_orders"])
+                if order_id < 0:
+                    insert_position = 0
+                elif order_id >= len(new_group_obj.attr_orders):
+                    insert_position = len(new_group_obj.attr_orders)
+                else:
+                    insert_position = order_id
+                new_group_obj.attr_orders.insert(insert_position, attr_id)
+            new_group_obj.save(update_fields=["attr_orders"])
+
+        FieldGroupService._write_graph_then_sql(
+            model_id,
+            model_info["_id"],
+            original_attrs_json,
+            json.dumps(attrs),
+            group_snapshots,
+            _write_attr_orders,
+        )
 
         return {
             "success": True,
@@ -608,7 +691,7 @@ class FieldGroupService:
                 raise BaseAppException(f"属性'{attr_id}'不属于分组'{group_name}'")
 
         # 5. 校验：attr_orders必须包含该分组的所有属性
-        if set(attr_orders) != set(i for i in group_attr_ids if not i.endswith("_display")):
+        if set(attr_orders) != {i for i in group_attr_ids if not i.endswith("_display")}:
             missing = group_attr_ids - set(attr_orders)
             raise BaseAppException(f"缺少属性：{', '.join(missing)}")
 

@@ -3169,6 +3169,10 @@ def test_get_install_command_view_passes_cpu_architecture(monkeypatch):
 
     monkeypatch.setattr(InstallerService, "get_install_command", fake_get_install_command)
     monkeypatch.setattr(
+        "apps.node_mgmt.views.installer.resolve_current_team_data_scope",
+        lambda request: SimpleNamespace(current_team=1),
+    )
+    monkeypatch.setattr(
         "apps.node_mgmt.views.installer.validate_assignable_organizations",
         lambda request, organizations: frozenset(organizations),
     )
@@ -3200,6 +3204,10 @@ def test_get_install_command_view_passes_cpu_architecture(monkeypatch):
 def test_controller_manual_install_includes_normalized_cpu_architecture(monkeypatch):
     factory = APIRequestFactory()
     view = InstallerViewSet.as_view({"post": "controller_manual_install"})
+    monkeypatch.setattr(
+        "apps.node_mgmt.views.installer.resolve_current_team_data_scope",
+        lambda request: SimpleNamespace(current_team=1),
+    )
     monkeypatch.setattr(
         "apps.node_mgmt.views.installer.validate_assignable_organizations",
         lambda request, organizations: frozenset(organizations),
@@ -3261,9 +3269,17 @@ def test_controller_manual_install_rejects_missing_cpu_architecture():
 
 
 @pytest.mark.django_db
-def test_controller_install_view_rejects_windows_arm64_payload():
+def test_controller_install_view_rejects_windows_arm64_payload(monkeypatch):
     factory = APIRequestFactory()
     view = InstallerViewSet.as_view({"post": "controller_install"})
+    monkeypatch.setattr(
+        "apps.node_mgmt.views.installer.resolve_current_team_data_scope",
+        lambda request: SimpleNamespace(current_team=1),
+    )
+    monkeypatch.setattr(
+        "apps.node_mgmt.views.installer.validate_assignable_organizations",
+        lambda request, organizations: frozenset(organizations),
+    )
     request = factory.post(
         "/node_mgmt/api/installer/controller/install/",
         {
@@ -3696,6 +3712,61 @@ def test_package_version_upload_force_reuploads_existing_version(monkeypatch, tm
 
     assert uploaded["name"] == "fusion-collectors-linux-amd64.zip"
     assert uploaded["path"] == "linux/x86_64/Controller/1.0.1/fusion-collectors-linux-amd64.zip"
+
+
+@pytest.mark.django_db
+def test_package_version_upload_skips_existing_latest_without_traceback(monkeypatch, tmp_path, caplog):
+    import logging
+
+    existing = PackageVersion.objects.create(
+        type="collector",
+        os="linux",
+        cpu_architecture=NodeConstants.X86_64_ARCH,
+        object="Nats-Executor",
+        version="latest",
+        name="nats-executor",
+        created_by="tester",
+        updated_by="tester",
+    )
+    file_path = tmp_path / "nats-executor"
+    file_path.write_bytes(b"nats-executor-payload-sentinel")
+    uploaded = {}
+
+    def fake_upload(file, data, existing_package=None):
+        uploaded["called"] = True
+
+    monkeypatch.setattr("apps.node_mgmt.management.utils.PackageService.upload_file", fake_upload)
+    caplog.set_level(logging.WARNING, logger="node")
+
+    from apps.node_mgmt.management.utils import package_version_upload
+
+    result = package_version_upload(
+        "collector",
+        {
+            "os": "linux",
+            "object": "Nats-Executor",
+            "cpu_architecture": NodeConstants.X86_64_ARCH,
+            "pk_version": "latest",
+            "file_path": str(file_path),
+        },
+    )
+
+    existing.refresh_from_db()
+    assert result is None
+    assert uploaded == {}
+    assert existing.name == "nats-executor"
+    records = [record for record in caplog.records if record.name == "node" and record.levelno == logging.WARNING]
+    assert len(records) == 1
+    record = records[0]
+    assert record.exc_info is None
+    assert record.msg == "包版本已存在，跳过上传 package_type=%s os=%s cpu_architecture=%s object=%s version=%s"
+    assert record.args == ("collector", "linux", NodeConstants.X86_64_ARCH, "Nats-Executor", "latest")
+    formatted = record.getMessage()
+    assert formatted == (
+        "包版本已存在，跳过上传 package_type=collector os=linux "
+        f"cpu_architecture={NodeConstants.X86_64_ARCH} object=Nats-Executor version=latest"
+    )
+    assert "nats-executor-payload-sentinel" not in formatted
 
 
 @pytest.mark.django_db

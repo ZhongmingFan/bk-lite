@@ -18,6 +18,25 @@ BUILTIN_ORACLE_TOOL_NAME = "oracle"
 BUILTIN_MSSQL_TOOL_ID = -4
 BUILTIN_MSSQL_TOOL_NAME = "mssql"
 
+BUILTIN_CMDB_TOOL_ID = -7
+BUILTIN_CMDB_TOOL_NAME = "cmdb"
+
+BUILTIN_ALERTS_TOOL_ID = -8
+BUILTIN_ALERTS_TOOL_NAME = "alerts"
+
+BUILTIN_LOG_TOOL_ID = -9
+BUILTIN_LOG_TOOL_NAME = "log"
+
+BUILTIN_ACTIVEDIRECTORY_TOOL_ID = -10
+BUILTIN_ACTIVEDIRECTORY_TOOL_NAME = "activedirectory"
+
+IDENTITY_ONLY_BUILTIN_TOOLS = {
+    BUILTIN_MONITOR_TOOL_ID: BUILTIN_MONITOR_TOOL_NAME,
+    BUILTIN_CMDB_TOOL_ID: BUILTIN_CMDB_TOOL_NAME,
+    BUILTIN_ALERTS_TOOL_ID: BUILTIN_ALERTS_TOOL_NAME,
+    BUILTIN_LOG_TOOL_ID: BUILTIN_LOG_TOOL_NAME,
+}
+
 
 def _get_display_name(loader: LanguageLoader, tool_name: str, default: str) -> str:
     """获取工具的展示名称（中英文）。
@@ -55,6 +74,39 @@ def _build_sub_tools(tool_name, exports, loader: LanguageLoader):
     return sub_tools
 
 
+def _build_identity_only_builtin_tool(loader: LanguageLoader, tool_id, tool_name, default_display, default_description, exports):
+    description = loader.get(f"tools.{tool_name}.description") or default_description
+    return {
+        "id": tool_id,
+        "name": tool_name,
+        "display_name": _get_display_name(loader, tool_name, default_display),
+        "description": description,
+        "description_tr": description,
+        "icon": "gongjuji",
+        "team": [],
+        "tags": [],
+        "params": {
+            "name": tool_name,
+            "url": f"langchain:{tool_name}",
+            "kwargs": [],
+            "enable_auth": False,
+            "auth_token": "",
+        },
+        "is_build_in": True,
+        "tools": _build_sub_tools(tool_name, exports, loader),
+    }
+
+
+def _build_identity_only_runtime_tool(tool_name):
+    return {
+        "name": tool_name,
+        "url": f"langchain:{tool_name}",
+        "enable_auth": False,
+        "auth_token": "",
+        "extra_tools_prompt": "",
+    }
+
+
 def build_builtin_monitor_tool(loader: LanguageLoader):
     from apps.opspilot.metis.llm.tools.monitor import __all__ as monitor_exports
 
@@ -81,13 +133,58 @@ def build_builtin_monitor_tool(loader: LanguageLoader):
 
 
 def build_builtin_monitor_runtime_tool(tool_kwargs):
-    return {
-        "name": BUILTIN_MONITOR_TOOL_NAME,
-        "url": f"langchain:{BUILTIN_MONITOR_TOOL_NAME}",
-        "enable_auth": False,
-        "auth_token": "",
-        "extra_tools_prompt": "",
-    }
+    return _build_identity_only_runtime_tool(BUILTIN_MONITOR_TOOL_NAME)
+
+
+def build_builtin_cmdb_tool(loader: LanguageLoader):
+    from apps.opspilot.metis.llm.tools.cmdb import __all__ as cmdb_exports
+
+    return _build_identity_only_builtin_tool(
+        loader,
+        BUILTIN_CMDB_TOOL_ID,
+        BUILTIN_CMDB_TOOL_NAME,
+        "CMDB",
+        "CMDB built-in tool",
+        cmdb_exports,
+    )
+
+
+def build_builtin_cmdb_runtime_tool(tool_kwargs):
+    return _build_identity_only_runtime_tool(BUILTIN_CMDB_TOOL_NAME)
+
+
+def build_builtin_alerts_tool(loader: LanguageLoader):
+    from apps.opspilot.metis.llm.tools.alerts import __all__ as alerts_exports
+
+    return _build_identity_only_builtin_tool(
+        loader,
+        BUILTIN_ALERTS_TOOL_ID,
+        BUILTIN_ALERTS_TOOL_NAME,
+        "Alerts",
+        "Alerts built-in tool",
+        alerts_exports,
+    )
+
+
+def build_builtin_alerts_runtime_tool(tool_kwargs):
+    return _build_identity_only_runtime_tool(BUILTIN_ALERTS_TOOL_NAME)
+
+
+def build_builtin_log_tool(loader: LanguageLoader):
+    from apps.opspilot.metis.llm.tools.log import __all__ as log_exports
+
+    return _build_identity_only_builtin_tool(
+        loader,
+        BUILTIN_LOG_TOOL_ID,
+        BUILTIN_LOG_TOOL_NAME,
+        "Log",
+        "Log built-in tool",
+        log_exports,
+    )
+
+
+def build_builtin_log_runtime_tool(tool_kwargs):
+    return _build_identity_only_runtime_tool(BUILTIN_LOG_TOOL_NAME)
 
 
 def build_builtin_attachment_file_tool(loader: LanguageLoader):
@@ -276,4 +373,42 @@ def build_builtin_mssql_runtime_tool(tool_kwargs):
         "enable_auth": False,
         "auth_token": "",
         "extra_tools_prompt": get_mssql_instances_prompt(tool_kwargs),
+    }
+
+
+def build_builtin_activedirectory_tool(loader: LanguageLoader):
+    from apps.opspilot.metis.llm.tools.activedirectory import CONSTRUCTOR_PARAMS as ad_constructor_params
+    from apps.opspilot.metis.llm.tools.activedirectory import __all__ as ad_exports
+
+    description = loader.get(f"tools.{BUILTIN_ACTIVEDIRECTORY_TOOL_NAME}.description") or "Active Directory built-in tool"
+    return {
+        "id": BUILTIN_ACTIVEDIRECTORY_TOOL_ID,
+        "name": BUILTIN_ACTIVEDIRECTORY_TOOL_NAME,
+        "display_name": _get_display_name(loader, BUILTIN_ACTIVEDIRECTORY_TOOL_NAME, "Active Directory"),
+        "description": description,
+        "description_tr": description,
+        "icon": "gongjuji",
+        "team": [],
+        "tags": [],
+        "params": {
+            "name": BUILTIN_ACTIVEDIRECTORY_TOOL_NAME,
+            "url": f"langchain:{BUILTIN_ACTIVEDIRECTORY_TOOL_NAME}",
+            "kwargs": _build_kwargs_from_params(ad_constructor_params),
+            "enable_auth": False,
+            "auth_token": "",
+        },
+        "is_build_in": True,
+        "tools": _build_sub_tools(BUILTIN_ACTIVEDIRECTORY_TOOL_NAME, ad_exports, loader),
+    }
+
+
+def build_builtin_activedirectory_runtime_tool(tool_kwargs):
+    from apps.opspilot.metis.llm.tools.activedirectory.connection import get_ad_instances_prompt
+
+    return {
+        "name": BUILTIN_ACTIVEDIRECTORY_TOOL_NAME,
+        "url": f"langchain:{BUILTIN_ACTIVEDIRECTORY_TOOL_NAME}",
+        "enable_auth": False,
+        "auth_token": "",
+        "extra_tools_prompt": get_ad_instances_prompt(tool_kwargs),
     }

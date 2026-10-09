@@ -1,5 +1,111 @@
 {
   "object": "Transmission",
   "plugin": "Transmission Fibrolan SNMP",
-  "templates": []
+  "templates": [
+    {
+      "name": "Fibrolan传输设备CPU使用率过高",
+      "alert_name": "传输设备${resource_name} CPU 使用率过高",
+      "description": "监控 Fibrolan Falcon 传输设备的 CPU 使用率（FIBROLAN-DEVICE flDeviceCpuUtilization，直接百分比）。持续高于阈值时提示控制平面负载、业务转发压力或异常流量。",
+      "metric_name": "cpu_usage_percent",
+      "algorithm": "last_over_time",
+      "threshold": [
+        {
+          "level": "critical",
+          "value": 90,
+          "method": ">"
+        },
+        {
+          "level": "error",
+          "value": 80,
+          "method": ">"
+        },
+        {
+          "level": "warning",
+          "value": 70,
+          "method": ">"
+        }
+      ],
+      "group_algorithm": "avg"
+    },
+    {
+      "name": "Fibrolan传输设备内存使用率过高",
+      "alert_name": "传输设备${resource_name} 内存使用率过高",
+      "description": "监控 Fibrolan Falcon 传输设备的 DRAM 使用率（FIBROLAN-DEVICE flDeviceMemoryUtilization，直接百分比）。持续高于阈值时提示控制面资源紧张或服务异常。",
+      "metric_name": "memory_usage_percent",
+      "algorithm": "last_over_time",
+      "threshold": [
+        {
+          "level": "critical",
+          "value": 95,
+          "method": ">"
+        },
+        {
+          "level": "error",
+          "value": 90,
+          "method": ">"
+        },
+        {
+          "level": "warning",
+          "value": 80,
+          "method": ">"
+        }
+      ],
+      "group_algorithm": "avg"
+    },
+    {
+      "name": "Fibrolan传输设备温度过高",
+      "alert_name": "传输设备${resource_name} 温度过高",
+      "description": "监控 Fibrolan Falcon 设备内部温度，当超过阈值时触发告警，提示散热故障或机房环境温度过高。",
+      "metric_name": "device_temperature_celsius",
+      "algorithm": "last_over_time",
+      "threshold": [
+        {
+          "level": "critical",
+          "value": 75,
+          "method": ">"
+        },
+        {
+          "level": "error",
+          "value": 65,
+          "method": ">"
+        },
+        {
+          "level": "warning",
+          "value": 60,
+          "method": ">"
+        }
+      ],
+      "group_algorithm": "max"
+    },
+    {
+      "name": "Fibrolan传输设备电源异常",
+      "alert_name": "传输设备${resource_name} 电源状态异常",
+      "description": "监控 Fibrolan Falcon 各电源模块运行状态（1=正常或未安装，2=故障，3=未知）；未安装槽位记为正常，仅故障（=2）时触发告警，未知不告警。",
+      "metric_name": "device_psu_state",
+      "algorithm": "last_over_time",
+      "threshold": [
+        {
+          "level": "critical",
+          "value": 2,
+          "method": "="
+        }
+      ],
+      "group_algorithm": "max"
+    },
+    {
+      "name": "Fibrolan传输设备电源风扇异常",
+      "alert_name": "传输设备${resource_name} 电源风扇状态异常",
+      "description": "监控 Fibrolan Falcon 电源模块风扇状态（1=正常，2=故障或单风扇故障，3=未知），仅风扇故障（=2）时触发告警，未知不告警。",
+      "metric_name": "device_fan_state",
+      "algorithm": "last_over_time",
+      "threshold": [
+        {
+          "level": "critical",
+          "value": 2,
+          "method": "="
+        }
+      ],
+      "group_algorithm": "max"
+    }
+  ]
 }

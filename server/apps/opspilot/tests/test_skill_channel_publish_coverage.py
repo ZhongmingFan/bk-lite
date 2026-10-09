@@ -253,15 +253,20 @@ class TestChatServiceUnit:
         assert e.value.status == 404
 
         skill = _skill()
-        ch = _channel(skill, enabled=False)
+        ch = _channel(skill, enabled=False, name="disabled")
         with pytest.raises(chat_svc.SkillChannelChatError) as e2:
             chat_svc.get_enabled_channel(ch.id)
         assert e2.value.status == 403
 
-        ch2 = _channel(skill, channel_type=SkillChannelChoices.PLATFORM, enabled=True)
+        ch2 = _channel(skill, channel_type=SkillChannelChoices.PLATFORM, enabled=True, name="enabled")
         with pytest.raises(chat_svc.SkillChannelChatError) as e3:
             chat_svc.get_enabled_channel(ch2.id, {SkillChannelChoices.EMBEDDED_CHAT})
         assert e3.value.status == 400
+
+        found = chat_svc.get_enabled_channel(ch2.public_id)
+        assert found.id == ch2.id
+        found_by_str = chat_svc.get_enabled_channel(str(ch2.public_id))
+        assert found_by_str.id == ch2.id
 
     def test_assert_org_access_guest_and_deny(self):
         skill = _skill()
@@ -313,6 +318,36 @@ class TestChatServiceUnit:
         assert params["skill_prompt"] == "p2"
         assert params["foo"] == 1
         assert "t1" in [t.get("name") for t in params["tools"]]
+        assert params["enable_suggest"] is False
+        assert params["enable_query_rewrite"] is False
+        assert params["show_think"] is False
+
+    def test_build_params_ignores_legacy_suggest_rewrite_and_think_flags(self):
+        skill = _skill(
+            tools=[],
+            skill_prompt="p",
+            team=[1],
+            enable_suggest=True,
+            enable_query_rewrite=True,
+            show_think=True,
+            temperature=0.2,
+        )
+        user = SimpleNamespace(username="u", id=1, locale="zh-CN")
+        with patch("apps.opspilot.services.skill_channel_chat_service.resolve_request_tools", return_value=[]):
+            with patch("apps.opspilot.services.skill_channel_chat_service.hydrate_skill_packages", return_value=[]):
+                with patch(
+                    "apps.opspilot.services.skill_channel_chat_service.build_skill_package_prompt",
+                    return_value=("p", []),
+                ):
+                    with patch(
+                        "apps.opspilot.services.skill_channel_chat_service.build_skill_package_strategy",
+                        return_value={},
+                    ):
+                        params = chat_svc.build_skill_chat_params(skill, "hi", user)
+        assert params["enable_suggest"] is False
+        assert params["enable_query_rewrite"] is False
+        assert params["show_think"] is False
+        assert params["temperature"] == 1.0
 
     def test_stream_chat_persists_assistant_and_identity_error(self):
         skill = _skill()
@@ -410,6 +445,17 @@ class TestChatServiceUnit:
         content = chat_svc.assemble_assistant_persist_content(parsed)
         assert json.loads(content)[0]["name"] == "planned_execution_status"
         assert chat_svc.visible_assistant_text(content) == "现在是下午两点"
+        ephemeral = chat_svc.assemble_assistant_persist_content(
+            events
+            + [
+                {"type": "CUSTOM", "name": "stream_keepalive", "value": {"phase": "waiting_model"}},
+                {"type": "CUSTOM", "name": "planned_step_hidden_text", "value": {"delta": "步内草稿"}},
+            ]
+        )
+        persisted_names = [item.get("name") for item in json.loads(ephemeral) if item.get("type") == "CUSTOM"]
+        assert "stream_keepalive" not in persisted_names
+        assert "planned_step_hidden_text" not in persisted_names
+        assert chat_svc.visible_assistant_text(ephemeral) == "现在是下午两点"
         mixed = chat_svc.assemble_assistant_persist_content(events + [{"type": "TEXT_MESSAGE_CONTENT", "delta": '{"phase":"planning"}'}])
         assert chat_svc.visible_assistant_text(mixed) == "现在是下午两点"
         assert chat_svc.assemble_assistant_persist_content([{"choices": [{"delta": {"content": "hello"}}]}, {"content": "!"}]) == "hello!"

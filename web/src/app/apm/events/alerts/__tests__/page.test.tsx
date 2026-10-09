@@ -1,9 +1,10 @@
 import React from 'react';
-import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import ApmAlertsPage from '../page';
 import { renderWithApmIntl } from '@/app/apm/__tests__/intl';
+import { APM_TABLE_COLUMN_WIDTHS } from '@/app/apm/components/apm-data-table';
 import { formatDateTime } from '@/app/apm/components/metric-format';
 
 const { chartRender } = vi.hoisted(() => ({ chartRender: vi.fn() }));
@@ -119,15 +120,27 @@ const metricSnapshot = {
 
 const api = {
   closeAlert: vi.fn(),
+  claimAlert: vi.fn(),
+  assignAlert: vi.fn(),
+  reassignAlert: vi.fn(),
   getAlertDistribution: vi.fn(),
   getAlerts: vi.fn(),
   getAlertSnapshots: vi.fn(),
   getEventEvidence: vi.fn(),
   getNotificationDeliveries: vi.fn(),
+  getNotificationRecipients: vi.fn(),
   retryNotificationDelivery: vi.fn(),
   isLoading: false,
 };
 vi.mock('@/app/apm/api', () => ({ default: () => api }));
+vi.mock('@/context/userInfo', () => ({
+  useUserInfoContext: () => ({ userId: '7', username: 'apm-user' }),
+}));
+vi.mock('@/hooks/usePermissions', () => ({
+  default: () => ({
+    hasPermission: () => true,
+  }),
+}));
 vi.mock('@/app/apm/components/apm-route-shell', () => ({
   default: ({ children }: { children: React.ReactNode }) => <main>{children}</main>,
   ApmSurface: ({ children }: { children: React.ReactNode }) => <section>{children}</section>,
@@ -182,6 +195,9 @@ beforeEach(() => {
     failed_at: null,
   });
   api.closeAlert.mockResolvedValue(undefined);
+  api.claimAlert.mockResolvedValue(undefined);
+  api.assignAlert.mockResolvedValue(undefined);
+  api.getNotificationRecipients.mockResolvedValue([]);
 });
 afterEach(() => {
   cleanup();
@@ -269,14 +285,25 @@ describe('APM 告警指标快照与事件原始数据', { timeout: 15000 }, () =
       '指标',
       '服务 / 端点',
       '通知',
-      '处置人',
+      '处理人',
       '操作',
     ]);
     const columnWidths = Array.from(document.querySelectorAll('.ant-table colgroup col'))
       .map((column) => (column as HTMLElement).style.width);
-    expect(columnWidths).toEqual(['96px', '168px', '', '120px', '', '120px', '160px', '160px']);
+    expect(columnWidths).toEqual([
+      `${APM_TABLE_COLUMN_WIDTHS.status}px`,
+      `${APM_TABLE_COLUMN_WIDTHS.timestamp}px`,
+      '',
+      `${APM_TABLE_COLUMN_WIDTHS.metricWide}px`,
+      '',
+      `${APM_TABLE_COLUMN_WIDTHS.metricWide}px`,
+      `${APM_TABLE_COLUMN_WIDTHS.organization}px`,
+      `${APM_TABLE_COLUMN_WIDTHS.actionGroup}px`,
+    ]);
     expect(screen.getByText('已通知')).not.toBeNull();
-    expect(screen.getByText('sre.wang')).not.toBeNull();
+    expect(screen.getByRole('button', { name: '认领' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: '分派' })).not.toBeNull();
+    expect(screen.queryByRole('button', { name: '转派' })).toBeNull();
     expect(screen.queryByRole('columnheader', { name: '当前值' })).toBeNull();
     expect(screen.queryByRole('columnheader', { name: '状态' })).toBeNull();
     expect(screen.queryByRole('columnheader', { name: '事件' })).toBeNull();
@@ -346,7 +373,7 @@ describe('APM 告警指标快照与事件原始数据', { timeout: 15000 }, () =
 
     expect(await screen.findByText('告警信息')).not.toBeNull();
     expect(screen.getByText(/所属服务/)).not.toBeNull();
-    expect(screen.getByRole('button', { name: '关闭告警' })).not.toBeNull();
+    expect(within(screen.getByRole('dialog')).getByRole('button', { name: '关闭' })).not.toBeNull();
     expect(await screen.findByText('评估值 / 当时阈值 / 生命周期事件')).not.toBeNull();
     expect(screen.getByText(/告警指标快照/)).not.toBeNull();
     expect(screen.getByText(/每点一次策略扫描/)).not.toBeNull();
@@ -401,5 +428,91 @@ describe('APM 告警指标快照与事件原始数据', { timeout: 15000 }, () =
     expect(await screen.findByText('值班群')).not.toBeNull();
     await user.click(screen.getByRole('button', { name: '重投' }));
     await waitFor(() => expect(api.retryNotificationDelivery).toHaveBeenCalledWith('d-fail'));
+  });
+
+  it('空处理人展示认领分派关闭，勾选我的告警会带 my_alert=1', async () => {
+    const user = userEvent.setup();
+    renderWithApmIntl(<ApmAlertsPage />);
+    expect(await screen.findByRole('button', { name: '认领' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: '分派' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: '关闭' })).not.toBeNull();
+    expect(screen.queryByRole('button', { name: '转派' })).toBeNull();
+    await user.click(screen.getByText('我的告警'));
+    await waitFor(() => {
+      expect(api.getAlerts).toHaveBeenCalledWith(expect.objectContaining({ my_alert: 1 }));
+      expect(api.getAlertDistribution).toHaveBeenCalledWith(expect.objectContaining({ my_alert: 1 }));
+    });
+  });
+
+  it('打开详情时若最新事件是认领，不请求事件快照', async () => {
+    const claimed = {
+      id: 'e-claimed',
+      event_id: 'evt-claimed',
+      action: 'claimed' as const,
+      severity: 'error' as const,
+      value: '0.2',
+      occurred_at: '2026-08-14T02:05:00Z',
+      title: '认领',
+      description: 'sre 认领，处理人变为 sre',
+    };
+    api.getAlerts.mockImplementation(async (query: { status_group?: string }) => (
+      query.status_group === 'active'
+        ? [{ ...alert, events: [event, claimed], event_count: 2, last_event_at: claimed.occurred_at }]
+        : []
+    ));
+    const user = userEvent.setup();
+    renderWithApmIntl(<ApmAlertsPage />);
+    await user.click(await screen.findByRole('button', { name: 'checkout 错误率升高' }));
+    await waitFor(() => expect(api.getAlertSnapshots).toHaveBeenCalled());
+    expect(api.getEventEvidence).not.toHaveBeenCalledWith('a1', 'evt-claimed');
+    await user.click(await screen.findByRole('tab', { name: '事件' }));
+    await user.click(screen.getByRole('listitem', { name: /认领/ }));
+    expect(api.getEventEvidence).not.toHaveBeenCalledWith('a1', 'evt-claimed');
+  });
+
+  it('打开详情时若最新事件是转派，不请求事件快照', async () => {
+    const reassigned = {
+      id: 'e-reassigned',
+      event_id: 'evt-reassigned',
+      action: 'reassigned' as const,
+      severity: 'error' as const,
+      value: '0.2',
+      occurred_at: '2026-08-14T02:08:00Z',
+      title: '转派',
+      description: 'sre 转派给 bob',
+    };
+    api.getAlerts.mockImplementation(async (query: { status_group?: string }) => (
+      query.status_group === 'active'
+        ? [{
+          ...alert,
+          handlers: [7],
+          events: [event, reassigned],
+          event_count: 2,
+          last_event_at: reassigned.occurred_at,
+        }]
+        : []
+    ));
+    const user = userEvent.setup();
+    renderWithApmIntl(<ApmAlertsPage />);
+    await user.click(await screen.findByRole('button', { name: 'checkout 错误率升高' }));
+    await waitFor(() => expect(api.getAlertSnapshots).toHaveBeenCalled());
+    expect(api.getEventEvidence).not.toHaveBeenCalledWith('a1', 'evt-reassigned');
+    await user.click(await screen.findByRole('tab', { name: '事件' }));
+    await user.click(screen.getByRole('listitem', { name: /转派/ }));
+    expect(api.getEventEvidence).not.toHaveBeenCalledWith('a1', 'evt-reassigned');
+  });
+
+  it('已有处理人的活跃告警不展示认领和分派', async () => {
+    api.getAlerts.mockImplementation(async (query: { status_group?: string }) => (
+      query.status_group === 'active'
+        ? [{ ...alert, handlers: [7], handlers_display: ['Bob(bob)'] }]
+        : []
+    ));
+    renderWithApmIntl(<ApmAlertsPage />);
+    expect(await screen.findByText('Bob(bob)')).not.toBeNull();
+    expect(screen.queryByRole('button', { name: '认领' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '分派' })).toBeNull();
+    expect(screen.getByRole('button', { name: '转派' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: '关闭' })).not.toBeNull();
   });
 });

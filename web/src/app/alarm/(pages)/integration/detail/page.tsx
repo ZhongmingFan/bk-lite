@@ -1,12 +1,14 @@
 'use client';
+// NOCA:AI-Secret-Leak-Checker(工具误报:接入详情复制用户已揭示的示例不是硬编码密钥)
 
-import React, { useState, useEffect, FC } from 'react';
+import React, { useState, useEffect, useRef, FC } from 'react';
 import dayjs from 'dayjs';
 import SearchFilter from '@/app/alarm/components/searchFilter';
 import EventTable from '@/app/alarm/components/eventTable';
 import K8sGuide from '@/app/alarm/components/k8sGuide';
 import SnmpTrapGuide from '@/app/alarm/components/snmpTrapGuide';
 import TeamSecretsManager from '@/app/alarm/components/teamSecretsManager';
+import ExampleCopyBlock from '@/app/alarm/components/exampleCopyBlock';
 import ZabbixGuide from '@/app/alarm/components/zabbixGuide';
 import CustomBreadcrumb from '@/app/alarm/components/customBreadcrumb';
 import EllipsisWithTooltip from '@/components/ellipsis-with-tooltip';
@@ -15,7 +17,6 @@ import RefreshIconButton from '@/components/refresh-icon-button';
 import SecretValueDisplay from '@/components/secret-value-display';
 import {
   CheckCircleFilled,
-  CopyOutlined,
   PlusOutlined,
   ReloadOutlined,
   RightOutlined,
@@ -24,11 +25,23 @@ import { useSearchParams } from 'next/navigation';
 import { useTranslation } from '@/utils/i18n';
 import { useLocalizedTime } from '@/hooks/useLocalizedTime';
 import { useCommon } from '@/app/alarm/context/common';
+import { createLatestRequestGuard } from '@/context/latestRequestGuard';
 import { useUserInfoContext } from '@/context/userInfo';
+import {
+  buildIntegrationEventSearchParams,
+  buildMonitorSourceFilter,
+  commitIntegrationEventListSettled,
+  commitIntegrationEventListSuccess,
+  selectedMonitorSourceIds,
+} from './integrationEventListRequest';
 import { AlertSourceIntegrationGuide, K8sMeta, SourceItem, TeamSecretItem } from '@/app/alarm/types/integration';
 import { useAlarmApi } from '@/app/alarm/api/alarms';
-import { EventItem } from '@/app/alarm/types/alarms';
+import { EventItem, SearchFilterCondition } from '@/app/alarm/types/alarms';
 import { useSourceApi } from '@/app/alarm/api/integration';
+import {
+  applyK8sMetaFetchResult,
+  shouldAutoFetchK8sMeta,
+} from '@/app/alarm/utils/k8sMetaRequest';
 import { Alert, Button, Descriptions, message, Select, Tabs, DatePicker, Spin } from 'antd';
 import CompactEmptyState from '@/components/compact-empty-state';
 
@@ -45,6 +58,7 @@ const IntegrationDetail: FC = () => {
     listTeamSecrets,
     addTeamSecret,
     revealTeamSecret,
+    getPushSourceStats,
   } = useSourceApi();
   const { flatGroups } = useUserInfoContext();
   const { getEventList } = useAlarmApi();
@@ -53,9 +67,12 @@ const IntegrationDetail: FC = () => {
   const [integrationGuide, setIntegrationGuide] = useState<AlertSourceIntegrationGuide>();
   const [k8sMeta, setK8sMeta] = useState<K8sMeta>();
   const [k8sMetaLoading, setK8sMetaLoading] = useState<boolean>(false);
+  const [k8sMetaFailed, setK8sMetaFailed] = useState<boolean>(false);
+  const k8sMetaRequestSeqRef = useRef(0);
   const [integrationGuideLoading, setIntegrationGuideLoading] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<string>('event');
   const [eventList, setEventList] = useState<EventItem[]>([]);
+  const [eventListRequestGuard] = useState(createLatestRequestGuard);
   const [eventLoading, setEventLoading] = useState<boolean>(false);
   const [hasLoadedEvents, setHasLoadedEvents] = useState<boolean>(false);
   const [hasInitializedK8sTab, setHasInitializedK8sTab] = useState<boolean>(false);
@@ -65,10 +82,8 @@ const IntegrationDetail: FC = () => {
     pageSize: 10,
     total: 0,
   });
-  const [searchCondition, setSearchCondition] = useState<{
-    field: string;
-    value: string;
-  } | null>(null);
+  const [searchCondition, setSearchCondition] = useState<SearchFilterCondition | null>(null);
+  const [pushSourceStats, setPushSourceStats] = useState<{ id: string; count: number }[]>([]);
   const [logoLoadFailed, setLogoLoadFailed] = useState<boolean>(false);
   const [guideTeamSecrets, setGuideTeamSecrets] = useState<TeamSecretItem[]>([]);
   const [guideTeamSecretsLoading, setGuideTeamSecretsLoading] = useState<boolean>(false);
@@ -105,18 +120,53 @@ const IntegrationDetail: FC = () => {
     }
   };
 
+  const applyK8sMetaSnapshot = (
+    snapshot: { meta?: K8sMeta; loading: boolean; failed: boolean },
+    requestSeq: number,
+  ) => {
+    if (requestSeq !== k8sMetaRequestSeqRef.current) {
+      return;
+    }
+    setK8sMeta(snapshot.meta);
+    setK8sMetaLoading(snapshot.loading);
+    setK8sMetaFailed(snapshot.failed);
+  };
+
   const getK8sGuideMeta = async () => {
+    const requestSeq = ++k8sMetaRequestSeqRef.current;
     setK8sMetaLoading(true);
+    setK8sMetaFailed(false);
     try {
       const res = await getK8sMeta();
-      if (res) {
-        setK8sMeta(res);
-      }
+      applyK8sMetaSnapshot(
+        applyK8sMetaFetchResult(
+          { meta: k8sMeta, loading: true, failed: false },
+          res ? { status: 'success', meta: res } : { status: 'failure' },
+          { cancelled: requestSeq !== k8sMetaRequestSeqRef.current },
+        ),
+        requestSeq,
+      );
     } catch (error) {
       console.error(error);
-    } finally {
-      setK8sMetaLoading(false);
+      applyK8sMetaSnapshot(
+        applyK8sMetaFetchResult(
+          { meta: k8sMeta, loading: true, failed: false },
+          { status: 'failure' },
+          { cancelled: requestSeq !== k8sMetaRequestSeqRef.current },
+        ),
+        requestSeq,
+      );
     }
+  };
+
+  const retryK8sGuideMeta = () => {
+    const next = applyK8sMetaFetchResult(
+      { meta: k8sMeta, loading: k8sMetaLoading, failed: k8sMetaFailed },
+      { status: 'retry' },
+    );
+    setK8sMetaLoading(next.loading);
+    setK8sMetaFailed(next.failed);
+    void getK8sGuideMeta();
   };
 
   const getIntegrationGuide = async (id: string) => {
@@ -130,11 +180,6 @@ const IntegrationDetail: FC = () => {
     } finally {
       setIntegrationGuideLoading(false);
     }
-  };
-
-  const copySecret = (text: string = '') => {
-    navigator.clipboard.writeText(text);
-    message.success(t('alarmCommon.copied'));
   };
 
   const fetchGuideTeamSecrets = async () => {
@@ -200,7 +245,7 @@ const IntegrationDetail: FC = () => {
   const renderExampleWithSelectedSecret = (raw?: string) => {
     if (!raw) return '';
     if (!selectedGuideSecret) return raw;
-    return raw.split('{{TEAM_SECRET}}').join(selectedGuideSecret);
+    return raw.split('{{TEAM_SECRET}}').join(selectedGuideSecret); // NOCA:AI-Secret-Leak-Checker(工具误报:用已揭示密钥渲染接入示例)
   };
 
   const handleInlineAddTeamSecret = async () => {
@@ -227,6 +272,7 @@ const IntegrationDetail: FC = () => {
   };
 
   const fetchEventList = async () => {
+    const requestId = eventListRequestGuard.begin();
     setEventLoading(true);
     try {
       const params: any = {
@@ -236,19 +282,20 @@ const IntegrationDetail: FC = () => {
         received_at_before: timeRange?.[1]?.toISOString(),
         received_at_after: timeRange?.[0]?.toISOString(),
       };
-      if (searchCondition) {
-        if (isK8sSource && searchCondition.field === 'push_source_id') {
-          params.push_source_id = searchCondition.value;
-        } else {
-          params[searchCondition.field] = searchCondition.value;
-        }
-      }
+      Object.assign(params, buildIntegrationEventSearchParams(searchCondition));
       const res = await getEventList(params);
-      setEventList(res.items || []);
-      setPagination((prev) => ({ ...prev, total: res.count }));
-      setHasLoadedEvents(true);
+      commitIntegrationEventListSuccess(eventListRequestGuard, requestId, () => {
+        const items = res.items || [];
+        setEventList(items);
+        setPagination((prev) => ({ ...prev, total: res.count }));
+        setHasLoadedEvents(true);
+      });
+    } catch (error) {
+      console.error(error);
     } finally {
-      setEventLoading(false);
+      commitIntegrationEventListSettled(eventListRequestGuard, requestId, () => {
+        setEventLoading(false);
+      });
     }
   };
 
@@ -256,6 +303,9 @@ const IntegrationDetail: FC = () => {
     if ((activeTab === 'event' || isK8sSource) && source?.source_id) {
       fetchEventList();
     }
+    return () => {
+      eventListRequestGuard.invalidate();
+    };
   }, [
     activeTab,
     source,
@@ -273,10 +323,36 @@ const IntegrationDetail: FC = () => {
   }, [isK8sSource, hasInitializedK8sTab]);
 
   useEffect(() => {
-    if (isK8sSource && !k8sMeta && !k8sMetaLoading) {
+    if (!isK8sSource) {
+      k8sMetaRequestSeqRef.current += 1;
+      const next = applyK8sMetaFetchResult(
+        { meta: k8sMeta, loading: k8sMetaLoading, failed: k8sMetaFailed },
+        { status: 'reset' },
+      );
+      setK8sMeta(next.meta);
+      setK8sMetaLoading(next.loading);
+      setK8sMetaFailed(next.failed);
+    }
+  }, [isK8sSource]);
+
+  useEffect(() => {
+    return () => {
+      k8sMetaRequestSeqRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (
+      shouldAutoFetchK8sMeta({
+        isK8sSource,
+        hasMeta: Boolean(k8sMeta),
+        loading: k8sMetaLoading,
+        failed: k8sMetaFailed,
+      })
+    ) {
       getK8sGuideMeta();
     }
-  }, [isK8sSource, k8sMeta, k8sMetaLoading]);
+  }, [isK8sSource, k8sMeta, k8sMetaLoading, k8sMetaFailed]);
 
   useEffect(() => {
     if (sourceItemId && isZabbixSource) {
@@ -286,17 +362,48 @@ const IntegrationDetail: FC = () => {
     }
   }, [sourceItemId, isZabbixSource]);
 
-  const onFilterSearch = (condition: { field: string; value: string }) => {
+  const onFilterSearch = (condition: SearchFilterCondition) => {
     setSearchCondition(condition);
     setPagination((prev) => ({ ...prev, current: 1 }));
   };
 
+  const onMonitorSourceStatClick = (id: string) => {
+    const selected = selectedMonitorSourceIds(searchCondition);
+    if (selected.length === 1 && selected[0] === id) {
+      onFilterSearch({ field: 'push_source_id', type: 'push_source', value: [] });
+      return;
+    }
+    onFilterSearch(buildMonitorSourceFilter(id));
+  };
+
+  useEffect(() => {
+    if (!source?.id) {
+      setPushSourceStats([]);
+      return;
+    }
+    let cancelled = false;
+    getPushSourceStats(source.id)
+      .then((rows) => {
+        if (cancelled) return;
+        setPushSourceStats(
+          Array.isArray(rows)
+            ? rows.filter((item): item is { id: string; count: number } =>
+              Boolean(item && typeof item.id === 'string' && typeof item.count === 'number'))
+            : [],
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setPushSourceStats([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [source?.id]);
+
   const eventAttrList = [
     { attr_id: 'title', attr_name: '标题', attr_type: 'str', option: [] },
     { attr_id: 'description', attr_name: '内容', attr_type: 'str', option: [] },
-    ...(isK8sSource
-      ? [{ attr_id: 'push_source_id', attr_name: t('integration.pushSourceId'), attr_type: 'str', option: [] }]
-      : []),
+    { attr_id: 'push_source_id', attr_name: t('integration.pushSourceId'), attr_type: 'push_source', option: [] },
   ];
 
   const handleK8sDownload = async (fileKey: string, fileName: string, params: any) => {
@@ -730,8 +837,9 @@ const IntegrationDetail: FC = () => {
     const placeholder = '<' + t('integration.selectTeamPlaceholder') + '>';
     const curlRendered = renderExampleWithSelectedSecret(source?.config?.examples?.CURL);
     const pythonRendered = renderExampleWithSelectedSecret(source?.config?.examples?.Python);
-    const displayCurl = selectedGuideSecret ? curlRendered : (source?.config?.examples?.CURL || '');
-    const displayPython = selectedGuideSecret ? pythonRendered : (source?.config?.examples?.Python || '');
+    const exampleReady = Boolean(selectedGuideSecret);
+    const displayCurl = exampleReady ? curlRendered : (source?.config?.examples?.CURL || '');
+    const displayPython = exampleReady ? pythonRendered : (source?.config?.examples?.Python || '');
 
     return (
       <div className="rounded-[16px] border border-[var(--color-primary-bg-active)] bg-[var(--color-bg-1)] p-4 mb-4">
@@ -743,32 +851,19 @@ const IntegrationDetail: FC = () => {
 
         <Descriptions bordered size="small" column={1} labelStyle={{ width: 120 }}>
           <Descriptions.Item label={t('integration.secret')}>
+            {/* NOCA:AI-Secret-Leak-Checker(工具误报:展示用户已揭示的接入密钥) */}
             <SecretValueDisplay
               value={selectedGuideSecret}
               placeholder={<span className="text-[var(--color-text-3)]">{placeholder}</span>}
             />
           </Descriptions.Item>
           <Descriptions.Item label="CURL">
-            <div className="relative">
-              <pre className="bg-[var(--color-bg-5)] p-2 pr-10 rounded border border-[var(--color-border-1)] text-[13px] font-mono leading-relaxed whitespace-pre-wrap break-all max-w-full">
-                <code>{displayCurl}</code>
-              </pre>
-              <CopyOutlined
-                className={`absolute top-3 right-3 ${selectedGuideSecret ? 'cursor-pointer hover:text-blue-500' : 'cursor-not-allowed text-[var(--color-text-4)]'}`}
-                onClick={() => selectedGuideSecret && copySecret(displayCurl)}
-              />
-            </div>
+            {/* NOCA:AI-Secret-Leak-Checker(工具误报:复制用户已揭示的接入示例) */}
+            <ExampleCopyBlock text={displayCurl} enabled={exampleReady} />
           </Descriptions.Item>
           <Descriptions.Item label="Python">
-            <div className="relative">
-              <pre className="bg-[var(--color-bg-5)] p-2 pr-10 rounded border border-[var(--color-border-1)] text-[13px] font-mono leading-relaxed whitespace-pre-wrap break-all max-w-full">
-                <code>{displayPython}</code>
-              </pre>
-              <CopyOutlined
-                className={`absolute top-3 right-3 ${selectedGuideSecret ? 'cursor-pointer hover:text-blue-500' : 'cursor-not-allowed text-[var(--color-text-4)]'}`}
-                onClick={() => selectedGuideSecret && copySecret(displayPython)}
-              />
-            </div>
+            {/* NOCA:AI-Secret-Leak-Checker(工具误报:复制用户已揭示的接入示例) */}
+            <ExampleCopyBlock text={displayPython} enabled={exampleReady} />
           </Descriptions.Item>
         </Descriptions>
       </div>
@@ -846,11 +941,52 @@ const IntegrationDetail: FC = () => {
     return <CompactEmptyState description={t('common.noData')} />;
   }
 
-  const renderEventFilters = () => (
-    <div className="mb-4 flex flex-wrap items-center gap-4">
+  const renderEventFilters = () => {
+    const selected = selectedMonitorSourceIds(searchCondition);
+    return (
+    <div className="mb-4">
+      {pushSourceStats.length ? (
+        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+          <span className="shrink-0 text-[13px] leading-5 text-[var(--color-text-2)]">
+            {t('integration.pushSourceStats')}
+          </span>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {pushSourceStats.map((item) => {
+              const active = selected.includes(item.id);
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onMonitorSourceStatClick(item.id)}
+                  className={[
+                    'inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12px] leading-4 transition-colors',
+                    active
+                      ? 'border-[var(--color-primary)] bg-[var(--color-primary-bg-active)] text-[var(--color-primary)]'
+                      : 'border-[var(--color-border-1)] bg-[var(--color-fill-1)] text-[var(--color-text-1)] hover:border-[var(--color-primary)]',
+                  ].join(' ')}
+                >
+                  <span className="max-w-[160px] truncate">{item.id}</span>
+                  <span
+                    className={[
+                      'min-w-[20px] rounded-full px-1.5 text-center text-[11px] font-semibold tabular-nums',
+                      active
+                        ? 'bg-[var(--color-primary)] text-[var(--color-bg-1)]'
+                        : 'bg-[var(--color-bg-1)] text-[var(--color-text-2)]',
+                    ].join(' ')}
+                  >
+                    {item.count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-4">
       <div className="flex items-center gap-2">
         <SearchFilter
           attrList={eventAttrList}
+          condition={searchCondition}
           onSearch={onFilterSearch}
         />
         <RefreshIconButton
@@ -870,7 +1006,9 @@ const IntegrationDetail: FC = () => {
         />
       </div>
     </div>
-  );
+    </div>
+    );
+  };
 
   return (
     <div className="w-full flex-1">
@@ -898,6 +1036,8 @@ const IntegrationDetail: FC = () => {
                             source={source}
                             meta={k8sMeta}
                             loading={k8sMetaLoading}
+                            failed={k8sMetaFailed}
+                            onRetry={retryK8sGuideMeta}
                             onDownload={handleK8sDownload}
                             selectedTeamId={selectedGuideTeamId}
                             selectedTeamSecret={selectedGuideSecret}

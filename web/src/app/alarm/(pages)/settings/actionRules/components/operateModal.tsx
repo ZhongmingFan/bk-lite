@@ -1,5 +1,12 @@
 'use client';
 
+import { invalidMatchRules } from '@/app/alarm/utils/multivalueRules';
+import {
+  alignParamBindings,
+  defaultBindingsFromScript,
+  fieldBindingsIncomplete,
+} from '@/app/alarm/utils/actionParamBindings';
+
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Button,
@@ -37,7 +44,7 @@ interface JobScript {
 }
 
 const DEFAULT_MATCH_RULES: ActionRuleListItem['match_rules'] = [
-  [{ key: 'resource_type', operator: 'eq', value: '' }],
+  [{ key: 'title', operator: 'eq', value: '' }],
 ];
 
 const OperateModal: React.FC<OperateModalProps> = ({
@@ -87,15 +94,15 @@ const OperateModal: React.FC<OperateModalProps> = ({
   );
 
   const fetchScriptDetail = useCallback(
-    async (id: number) => {
+    async (id: number): Promise<ScriptParam[] | null> => {
       setScriptDetailLoading(true);
       try {
         const data = (await getActionJobScript(id)) as JobScript;
-        setScriptParams(data?.params || []);
-        return data?.params || [];
+        const params = data?.params || [];
+        setScriptParams(params);
+        return params;
       } catch {
-        setScriptParams([]);
-        return [];
+        return null;
       } finally {
         setScriptDetailLoading(false);
       }
@@ -121,6 +128,7 @@ const OperateModal: React.FC<OperateModalProps> = ({
         name: currentRow.name,
         team: currentRow.team || [],
         is_active: currentRow.is_active,
+        auto_execute: currentRow.auto_execute !== false,
         trigger_events: currentRow.trigger_events || [],
         match_rules:
           currentRow.match_rules?.length
@@ -136,14 +144,17 @@ const OperateModal: React.FC<OperateModalProps> = ({
 
       if (config.script_id) {
         fetchScriptDetail(config.script_id).then((params) => {
-          form.setFieldsValue({ param_bindings: config.param_bindings || [] });
-          setScriptParams(params);
+          if (!params) return;
+          form.setFieldsValue({
+            param_bindings: alignParamBindings(params, config.param_bindings || []),
+          });
         });
       }
     } else {
       form.resetFields();
       form.setFieldsValue({
         is_active: true,
+        auto_execute: true,
         action_type: 'job',
         host_mode: 'from_alert',
         host_field: 'ip_addr',
@@ -164,8 +175,32 @@ const OperateModal: React.FC<OperateModalProps> = ({
   };
 
   const handleScriptChange = async (id: number) => {
-    form.setFieldValue('param_bindings', []);
-    await fetchScriptDetail(id);
+    const params = await fetchScriptDetail(id);
+    if (!params) {
+      message.error(t('alarmCommon.operateFailed'));
+      setScriptParams([]);
+      form.setFieldValue('param_bindings', []);
+      return;
+    }
+    form.setFieldValue('param_bindings', defaultBindingsFromScript(params));
+  };
+
+  const handleReloadParams = async () => {
+    const scriptId = form.getFieldValue('script_id') as number | undefined;
+    if (!scriptId) return;
+    try {
+      const data = (await getActionJobScript(scriptId)) as JobScript;
+      const params = data?.params || [];
+      setScriptParams(params);
+      form.setFieldValue(
+        'param_bindings',
+        alignParamBindings(params, form.getFieldValue('param_bindings') || [], {
+          reloadConstDefaults: true,
+        })
+      );
+    } catch {
+      message.error(t('alarmCommon.operateFailed'));
+    }
   };
 
   const onFinish = async (values: Record<string, unknown>) => {
@@ -174,6 +209,10 @@ const OperateModal: React.FC<OperateModalProps> = ({
       const scriptId = values.script_id as number | undefined;
       const hostMode = ((values.host_mode as string) || 'from_alert') as 'from_alert' | 'fixed';
       const paramBindings = (values.param_bindings as ActionConfig['param_bindings']) || [];
+      if (fieldBindingsIncomplete(paramBindings)) {
+        message.error(t('common.inputTip'));
+        return;
+      }
 
       const targetBinding: ActionConfig['target_binding'] = {
         source: 'node_mgmt',
@@ -189,13 +228,23 @@ const OperateModal: React.FC<OperateModalProps> = ({
       const actionConfig: ActionConfig = {
         script_id: scriptId,
         target_binding: targetBinding,
-        param_bindings: paramBindings,
+        param_bindings: paramBindings.map((b) =>
+          b.from === 'const'
+            ? {
+              name: b.name,
+              from: 'const' as const,
+              value: b.value,
+              ...(b.allow_adjust ? { allow_adjust: true } : {}),
+            }
+            : { name: b.name, from: 'field' as const, value: b.value }
+        ),
       };
 
       const payload = {
         name: values.name as string,
         team: (values.team as number[]) || [],
         is_active: values.is_active as boolean,
+        auto_execute: values.auto_execute !== false,
         trigger_events: (values.trigger_events as string[]) || [],
         match_rules: (values.match_rules as ActionRuleListItem['match_rules']) || [],
         action_type: (values.action_type as ActionRuleListItem['action_type']) || 'job',
@@ -292,6 +341,15 @@ const OperateModal: React.FC<OperateModalProps> = ({
           <Switch />
         </Form.Item>
 
+        <Form.Item
+          name="auto_execute"
+          label={t('settings.actionAutoExecute')}
+          extra={t('settings.actionAutoExecuteTip')}
+          valuePropName="checked"
+        >
+          <Switch />
+        </Form.Item>
+
         {/* ② 触发时机 */}
         <SectionTitle title={t('settings.actionTriggerEvent')} required />
 
@@ -320,20 +378,8 @@ const OperateModal: React.FC<OperateModalProps> = ({
           style={{ marginBottom: '16px' }}
           rules={[
             {
-              validator: (_: unknown, value: ActionRuleListItem['match_rules']) => {
-                if (!Array.isArray(value) || value.length === 0) {
-                  return Promise.resolve();
-                }
-                for (const orGroup of value) {
-                  if (!Array.isArray(orGroup)) continue;
-                  for (const item of orGroup) {
-                    if (item.key && item.operator && (!item.value && item.value !== '0')) {
-                      return Promise.reject(new Error(t('common.inputTip')));
-                    }
-                  }
-                }
-                return Promise.resolve();
-              },
+              validator: (_: unknown, value: ActionRuleListItem['match_rules']) =>
+                invalidMatchRules(value, true, "action") ? Promise.reject(new Error(t('common.inputTip'))) : Promise.resolve(),
             },
           ]}
         >
@@ -435,13 +481,20 @@ const OperateModal: React.FC<OperateModalProps> = ({
 
         {/* 仅当所选作业有脚本参数时才展示字段绑定 */}
         {scriptParams.length > 0 && (
-          <Form.Item
-            name="param_bindings"
-            label={t('settings.actionFieldBinding')}
-            style={{ marginBottom: 0 }}
-          >
-            <FieldBindingTable scriptParams={scriptParams} />
-          </Form.Item>
+          <>
+            <div className="mb-1">
+              <Button type="link" className="p-0" onClick={handleReloadParams}>
+                {t('settings.actionReloadParams')}
+              </Button>
+            </div>
+            <Form.Item
+              name="param_bindings"
+              label={t('settings.actionFieldBinding')}
+              style={{ marginBottom: 0 }}
+            >
+              <FieldBindingTable scriptParams={scriptParams} />
+            </Form.Item>
+          </>
         )}
       </Form>
     </Drawer>

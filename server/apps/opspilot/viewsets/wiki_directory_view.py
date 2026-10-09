@@ -7,11 +7,26 @@ from apps.core.utils.viewset_utils import AuthViewSet
 from apps.opspilot.models import WikiDirectory
 from apps.opspilot.services.wiki.active_generation_query_service import ActiveGenerationReadError, directory_page_counts
 from apps.opspilot.services.wiki.directory_operation_service import execute_directory_operation, preview_directory_operation
-from apps.opspilot.services.wiki.directory_service import DirectoryServiceError
+from apps.opspilot.services.wiki.directory_service import DirectoryServiceError, delete_nested_directory
+from apps.opspilot.services.wiki.frozen_structure_migration_service import ensure_frozen_structure_if_needed
 from apps.opspilot.services.wiki.structure_service import StructureServiceError, get_structure, save_structure
 from apps.opspilot.viewsets.wiki_team_scope import WikiTeamScopeMixin
 
 UNCLASSIFIED_DIRECTORY_KEY = "__unclassified__"
+
+
+def _ensure_stock_frozen_structure(knowledge_base, request):
+    try:
+        ensure_frozen_structure_if_needed(
+            knowledge_base,
+            operator=getattr(getattr(request, "user", None), "username", "") or "system",
+        )
+    except StructureServiceError as error:
+        logger.warning(
+            "wiki_frozen_structure_ensure_skipped kb=%s code=%s",
+            knowledge_base.pk,
+            error.code,
+        )
 
 
 def _log_structure_conflict(knowledge_base, error):
@@ -84,6 +99,7 @@ class WikiDirectoryViewSet(WikiTeamScopeMixin, AuthViewSet):
         knowledge_base, error_response = self._structure_knowledge_base(request)
         if error_response is not None:
             return error_response
+        _ensure_stock_frozen_structure(knowledge_base, request)
 
         try:
             data = get_structure(knowledge_base)
@@ -133,6 +149,36 @@ class WikiDirectoryViewSet(WikiTeamScopeMixin, AuthViewSet):
 
     @HasPermission("wiki_list-Edit")
     @action(methods=["POST"], detail=False)
+    def delete_nested(self, request):
+        knowledge_base, error_response = self._structure_knowledge_base(request)
+        if error_response is not None:
+            return error_response
+        try:
+            data = delete_nested_directory(
+                knowledge_base,
+                directory_id=request.data.get("directory_id"),
+                base_generation_id=request.data.get("base_generation_id"),
+                structure_version=request.data.get("structure_version"),
+                operator=(getattr(request.user, "username", "") or ""),
+            )
+        except DirectoryServiceError as error:
+            return _directory_operation_error(error)
+        except StructureServiceError as error:
+            _log_structure_conflict(knowledge_base, error)
+            return JsonResponse(
+                {
+                    "result": False,
+                    "message": str(error),
+                    "code": error.code,
+                    "retryable": error.retryable,
+                    "details": error.details,
+                },
+                status=error.status_code,
+            )
+        return JsonResponse({"result": True, "data": data})
+
+    @HasPermission("wiki_list-Edit")
+    @action(methods=["POST"], detail=False)
     def operation_preview(self, request):
         knowledge_base, error_response = self._structure_knowledge_base(request)
         if error_response is not None:
@@ -171,6 +217,8 @@ class WikiDirectoryViewSet(WikiTeamScopeMixin, AuthViewSet):
                 {"result": False, "message": "knowledge_base 必填或知识库不存在"},
                 status=400,
             )
+        _ensure_stock_frozen_structure(knowledge_base, request)
+        knowledge_base.refresh_from_db()
 
         directories = list(
             WikiDirectory.objects.filter(

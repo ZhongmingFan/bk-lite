@@ -1,13 +1,20 @@
+from tempfile import TemporaryFile
+from time import perf_counter
+from uuid import uuid4
+
 from apps.cmdb.constants.constants import (
+    ASSOCIATION_TYPE,
     ENUM_SELECT_MODE_DEFAULT,
     INSTANCE,
     INSTANCE_ASSOCIATION,
+    MODEL,
     NETWORK_TOPO_NODE_LIMIT,
     OPERATOR_INSTANCE,
     PERMISSION_INSTANCES,
     VIEW,
 )
 from apps.cmdb.constants.field_constraints import TAG_ATTR_ID, TAG_MODE_FREE
+from apps.cmdb.constants.monitor_link import CMDB_MONITOR_SYNC_MODEL_IDS
 from apps.cmdb.display_field import DisplayFieldHandler
 from apps.cmdb.display_field.constants import (
     DISPLAY_FIELD_TYPES,
@@ -19,8 +26,10 @@ from apps.cmdb.display_field.constants import (
     FIELD_TYPE_USER,
 )
 from apps.cmdb.graph.drivers.graph_client import GraphClient
+from apps.cmdb.graph.export_query import EXPORT_BATCH_SIZE
 from apps.cmdb.graph.format_type import ParameterCollector
 from apps.cmdb.instance_ops.extensions import get_instance_enterprise_extension
+from apps.cmdb.model_ops.extensions import is_file_attr_type
 from apps.cmdb.models.change_record import (
     CREATE_INST,
     CREATE_INST_ASST,
@@ -33,6 +42,7 @@ from apps.cmdb.models.change_record import (
 from apps.cmdb.models.show_field import ShowField
 from apps.cmdb.permissions.instance_permission import PermissionManage
 from apps.cmdb.services.auto_relation_reconcile import schedule_instance_auto_relation_reconcile
+from apps.cmdb.services.host_sync_identity import apply_model_cloud_id, heal_legacy_cloud_id
 from apps.cmdb.services.instance_identity import (
     ensure_instance_identity_immutable,
     normalize_inst_uuid,
@@ -363,6 +373,14 @@ def apply_enum_validation_for_instance(instance_data: dict, attrs: list[dict]) -
     return data
 
 
+_ASSOCIATION_TYPE_NAME = {item["asst_id"]: item["asst_name"] for item in ASSOCIATION_TYPE}
+
+
+def _normalize_cmdb_display_language(language: str | None) -> str:
+    raw = str(language or "zh-Hans")
+    return "en" if raw.lower().startswith("en") else "zh-Hans"
+
+
 class InstanceManage(object):
     @staticmethod
     def _query_instance_map_by_ids(inst_ids: set[int]) -> dict[int, dict]:
@@ -574,7 +592,44 @@ class InstanceManage(object):
         return filtered_result
 
     @classmethod
-    def _transport_topology_result(cls, result: dict) -> dict:
+    def _resolve_topology_model_names(cls, model_ids: set[str], language: str | None = None) -> dict[str, str]:
+        ids = sorted({str(model_id) for model_id in model_ids if model_id not in (None, "")})
+        if not ids:
+            return {}
+        from apps.cmdb.language.service import SettingLanguage
+
+        lan = SettingLanguage(_normalize_cmdb_display_language(language))
+        names: dict[str, str] = {}
+        missing: list[str] = []
+        for model_id in ids:
+            translated = lan.get_val("MODEL", model_id)
+            if translated:
+                names[model_id] = translated
+            else:
+                missing.append(model_id)
+        if missing:
+            names.update(cls._query_stored_model_names(missing))
+        for model_id in ids:
+            names.setdefault(model_id, model_id)
+        return names
+
+    @staticmethod
+    def _query_stored_model_names(model_ids: list[str]) -> dict[str, str]:
+        if not model_ids:
+            return {}
+        with GraphClient() as ag:
+            models, _ = ag.query_entity(MODEL, [{"field": "model_id", "type": "str[]", "value": sorted(model_ids)}])
+        names: dict[str, str] = {}
+        for model in models:
+            model_id = model.get("model_id")
+            model_name = model.get("model_name")
+            if model_id in (None, "") or model_name in (None, ""):
+                continue
+            names[str(model_id)] = str(model_name)
+        return names
+
+    @classmethod
+    def _transport_topology_result(cls, result: dict, language: str | None = None) -> dict:
         """把通用拓扑树递归转换为只暴露 inst_uuid 的 Transport DTO。"""
         if not isinstance(result, dict):
             return result
@@ -586,6 +641,13 @@ class InstanceManage(object):
         uuid_by_id = {
             int(graph_id): item.get("inst_uuid") for graph_id, item in instances_map.items() if isinstance(item, dict) and item.get("inst_uuid")
         }
+        model_ids = set()
+        for item in instances_map.values():
+            if isinstance(item, dict) and item.get("model_id") not in (None, ""):
+                model_ids.add(str(item["model_id"]))
+        for key in ("src_result", "dst_result"):
+            model_ids.update(cls._collect_topology_model_ids(result.get(key)))
+        model_name_by_id = cls._resolve_topology_model_names(model_ids, language=language)
 
         def transport_node(node: dict | None) -> dict:
             if not isinstance(node, dict) or node.get("_id") is None:
@@ -599,6 +661,15 @@ class InstanceManage(object):
                 return {}
             transported = {key: value for key, value in node.items() if key not in {"_id", "inst_id", "children"}}
             transported["inst_uuid"] = inst_uuid
+            asst_id = transported.get("asst_id")
+            if asst_id and not transported.get("asst_name"):
+                transported["asst_name"] = _ASSOCIATION_TYPE_NAME.get(str(asst_id), "")
+            instance = instances_map.get(graph_id) if isinstance(instances_map.get(graph_id), dict) else {}
+            model_id = transported.get("model_id") or instance.get("model_id")
+            if model_id not in (None, ""):
+                transported["model_id"] = str(model_id)
+                if not transported.get("model_name"):
+                    transported["model_name"] = model_name_by_id.get(str(model_id), str(model_id))
             transported["children"] = [child for item in node.get("children") or [] if (child := transport_node(item))]
             return transported
 
@@ -607,6 +678,22 @@ class InstanceManage(object):
             "src_result": transport_node(result.get("src_result")),
             "dst_result": transport_node(result.get("dst_result")),
         }
+
+    @classmethod
+    def _collect_topology_model_ids(cls, node: dict | None) -> set[str]:
+        model_ids: set[str] = set()
+
+        def walk(value):
+            if not isinstance(value, dict):
+                return
+            model_id = value.get("model_id")
+            if model_id not in (None, ""):
+                model_ids.add(str(model_id))
+            for child in value.get("children") or []:
+                walk(child)
+
+        walk(node)
+        return model_ids
 
     @staticmethod
     def _build_format_permission_dict(permission_map: dict, creator: str = "") -> dict:
@@ -623,6 +710,8 @@ class InstanceManage(object):
 
     @staticmethod
     def _build_check_attr_map(attrs: list, for_update: bool = False) -> dict:
+        from apps.cmdb.services.module_ingest import is_unique_identity_attr
+
         check_attr_map = {"is_only": {}, "is_required": {}}
         if for_update:
             check_attr_map["editable"] = {}
@@ -630,7 +719,7 @@ class InstanceManage(object):
         for attr in attrs:
             attr_id = attr["attr_id"]
             attr_name = attr["attr_name"]
-            if attr.get("is_only"):
+            if is_unique_identity_attr(attr):
                 check_attr_map["is_only"][attr_id] = attr_name
             if attr.get("is_required"):
                 check_attr_map["is_required"][attr_id] = attr_name
@@ -693,6 +782,99 @@ class InstanceManage(object):
                 if key is None:
                     key = repr(sorted(row.items()))
                 candidates[key] = row
+        return list(candidates.values())
+
+    IMPORT_EXIST_QUERY_CHUNK_SIZE = 200
+    IMPORT_EXIST_CANDIDATE_LIMIT = 5000
+
+    @staticmethod
+    def _chunk_values(values: list, size: int = None):
+        chunk_size = size or InstanceManage.IMPORT_EXIST_QUERY_CHUNK_SIZE
+        for start in range(0, len(values), chunk_size):
+            yield values[start : start + chunk_size]
+
+    @classmethod
+    def _add_import_exist_candidates(cls, candidates: dict, rows) -> None:
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            key = row.get("_id")
+            if key is None:
+                key = repr(sorted(row.items()))
+            candidates[key] = row
+        if len(candidates) > cls.IMPORT_EXIST_CANDIDATE_LIMIT:
+            raise BaseAppException("导入唯一性候选超过 5000 条，请缩小本次导入范围后重试")
+
+    @classmethod
+    def _collect_import_field_values(cls, items: list[dict], field: str) -> tuple[list, list]:
+        int_values = []
+        str_values = []
+        seen_int = set()
+        seen_str = set()
+        for item in items:
+            param = cls._unique_candidate_param(field, item.get(field))
+            if not param:
+                continue
+            value = param["value"]
+            if param["type"] == "int=":
+                if value not in seen_int:
+                    seen_int.add(value)
+                    int_values.append(value)
+            elif value not in seen_str:
+                seen_str.add(value)
+                str_values.append(value)
+        return int_values, str_values
+
+    @classmethod
+    def _query_import_exist_items(cls, graph, model_id: str, items: list[dict], check_attr_map: dict) -> list[dict]:
+        """按导入行的唯一字段值与实例名加载候选，禁止只按 model_id 全表扫描。"""
+        if not items:
+            return []
+
+        candidates = {}
+        model_param = {"field": "model_id", "type": "str=", "value": model_id}
+
+        for field in check_attr_map.get("is_only", {}) or {}:
+            int_values, str_values = cls._collect_import_field_values(items, field)
+            for chunk in cls._chunk_values(int_values):
+                rows, _ = graph.query_entity(
+                    INSTANCE,
+                    [model_param, {"field": field, "type": "int[]", "value": chunk}],
+                )
+                cls._add_import_exist_candidates(candidates, rows)
+            for chunk in cls._chunk_values(str_values):
+                rows, _ = graph.query_entity(
+                    INSTANCE,
+                    [model_param, {"field": field, "type": "str[]", "value": chunk}],
+                )
+                cls._add_import_exist_candidates(candidates, rows)
+
+        seen_combos = set()
+        for rule in check_attr_map.get("unique_rules", []) or []:
+            field_ids = getattr(rule, "field_ids", None) or []
+            for item in items:
+                params = [cls._unique_candidate_param(field, item.get(field)) for field in field_ids]
+                if not params or not all(params):
+                    continue
+                combo_key = tuple((param["field"], param["type"], param["value"]) for param in params)
+                if combo_key in seen_combos:
+                    continue
+                seen_combos.add(combo_key)
+                rows, _ = graph.query_entity(INSTANCE, [model_param, *params])
+                cls._add_import_exist_candidates(candidates, rows)
+
+        inst_names = []
+        seen_names = set()
+        for item in items:
+            name = item.get("inst_name")
+            if not name or name in seen_names:
+                continue
+            seen_names.add(name)
+            inst_names.append(name)
+        for chunk in cls._chunk_values(inst_names):
+            rows = graph.query_entity_by_inst_names(chunk, model_id=model_id) or []
+            cls._add_import_exist_candidates(candidates, rows)
+
         return list(candidates.values())
 
     @staticmethod
@@ -845,7 +1027,8 @@ class InstanceManage(object):
         schedule_post_actions: bool = True,
     ):
         """创建实例"""
-        instance_info = prepare_new_instance_identity(dict(instance_info))
+        instance_info = apply_model_cloud_id(model_id, dict(instance_info))
+        instance_info = prepare_new_instance_identity(instance_info)
         instance_info.update(model_id=model_id)
         if operation_id:
             instance_info["_cmdb_operation_id"] = operation_id
@@ -906,7 +1089,7 @@ class InstanceManage(object):
                     "[InstanceManage] post-create auto_relation hook failed cmdb_id=%s",
                     result.get("_id"),
                 )
-            if model_id == "host":
+            if model_id in CMDB_MONITOR_SYNC_MODEL_IDS:
                 try:
                     result = InstanceManage._best_effort_notify_peers_on_host_create(result, operator=operator, allowed_org_ids=allowed_org_ids)
                 except Exception:
@@ -923,7 +1106,7 @@ class InstanceManage(object):
         operator: str,
         allowed_org_ids: list | None,
     ) -> dict:
-        """主机新建 IoC 钩子：通知节点 + 监控（best-effort，不阻断创建）。"""
+        """可关联模型新建 IoC 钩子：通知监控（best-effort，不阻断创建）；主机额外通知节点。"""
         try:
             from apps.cmdb.services.module_push import CmdbToMonitorPushService
 
@@ -1105,6 +1288,24 @@ class InstanceManage(object):
             operator=operator,
         )
         schedule_instance_auto_relation_reconcile([item["_id"] for item in created])
+        if model_id in CMDB_MONITOR_SYNC_MODEL_IDS:
+            notified = []
+            for item in created:
+                try:
+                    notified.append(
+                        InstanceManage._best_effort_notify_peers_on_host_create(
+                            item,
+                            operator=operator,
+                            allowed_org_ids=allowed_org_ids,
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "[InstanceManage] post-create IoC hook failed cmdb_id=%s",
+                        (item or {}).get("_id"),
+                    )
+                    notified.append(item)
+            return notified
         return created
 
     @staticmethod
@@ -1145,6 +1346,8 @@ class InstanceManage(object):
             )
 
         attrs = ModelManage.parse_attrs(model_info.get("attrs", "[]"))
+        update_attr = apply_model_cloud_id(inst_info["model_id"], update_attr)
+        update_attr = heal_legacy_cloud_id(inst_info["model_id"], inst_info, update_attr)
         update_attr = apply_tag_validation_for_instance(update_attr, attrs, inst_info["model_id"])
         update_attr = apply_enum_validation_for_instance(update_attr, attrs)
         if inst_info["model_id"] == "subnet":
@@ -1269,6 +1472,7 @@ class InstanceManage(object):
         )
 
         attrs = ModelManage.parse_attrs(model_info.get("attrs", "[]"))
+        update_attr = apply_model_cloud_id(model_info["model_id"], update_attr)
         update_attr = apply_tag_validation_for_instance(update_attr, attrs, model_info["model_id"])
         update_attr = apply_enum_validation_for_instance(update_attr, attrs)
         # 企业版附件/图片字段：校验并规范化（与 instance_create/instance_update 一致）。
@@ -1907,7 +2111,7 @@ class InstanceManage(object):
         return edge
 
     @staticmethod
-    def _association_edges_by_business_key(*, src_inst_uuid: str, dst_inst_uuid: str, model_asst_id: str) -> list[dict]:
+    def _association_edges_by_business_key(*, src_inst_uuid: str, dst_inst_uuid: str, model_asst_id: str, legacy_fallback: bool = True) -> list[dict]:
         src_inst_uuid = normalize_inst_uuid(src_inst_uuid)
         dst_inst_uuid = normalize_inst_uuid(dst_inst_uuid)
         with GraphClient() as ag:
@@ -1920,7 +2124,7 @@ class InstanceManage(object):
                 ],
                 return_entity=True,
             )
-        if edges:
+        if edges or not legacy_fallback:
             return edges
         with GraphClient() as ag:
             items = ag.query_edge(
@@ -1943,6 +2147,8 @@ class InstanceManage(object):
         operator: str,
         scenario: str = RELATION_CHANGE,
         edge_properties: dict | None = None,
+        bounded_lookup: bool = False,
+        allow_existing: bool = False,
     ) -> dict:
         src = InstanceManage.query_entity_by_uuid(src_inst_uuid)
         dst = InstanceManage.query_entity_by_uuid(dst_inst_uuid)
@@ -1952,7 +2158,10 @@ class InstanceManage(object):
             src_inst_uuid=src["inst_uuid"],
             dst_inst_uuid=dst["inst_uuid"],
             model_asst_id=model_asst_id,
+            legacy_fallback=not bounded_lookup,
         ):
+            if allow_existing:
+                return {"already_exists": True}
             raise BaseAppException("instance association repetition")
 
         asso_info = ModelManage.model_association_info_search(model_asst_id)
@@ -2104,7 +2313,7 @@ class InstanceManage(object):
         return entities[0] if entities else {}
 
     @staticmethod
-    def query_entity_by_uuids(inst_uuids: list[str]):
+    def query_entity_by_uuids(inst_uuids: list[str], *, fields: list[str] | None = None):
         """根据不可变业务 UUID 批量查询实例；保持输入顺序并拒绝重复。"""
         normalized = [normalize_inst_uuid(value) for value in inst_uuids]
         if len(set(normalized)) != len(normalized):
@@ -2113,11 +2322,12 @@ class InstanceManage(object):
             return []
         with GraphClient() as ag:
             query_by_uuids = getattr(ag, "query_entity_by_inst_uuids", None)
-            if callable(query_by_uuids):
+            if callable(query_by_uuids) and fields is None:
                 return query_by_uuids(normalized)
             entities, _ = ag.query_entity(
                 INSTANCE,
                 [{"field": "inst_uuid", "type": "str[]", "value": normalized}],
+                **({"fields": fields} if fields is not None else {}),
             )
         by_uuid = {}
         for item in entities:
@@ -2200,9 +2410,8 @@ class InstanceManage(object):
         attrs = ModelManage.search_model_attr_v2(model_id)
         model_info = ModelManage.search_model_info(model_id)
 
-        with GraphClient() as ag:
-            exist_items, _ = ag.query_entity(INSTANCE, [{"field": "model_id", "type": "str=", "value": model_id}])
-        results = Import(model_id, attrs, exist_items, operator).import_inst_list(file_stream)
+        importer = Import(model_id, attrs, [], operator)
+        results = importer.import_inst_list(file_stream)
 
         change_records = [
             dict(
@@ -2234,22 +2443,11 @@ class InstanceManage(object):
         attrs = ModelManage.search_model_attr_v2(model_id)
         model_info = ModelManage.search_model_info(model_id)
 
-        with GraphClient() as ag:
-            exist_items, _ = ag.query_entity(INSTANCE, [{"field": "model_id", "type": "str=", "value": model_id}])
-
-        _import = Import(model_id, attrs, exist_items, operator)
+        _import = Import(model_id, attrs, [], operator)
         add_results, update_results, asso_result = _import.import_inst_list_support_edit(
             file_stream,
             allowed_org_ids=allowed_org_ids,
         )
-        # 检查是否存在验证错误
-        if _import.validation_errors:
-            error_summary = f"数据导入失败：发现 {len(_import.validation_errors)} 个数据验证错误\n"
-            error_details = "\n".join(_import.validation_errors)
-            logger.warning("[InstanceImport] 数据导入验证失败 model_id=%s, error_count=%s", model_id, len(_import.validation_errors))
-            success_count = len([i for i in add_results if i.get("success", False)])
-            error_summary += f"已成功导入 {success_count} 条数据，失败 {len(_import.inst_list) - success_count} 条数据。\n 错误信息: {error_summary + error_details}"
-            return {"success": False, "message": error_summary}
 
         add_changes = [
             dict(
@@ -2262,7 +2460,7 @@ class InstanceManage(object):
             for i in add_results
             if i["success"]
         ]
-        exist_items__id_map = {i["_id"]: i for i in exist_items}
+        exist_items__id_map = {i["_id"]: i for i in _import.exist_items}
         update_changes = [
             dict(
                 inst_id=i["data"]["_id"],
@@ -2284,6 +2482,15 @@ class InstanceManage(object):
             [item["data"]["_id"] for item in add_results if item.get("success")]
             + [item["data"]["_id"] for item in update_results if item.get("success")]
         )
+
+        # 检查是否存在验证错误
+        if _import.validation_errors:
+            error_summary = f"数据导入失败：发现 {len(_import.validation_errors)} 个数据验证错误\n"
+            error_details = "\n".join(_import.validation_errors)
+            logger.warning("[InstanceImport] 数据导入验证失败 model_id=%s, error_count=%s", model_id, len(_import.validation_errors))
+            success_count = len([i for i in add_results if i.get("success", False)])
+            error_summary += f"已成功导入 {success_count} 条数据，失败 {len(_import.inst_list) - success_count} 条数据。\n 错误信息: {error_summary + error_details}"
+            return {"success": False, "message": error_summary}
 
         res_status, result_message = self.format_result_message(_import.import_result_message)
         logger.info("[InstanceImport] 数据导入成功 model_id=%s", model_id)
@@ -2316,12 +2523,19 @@ class InstanceManage(object):
         return cls._filter_topology_result(result, int(inst_id), permission_map=permission_map, user=user)
 
     @classmethod
-    def topo_search_lite_by_uuid(cls, inst_uuid: str, depth: int = 3, permission_map: dict | None = None, user=None):
+    def topo_search_lite_by_uuid(
+        cls,
+        inst_uuid: str,
+        depth: int = 3,
+        permission_map: dict | None = None,
+        user=None,
+        language: str | None = None,
+    ):
         instance = cls.query_entity_by_uuid(inst_uuid)
         if not instance:
             raise BaseAppException("实例不存在！")
         result = cls.topo_search_lite(instance["_id"], depth=depth, permission_map=permission_map, user=user)
-        return cls._transport_topology_result(result)
+        return cls._transport_topology_result(result, language=language)
 
     @classmethod
     def topo_search_expand(
@@ -2345,6 +2559,7 @@ class InstanceManage(object):
         depth: int = 2,
         permission_map: dict | None = None,
         user=None,
+        language: str | None = None,
     ):
         instance = cls.query_entity_by_uuid(inst_uuid)
         if not instance:
@@ -2359,7 +2574,7 @@ class InstanceManage(object):
             permission_map=permission_map,
             user=user,
         )
-        return cls._transport_topology_result(result)
+        return cls._transport_topology_result(result, language=language)
 
     @staticmethod
     def inst_export(
@@ -2370,17 +2585,19 @@ class InstanceManage(object):
         creator: str = "",
         attr_list: list = [],
         association_list: list = [],
+        *,
+        file_backed: bool = False,
+        row_limit=None,
+        progress=None,
+        inspect_batch=None,
+        byte_limit=None,
     ):
         """实例导出"""
-        attrs = ModelManage.search_model_attr_v2(model_id)
-        association = ModelManage.model_association_search(
-            model_id,
-            business_only=True,
-        )
+        started = perf_counter()
+        attrs = ModelManage.search_model_attr_v2(model_id, attr_ids=attr_list or None)
+        association = ModelManage.model_association_search(model_id, business_only=True) if association_list else []
         format_permission_dict = InstanceManage._build_format_permission_dict(permissions_map, creator)
-        # 添加调试日志
-        logger.info(f"导出参数 - model_id: {model_id}, ids: {ids}, association_list: {association_list}")
-        logger.info(f"查询到的所有关联关系: {len(association)} 个")
+        metadata_finished = perf_counter()
         if ids:
             query_list = [
                 {"field": "id", "type": "id[]", "value": ids},
@@ -2389,25 +2606,110 @@ class InstanceManage(object):
         else:
             query_list = [{"field": "model_id", "type": "str=", "value": model_id}]
 
-        with GraphClient() as ag:
-            # 使用新的基础权限过滤方法获取有权限的实例
-            query = dict(
-                label=INSTANCE,
-                params=query_list,
-                format_permission_dict=format_permission_dict,
+        association = [item for item in association if item["model_asst_id"] in association_list]
+        model_name_map = {item[f"{side}_model_id"]: item[f"{side}_model_name"] for item in association for side in ("src", "dst")}
+        exporter = Export(attrs, model_id=model_id, association=association, model_name_map=model_name_map)
+        workbook = exporter.generate_header(write_only=True)
+        associations_by_id = {item["model_asst_id"]: item for item in association}
+        fields = list(
+            dict.fromkeys(
+                [attr["attr_id"] for attr in attrs if not attr.get("is_display_field") and not is_file_attr_type(attr.get("attr_type"))]
+                + ["inst_uuid", "model_id"]
             )
-            inst_list, _ = ag.query_entity(**query)
-        if attr_list:
-            attr_map = {attr["attr_id"]: attr for attr in attrs}
-            attrs = [attr_map[attr_id] for attr_id in attr_list if attr_id in attr_map]
-        else:
-            attrs = attrs
-        # 只有当用户明确选择了关联关系时才包含关联关系
-        association = [i for i in association if i["model_asst_id"] in association_list] if association_list else []
+        )
+        relation_seconds = instance_seconds = 0.0
+        row_count = 0
+        cursor = None
+        try:
+            # 每批重新应用同一授权范围；按不可变 UUID 前进，不使用 offset。
+            # 这是运行期读取，不承诺跨批次的数据库快照。
+            while format_permission_dict:
+                if progress:
+                    progress(row_count)
+                query_started = perf_counter()
+                params = list(query_list)
+                if cursor is not None:
+                    params.append({"field": "inst_uuid", "type": "str>", "value": cursor})
+                with GraphClient() as ag:
+                    batch, _ = ag.query_entity(
+                        label=INSTANCE,
+                        params=params,
+                        format_permission_dict=format_permission_dict,
+                        page={"skip": 0, "limit": EXPORT_BATCH_SIZE},
+                        order="inst_uuid",
+                        include_count=False,
+                        fields=fields,
+                    )
+                instance_seconds += perf_counter() - query_started
+                if not batch:
+                    break
+                if row_limit is not None and row_count + len(batch) > row_limit:
+                    from apps.cmdb.services.transfer_service import TransferError
 
-        logger.info(f"过滤后的关联关系: {len(association)} 个")
+                    raise TransferError("export_limit", "导出超过 10 万行，请缩小范围", 413)
+                association_values = {}
+                rows = []
+                if association:
+                    relation_started = perf_counter()
+                    batch_uuids = {item["inst_uuid"] for item in batch}
+                    with GraphClient() as ag:
+                        rows = ag.query_export_associations(model_id, sorted(batch_uuids), list(associations_by_id))
+                    seen = set()
+                    for row in rows:
+                        definition = associations_by_id.get(row["model_asst_id"])
+                        if not definition or row["inst_uuid"] not in batch_uuids:
+                            continue
+                        if any(row[f"{side}_model_id"] != definition[f"{side}_model_id"] for side in ("src", "dst")):
+                            continue
+                        # 自环从两个方向返回；不同边、同名对端不按名称去重。
+                        key = (row["inst_uuid"], row["edge_id"])
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        names = association_values.setdefault(row["inst_uuid"], {}).setdefault(row["model_asst_id"], [])
+                        names.append(row["peer_name"] or "")
+                    relation_seconds += perf_counter() - relation_started
+                if inspect_batch:
+                    inspect_batch(batch, rows)
+                exporter.append_inst_list(workbook, batch, association_values=association_values)
+                row_count += len(batch)
+                if progress:
+                    progress(row_count)
+                if len(batch) < EXPORT_BATCH_SIZE:
+                    break
+                cursor = normalize_inst_uuid(batch[-1].get("inst_uuid"))
+            if file_backed:
+                stream = TemporaryFile(mode="w+b")
+                try:
+                    if byte_limit is not None:
+                        from apps.cmdb.services.transfer_files import BoundedWriter
 
-        return Export(attrs, model_id=model_id, association=association).export_inst_list(inst_list)
+                        workbook.save(BoundedWriter(stream, byte_limit))
+                    else:
+                        workbook.save(stream)
+                    stream.seek(0)
+                except BaseException:
+                    stream.close()
+                    raise
+            else:
+                stream = exporter.return_bytesio(workbook)
+        finally:
+            exporter.close_workbook(workbook)
+        finished = perf_counter()
+        logger.info(
+            "event=cmdb_instance_exported export_id=%s rows=%s attributes=%s associations=%s "
+            "metadata_ms=%s instances_ms=%s relations_ms=%s excel_ms=%s total_ms=%s",
+            uuid4().hex,
+            row_count,
+            len(attrs),
+            len(association),
+            round((metadata_finished - started) * 1000),
+            round(instance_seconds * 1000),
+            round(relation_seconds * 1000),
+            round((finished - metadata_finished - instance_seconds - relation_seconds) * 1000),
+            round((finished - started) * 1000),
+        )
+        return stream
 
     @staticmethod
     def topo_search(inst_id: int):
@@ -2751,18 +3053,90 @@ class InstanceManage(object):
 
     @classmethod
     def license_instance_count(cls) -> dict:
-        """许可用量：原生自动发现且属于收费模型目录的实例数。"""
-        from apps.cmdb.constants.license_catalog import CMDB_LICENSE_MODEL_IDS
+        """许可用量：原生自动发现且属于收费模型目录的实例数。
 
-        return cls.group_inst_count(
-            group_by_attr="model_id",
-            permissions_map={},
-            params=[
-                {"field": "auto_collect", "type": "bool", "value": True},
-                {"field": "model_id", "type": "str[]", "value": list(CMDB_LICENSE_MODEL_IDS)},
-            ],
-            creator="",
+        仅本方法做 host 与虚拟机的 IP 去重；group_inst_count / model_inst_count 保持原语义。
+        """
+        from apps.cmdb.constants.license_catalog import CMDB_LICENSE_MODEL_IDS, CMDB_LICENSE_OS_MODEL_ID, CMDB_LICENSE_VM_MODEL_IDS
+
+        other_model_ids = CMDB_LICENSE_MODEL_IDS - CMDB_LICENSE_VM_MODEL_IDS - {CMDB_LICENSE_OS_MODEL_ID}
+        counts = dict(
+            cls.group_inst_count(
+                group_by_attr="model_id",
+                permissions_map={},
+                params=[
+                    {"field": "auto_collect", "type": "bool", "value": True},
+                    {"field": "model_id", "type": "str[]", "value": list(other_model_ids)},
+                ],
+                creator="",
+            )
         )
+        counts.update(cls._license_os_vm_instance_count())
+        return counts
+
+    @staticmethod
+    def _iter_license_ips(raw):
+        """从 ip_addr 拆出非空 IP。支持逗号分隔字符串，以及已拆好的序列。"""
+        if raw is None:
+            return
+        if isinstance(raw, (list, tuple, set)):
+            parts = raw
+        else:
+            text = str(raw).strip()
+            if not text:
+                return
+            parts = text.split(",")
+        for part in parts:
+            ip = str(part).strip()
+            if ip:
+                yield ip
+
+    @classmethod
+    def _count_license_os_vm_instances(cls, inst_list) -> dict:
+        """host 全计；虚拟机 IP 与 host 有交集则不计。不按云区域拆 IP。"""
+        from apps.cmdb.constants.license_catalog import CMDB_LICENSE_OS_MODEL_ID, CMDB_LICENSE_VM_MODEL_IDS
+
+        host_ips = set()
+        host_count = 0
+        vms = []
+        for inst in inst_list or []:
+            model_id = inst.get("model_id")
+            if model_id == CMDB_LICENSE_OS_MODEL_ID:
+                host_count += 1
+                host_ips.update(cls._iter_license_ips(inst.get("ip_addr")))
+            elif model_id in CMDB_LICENSE_VM_MODEL_IDS:
+                vms.append(inst)
+
+        counts = {}
+        if host_count:
+            counts[CMDB_LICENSE_OS_MODEL_ID] = host_count
+
+        for inst in vms:
+            ips = list(cls._iter_license_ips(inst.get("ip_addr")))
+            if ips and any(ip in host_ips for ip in ips):
+                continue
+            model_id = inst.get("model_id")
+            counts[model_id] = counts.get(model_id, 0) + 1
+        return counts
+
+    @classmethod
+    def _query_license_os_vm_instances(cls) -> list:
+        from apps.cmdb.constants.license_catalog import CMDB_LICENSE_OS_MODEL_ID, CMDB_LICENSE_VM_MODEL_IDS
+
+        model_ids = [CMDB_LICENSE_OS_MODEL_ID, *sorted(CMDB_LICENSE_VM_MODEL_IDS)]
+        with GraphClient() as ag:
+            inst_list, _ = ag.query_entity(
+                INSTANCE,
+                [
+                    {"field": "auto_collect", "type": "bool", "value": True},
+                    {"field": "model_id", "type": "str[]", "value": model_ids},
+                ],
+            )
+        return inst_list or []
+
+    @classmethod
+    def _license_os_vm_instance_count(cls) -> dict:
+        return cls._count_license_os_vm_instances(cls._query_license_os_vm_instances())
 
     @classmethod
     def _build_permission_params(cls, permission_map: dict, creator: str = ""):
@@ -2843,17 +3217,16 @@ class InstanceManage(object):
         """
         logger.info(f"[InstanceManage.fulltext_search] 搜索关键词: {search}, 区分大小写: {case_sensitive}")
 
-        # 构建权限参数
-        permission_params, _ = cls._build_permission_params(permission_map, creator)
+        permission_params, permission_params_dict = cls._build_permission_params(permission_map, creator)
 
         with GraphClient() as ag:
-            # 调用 full_text，保留全文搜索逻辑
             data = ag.full_text(
                 search=search,
                 permission_params=permission_params,
-                inst_name_params="",  # 实例名称权限已包含在 permission_params 中
-                created="",  # 创建人权限已包含在 permission_params 中
+                inst_name_params="",
+                created="",
                 case_sensitive=case_sensitive,
+                permission_params_dict=permission_params_dict,
             )
 
         logger.info(f"[InstanceManage.fulltext_search] 返回 {len(data)} 条结果")

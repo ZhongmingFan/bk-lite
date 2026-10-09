@@ -9,7 +9,7 @@ import { PlusOutlined } from '@ant-design/icons';
 import useApiClient from '@/utils/request';
 import usePatchManagerApi from '@/app/patch-manager/api';
 import type { Patch } from '@/app/patch-manager/types';
-import DualSelector from '@/app/patch-manager/components/dual-selector';
+import DualSelector from '@/components/dual-selector';
 import SeverityTag from '@/app/patch-manager/components/severity-tag';
 import PatchSourceDisplay from '@/app/patch-manager/components/patch-source-display';
 import CustomTable from '@/components/custom-table';
@@ -17,7 +17,8 @@ import OperateDrawer from '@/components/operate-drawer';
 import PatchDeletePopconfirm from '@/app/patch-manager/components/delete-popconfirm';
 import BaselineComplianceDetail from '@/app/patch-manager/components/baseline-compliance-detail';
 import FilterToolbar from '@/components/filter-toolbar';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import { useLocalizedTime } from '@/hooks/useLocalizedTime';
 import { useTranslation } from '@/utils/i18n';
 import { createListRequestCoordinator } from '@/app/patch-manager/utils/list-request-coordinator';
@@ -32,7 +33,7 @@ import {
 
 export default function BaselineManagementPage() {
   const { t } = useTranslation();
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const searchParams = useSearchParams();
   const { convertToLocalizedTime } = useLocalizedTime();
   const api = usePatchManagerApi();
@@ -605,7 +606,6 @@ export default function BaselineManagementPage() {
                     loading={saving}
                     onClick={async () => {
                       const values = await form.validateFields();
-                      const payload = { name: values.name, os_type: draftOs === 'win' ? 'windows' : 'linux', description: values.description || '' };
                       const currentPatchIds = requirements.map((r) => r.patch);
                       const originalPatchIds = new Set(originalRequirements.map((r) => r.patch));
                       const toAdd = currentPatchIds.filter((id) => !originalPatchIds.has(id));
@@ -618,16 +618,13 @@ export default function BaselineManagementPage() {
                       ) return;
                       setSaving(true);
                       try {
-                        let baseline = editing;
-                        if (editing) {
-                          await api.updateBaseline(editing.id, payload);
-                        } else {
-                          baseline = await api.createBaseline(payload);
-                          setEditing(baseline);
-                        }
-                        const baselineId = baseline?.id || editing?.id;
-                        if (toAdd.length) await api.addBaselineRequirements(baselineId, { patch_ids: toAdd });
-                        if (toRemoveIds.length) await api.removeBaselineRequirements(baselineId, toRemoveIds);
+                        await api.saveBaseline(editing?.id, {
+                          name: values.name,
+                          ...(editing ? {} : { os_type: draftOs === 'win' ? 'windows' : 'linux' }),
+                          description: values.description || '',
+                          patch_ids: currentPatchIds,
+                          ...(editing ? { expected_updated_at: editing.updated_at } : {}),
+                        });
                         setOriginalRequirements(requirements);
                         message.success(t('patchManager.baseline.saved'));
                         setEditOpen(false);
@@ -746,6 +743,10 @@ export default function BaselineManagementPage() {
           renderSelectedLabel={(r) => r.name}
           leftTitle={<Input.Search placeholder={t('patchManager.baseline.targetSearch')} value={hostSearch} onSearch={(v) => { setBindHostPagination((p) => ({ ...p, current: 1 })); loadBindHosts(1, bindHostPagination.pageSize, v); }} onChange={(e) => setHostSearch(e.target.value)} allowClear className="mb-3 w-60" />}
           rightTitle={t('patchManager.baseline.selectedTargets', undefined, { count: selectedHosts.length })}
+          clearAllText={t('patchManager.common.clearAll')}
+          emptySelectionText={t('patchManager.common.noSelection')}
+          selectedPreviewLabel={t('patchManager.common.selectedPreview')}
+          getRemoveLabel={(record) => t('patchManager.common.remove', undefined, { name: record.name })}
           height="calc(100vh - 200px)"
         />
       </OperateDrawer>
@@ -846,6 +847,11 @@ export default function BaselineManagementPage() {
           getCheckboxProps={(record) => ({ disabled: !record.permission?.includes('Operate') })}
           selectedRecordsData={selectedPatchRecords}
           renderSelectedLabel={(r) => r.windows_detail?.kb_number || r.linux_detail?.pkg_name || r.title}
+          rightTitle={t('patchManager.common.selectedItems', undefined, { count: pickerSelected.length })}
+          clearAllText={t('patchManager.common.clearAll')}
+          emptySelectionText={t('patchManager.common.noSelection')}
+          selectedPreviewLabel={t('patchManager.common.selectedPreview')}
+          getRemoveLabel={(record) => t('patchManager.common.remove', undefined, { name: record.windows_detail?.kb_number || record.linux_detail?.pkg_name || record.title })}
           leftTitle={
             <Input.Search
               placeholder={draftOs === 'win' ? t('patchManager.baseline.searchKb') : t('patchManager.baseline.searchPackage')}

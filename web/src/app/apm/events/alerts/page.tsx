@@ -9,9 +9,9 @@ import {
 import {
   Avatar,
   Button,
+  Checkbox,
   Input,
   message,
-  Popconfirm,
   Space,
   Tabs,
   Tag,
@@ -19,6 +19,12 @@ import {
   type TableColumnsType,
 } from 'antd';
 import useApmApi from '@/app/apm/api';
+import {
+  canRetryAlertEventDelivery,
+  commitAlertEventEvidenceSettled,
+  commitAlertEventEvidenceSuccess,
+} from '@/app/apm/utils/alertEventRequest';
+import { createLatestRequestGuard } from '@/context/latestRequestGuard';
 import ApmDataTable, { APM_TABLE_COLUMN_WIDTHS } from '@/app/apm/components/apm-data-table';
 import ApmRouteShell, { ApmSurface } from '@/app/apm/components/apm-route-shell';
 import CatalogState, { catalogErrorKind, type CatalogStateKind } from '@/app/apm/components/catalog-state';
@@ -37,6 +43,8 @@ import type {
   ApmPolicySeverity,
 } from '@/app/apm/types';
 import AlertDetailDrawer from '@/app/apm/events/alerts/alert-detail-drawer';
+import AlertHandlerActions from '@/app/apm/events/alerts/alert-handler-actions';
+import { formatAlertHandlers, isHandlerLifecycleEvent } from '@/app/apm/events/alerts/alertHandlerUtils';
 import { useTranslation } from '@/utils/i18n';
 import styles from '@/app/apm/events/event-workspace.module.scss';
 
@@ -79,7 +87,6 @@ function resolveTimeParams(view: AlertView, historyTimeRange: [number, number] |
 export default function ApmAlertsPage() {
   const { t } = useTranslation();
   const {
-    closeAlert,
     getAlertDistribution,
     getAlerts,
     getAlertSnapshots,
@@ -99,6 +106,7 @@ export default function ApmAlertsPage() {
   const [historyTimeRange, setHistoryTimeRange] = useState<[number, number] | null>(null);
   const [keyword, setKeyword] = useState('');
   const [submittedKeyword, setSubmittedKeyword] = useState('');
+  const [myAlert, setMyAlert] = useState(false);
   const [selected, setSelected] = useState<ApmAlert | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<ApmAlertEvent | null>(null);
   const [eventEvidence, setEventEvidence] = useState<ApmEventSnapshot | null>(null);
@@ -108,8 +116,13 @@ export default function ApmAlertsPage() {
   const [deliveries, setDeliveries] = useState<ApmNotificationDelivery[]>([]);
   const [retryingDeliveryId, setRetryingDeliveryId] = useState<string | null>(null);
   const [eventEvidenceLoading, setEventEvidenceLoading] = useState(false);
+  const [eventEvidenceError, setEventEvidenceError] = useState<CatalogStateKind | null>(null);
+  const [deliveriesLoading, setDeliveriesLoading] = useState(false);
+  const [deliveriesError, setDeliveriesError] = useState<CatalogStateKind | null>(null);
   const loadSequence = useRef(0);
   const snapshotLoadSequence = useRef(0);
+  const [eventRequestGuard] = useState(createLatestRequestGuard);
+  const [deliveryRequestGuard] = useState(createLatestRequestGuard);
 
   const load = useCallback(() => {
     if (authLoading) return;
@@ -118,13 +131,22 @@ export default function ApmAlertsPage() {
     setIsRefreshing(true);
     setState((current) => current === 'ready' ? current : 'loading');
     const timeParams = resolveTimeParams(activeTab, historyTimeRange);
+    const myAlertQuery = myAlert ? { my_alert: 1 } : {};
     const query: ApmAlertQuery = {
       ...timeParams,
       status_group: activeTab,
       limit: ALERT_LIST_LIMIT,
       keyword: submittedKeyword,
+      ...myAlertQuery,
     };
-    Promise.all([getAlerts(query), getAlertDistribution({ ...timeParams, status_group: activeTab })])
+    Promise.all([
+      getAlerts(query),
+      getAlertDistribution({
+        ...timeParams,
+        status_group: activeTab,
+        ...myAlertQuery,
+      }),
+    ])
       .then(([items, buckets]) => {
         if (sequence !== loadSequence.current) return;
         setAllAlerts(items);
@@ -137,7 +159,7 @@ export default function ApmAlertsPage() {
       .finally(() => {
         if (sequence === loadSequence.current) setIsRefreshing(false);
       });
-  }, [activeTab, authLoading, getAlertDistribution, getAlerts, historyTimeRange, submittedKeyword]);
+  }, [activeTab, authLoading, getAlertDistribution, getAlerts, historyTimeRange, myAlert, submittedKeyword]);
 
   useEffect(() => load(), [load]);
 
@@ -159,27 +181,110 @@ export default function ApmAlertsPage() {
     [distribution],
   );
 
+  const loadEventEvidence = useCallback(
+    (alert: ApmAlert, event: ApmAlertEvent, requestId: number) => {
+      getEventEvidence(alert.id, event.event_id)
+        .then((snapshots) => {
+          commitAlertEventEvidenceSuccess(
+            eventRequestGuard,
+            requestId,
+            { alertId: alert.id, eventId: event.event_id },
+            snapshots,
+            [],
+            (evidence) => {
+              setEventEvidence(evidence);
+              setEventEvidenceError(null);
+            },
+          );
+        })
+        .catch((error) => {
+          commitAlertEventEvidenceSettled(eventRequestGuard, requestId, () => {
+            setEventEvidenceError(catalogErrorKind(error));
+          });
+        })
+        .finally(() => {
+          commitAlertEventEvidenceSettled(eventRequestGuard, requestId, () => {
+            setEventEvidenceLoading(false);
+          });
+        });
+    },
+    [eventRequestGuard, getEventEvidence],
+  );
+
+  const loadEventDeliveries = useCallback(
+    (alert: ApmAlert, event: ApmAlertEvent, requestId: number) => {
+      getNotificationDeliveries({ event_id: event.event_id })
+        .then((deliveryItems) => {
+          commitAlertEventEvidenceSuccess(
+            deliveryRequestGuard,
+            requestId,
+            { alertId: alert.id, eventId: event.event_id },
+            [],
+            deliveryItems,
+            (_evidence, items) => {
+              setDeliveries(items);
+              setDeliveriesError(null);
+            },
+          );
+        })
+        .catch((error) => {
+          commitAlertEventEvidenceSettled(deliveryRequestGuard, requestId, () => {
+            setDeliveriesError(catalogErrorKind(error));
+          });
+        })
+        .finally(() => {
+          commitAlertEventEvidenceSettled(deliveryRequestGuard, requestId, () => {
+            setDeliveriesLoading(false);
+          });
+        });
+    },
+    [deliveryRequestGuard, getNotificationDeliveries],
+  );
+
   const chooseEvent = useCallback(
     (alert: ApmAlert, event: ApmAlertEvent) => {
+      const evidenceRequestId = eventRequestGuard.begin();
+      const deliveryRequestId = deliveryRequestGuard.begin();
       setSelectedEvent(event);
       setEventEvidence(null);
       setDeliveries([]);
+      setEventEvidenceError(null);
+      setDeliveriesError(null);
+      if (isHandlerLifecycleEvent(event.action)) {
+        setEventEvidenceLoading(false);
+        setDeliveriesLoading(false);
+        return;
+      }
       setEventEvidenceLoading(true);
-      Promise.all([
-        getEventEvidence(alert.id, event.event_id),
-        getNotificationDeliveries({ event_id: event.event_id }),
-      ])
-        .then(([snapshots, deliveryItems]) => {
-          setEventEvidence(snapshots[0] ?? null);
-          setDeliveries(deliveryItems);
-        })
-        .finally(() => setEventEvidenceLoading(false));
+      setDeliveriesLoading(true);
+      loadEventEvidence(alert, event, evidenceRequestId);
+      loadEventDeliveries(alert, event, deliveryRequestId);
     },
-    [getEventEvidence, getNotificationDeliveries],
+    [deliveryRequestGuard, eventRequestGuard, loadEventDeliveries, loadEventEvidence],
   );
+
+  const retryEventEvidence = useCallback(() => {
+    if (!selected || !selectedEvent) return;
+    if (isHandlerLifecycleEvent(selectedEvent.action)) return;
+    const requestId = eventRequestGuard.begin();
+    setEventEvidenceLoading(true);
+    setEventEvidenceError(null);
+    loadEventEvidence(selected, selectedEvent, requestId);
+  }, [eventRequestGuard, loadEventEvidence, selected, selectedEvent]);
+
+  const retryEventDeliveries = useCallback(() => {
+    if (!selected || !selectedEvent) return;
+    if (isHandlerLifecycleEvent(selectedEvent.action)) return;
+    const requestId = deliveryRequestGuard.begin();
+    setDeliveriesLoading(true);
+    setDeliveriesError(null);
+    loadEventDeliveries(selected, selectedEvent, requestId);
+  }, [deliveryRequestGuard, loadEventDeliveries, selected, selectedEvent]);
 
   const resetDrawerState = useCallback(() => {
     snapshotLoadSequence.current += 1;
+    eventRequestGuard.invalidate();
+    deliveryRequestGuard.invalidate();
     setSelected(null);
     setSelectedEvent(null);
     setEventEvidence(null);
@@ -187,13 +292,17 @@ export default function ApmAlertsPage() {
     setMetricSnapshotError(null);
     setMetricSnapshotLoading(false);
     setEventEvidenceLoading(false);
+    setEventEvidenceError(null);
+    setDeliveriesLoading(false);
+    setDeliveriesError(null);
     setDeliveries([]);
     setRetryingDeliveryId(null);
-  }, []);
+  }, [deliveryRequestGuard, eventRequestGuard]);
 
   const openDrawer = (alert: ApmAlert) => {
     const snapshotSequence = snapshotLoadSequence.current + 1;
     snapshotLoadSequence.current = snapshotSequence;
+    eventRequestGuard.invalidate();
     setSelected(alert);
     setMetricSnapshot(null);
     setMetricSnapshotError(null);
@@ -216,9 +325,13 @@ export default function ApmAlertsPage() {
   };
 
   const handleRetryDelivery = async (deliveryId: string) => {
-    setRetryingDeliveryId(deliveryId);
+    const delivery = deliveries.find((item) => item.id === deliveryId);
+    if (!canRetryAlertEventDelivery(delivery, selectedEvent)) {
+      return;
+    }
+    setRetryingDeliveryId(delivery.id);
     try {
-      await retryNotificationDelivery(deliveryId);
+      await retryNotificationDelivery(delivery.id);
       message.success(t('apm.alerts.retrySuccess', '已重新投递'));
       if (selected && selectedEvent) chooseEvent(selected, selectedEvent);
     } catch {
@@ -228,10 +341,8 @@ export default function ApmAlertsPage() {
     }
   };
 
-  const handleCloseAlert = async (alert: ApmAlert) => {
-    await closeAlert(alert.id);
-    message.success(t('apm.alerts.closed', '告警已关闭'));
-    if (selected?.id === alert.id) {
+  const handleHandlerActionSuccess = (alert?: ApmAlert) => {
+    if (alert && selected?.id === alert.id) {
       resetDrawerState();
     }
     load();
@@ -329,21 +440,24 @@ export default function ApmAlertsPage() {
       },
     },
     {
-      title: t('apm.alerts.operator', '处置人'),
-      dataIndex: 'operator',
+      title: t('apm.alerts.handlers', '处理人'),
+      dataIndex: 'handlers',
       width: APM_TABLE_COLUMN_WIDTHS.organization,
       ellipsis: true,
-      render: (value) => value ? (
-        <Space size={8} className={styles.alertOperatorCell}>
-          <Avatar size={24}>{String(value).slice(0, 1).toUpperCase()}</Avatar>
-          <Typography.Text ellipsis={{ tooltip: String(value) }}>{String(value)}</Typography.Text>
-        </Space>
-      ) : <Typography.Text type="secondary">--</Typography.Text>,
+      render: (_, item) => {
+        const text = formatAlertHandlers(item.handlers, item.handlers_display);
+        return text !== '--' ? (
+          <Space size={8} className={styles.alertOperatorCell}>
+            <Avatar size={24}>{text.slice(0, 1).toUpperCase()}</Avatar>
+            <Typography.Text ellipsis={{ tooltip: text }}>{text}</Typography.Text>
+          </Space>
+        ) : <Typography.Text type="secondary">--</Typography.Text>;
+      },
     },
     {
       title: t('apm.common.operation', '操作'),
       key: 'actions',
-      width: APM_TABLE_COLUMN_WIDTHS.actionPair,
+      width: APM_TABLE_COLUMN_WIDTHS.actionGroup,
       fixed: 'right',
       render: (_, item) => (
         <Space size={4} className={styles.alertOperationCell}>
@@ -357,24 +471,11 @@ export default function ApmAlertsPage() {
           >
             {t('apm.alerts.detailAction', '详情')}
           </Button>
-          <Popconfirm
-            title={t('apm.alerts.closeConfirm', '确定关闭此告警？')}
-            description={t('apm.alerts.closeConfirmDescription', '关闭后会追加人工关闭事件，确认继续？')}
-            okText={t('apm.alerts.confirmAction', '确定')}
-            cancelText={t('common.cancel', '取消')}
-            disabled={item.status !== 'active'}
-            onConfirm={() => handleCloseAlert(item)}
-          >
-            <Button
-              type="link"
-              danger
-              size="small"
-              disabled={item.status !== 'active'}
-              onClick={(event) => event.stopPropagation()}
-            >
-              {t('apm.common.close', '关闭')}
-            </Button>
-          </Popconfirm>
+          <AlertHandlerActions
+            alert={item}
+            closeText={t('apm.common.close', '关闭')}
+            onSuccess={() => handleHandlerActionSuccess(item)}
+          />
         </Space>
       ),
     },
@@ -383,7 +484,7 @@ export default function ApmAlertsPage() {
   return (
     <ApmRouteShell
       title={t('apm.alerts.title', '告警')}
-      description={t('apm.alerts.lifecycleDescription', 'Alert 聚合完整生命周期；Event 记录触发、升级、恢复与人工关闭。')}
+      description={t('apm.alerts.lifecycleDescription', 'Alert 聚合完整生命周期；Event 记录触发、升级、认领、分派、转派、恢复与人工关闭。')}
       dependency="control"
     >
       <ApmSurface>
@@ -429,6 +530,12 @@ export default function ApmAlertsPage() {
               <Button icon={<ReloadOutlined />} loading={isRefreshing} onClick={load}>
                 {t('apm.common.refresh', '刷新')}
               </Button>
+              <Checkbox
+                checked={myAlert}
+                onChange={(event) => setMyAlert(event.target.checked)}
+              >
+                {t('apm.alerts.myAlert', '我的告警')}
+              </Checkbox>
             </div>
           </section>
 
@@ -564,13 +671,18 @@ export default function ApmAlertsPage() {
         selectedEvent={selectedEvent}
         eventEvidence={eventEvidence}
         eventEvidenceLoading={eventEvidenceLoading}
+        eventEvidenceError={eventEvidenceError}
         deliveries={deliveries}
+        deliveriesLoading={deliveriesLoading}
+        deliveriesError={deliveriesError}
         retryingDeliveryId={retryingDeliveryId}
         onClose={resetDrawerState}
-        onCloseAlert={handleCloseAlert}
+        onHandlerActionSuccess={() => handleHandlerActionSuccess(selected ?? undefined)}
         onRetrySnapshot={openDrawer}
         onSelectEvent={chooseEvent}
         onRetryDelivery={handleRetryDelivery}
+        onRetryEventEvidence={retryEventEvidence}
+        onRetryDeliveries={retryEventDeliveries}
       />
     </ApmRouteShell>
   );

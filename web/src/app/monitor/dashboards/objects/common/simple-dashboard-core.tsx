@@ -9,7 +9,9 @@ import useViewApi from '@/app/monitor/api/view';
 import {
   normalizeDisplayText,
   resolveDashboardInstanceIdentity,
+  resolveDashboardInstanceIdValues,
   encodeInstanceIdValuesParam,
+  isInstanceOptionForIdentity,
   buildInstanceDisplayName,
   buildInstanceSearchTokens,
   formatEnumValue,
@@ -18,6 +20,8 @@ import {
   buildSearchParams,
   getLatestChartValue,
   mergeChartSeries,
+  resolveUnavailableSentinelLabel,
+  stripUnavailableSentinelPoints,
   buildPreviousPeriodTimeValues,
   freezeTimeValues,
   getPeriodCompare,
@@ -32,7 +36,6 @@ import {
   buildClusterFilterOptions,
   filterInstanceOptionsByCluster,
   selectFirstInstanceInCluster,
-  isInstanceOptionForIdentity,
   DashboardInstanceOption,
   fetchDashboardInstancePages
 } from '../../shared/utils';
@@ -49,6 +52,15 @@ import {
   setDashboardDisplayModeInParams
 } from '../../shared/utils/display-mode-route';
 import { CHART_COLORS } from '@/app/monitor/constants';
+import { resolveCapability, type ObjectType } from '../../shared/capability-matrix';
+import {
+  overlayGuideWithContract,
+  overlayMetricsWithContracts
+} from '../../shared/unavailable-contract';
+import {
+  GENERIC_DEVICE_TEMPERATURE_CHART_GUIDE,
+  GENERIC_DEVICE_TEMPERATURE_KPI_GUIDE
+} from './device-temperature-guide';
 
 export type SimpleMetricUnit = MetricUnit;
 
@@ -60,6 +72,15 @@ export interface SimpleMetricConfig {
   query: string;
   color: string;
   dimensions?: Dimension[];
+  /** Linux-only metric: hide on Windows Host dashboards instead of showing fake zeros. */
+  linuxOnly?: boolean;
+  /**
+   * 由 unavailable-contract 按 collect_type 注入；config 禁止手写魔法数。
+   * keep_for_display 时保留哨兵样本以便 KPI 显示 unavailableLabel，与「--」(无数据)区分。
+   */
+  unavailableSentinels?: number[];
+  /** 命中 unavailableSentinels 时的主值文案（契约 displayLabel）。 */
+  unavailableLabel?: string;
 }
 
 export interface MetricSeries extends SimpleMetricConfig {
@@ -104,6 +125,8 @@ export interface SummaryCardConfig {
    * 指标已成功返回且无序列时不展示该 KPI（可选采集项）；加载中/失败仍保留卡片避免闪烁。
    */
   hideWhenNoData?: boolean;
+  /** Hide this card on Windows Host instances (loadavg and similar). */
+  linuxOnly?: boolean;
 }
 
 export interface ChartConfig {
@@ -118,9 +141,11 @@ export interface ChartConfig {
     unit?: SimpleMetricUnit;
     /** 'limit' renders a dashed, dimmed ceiling line (e.g. mem_limit). Defaults to solid. */
     style?: 'solid' | 'limit';
+    linuxOnly?: boolean;
   }>;
   /** 保留指标维度序列（如 queue/vhost），不把多线求和成一条。 */
   keepDimensionSeries?: boolean;
+  linuxOnly?: boolean;
 }
 
 export interface DetailPanelConfig {
@@ -136,12 +161,19 @@ export interface DetailPanelConfig {
 export const isDetailTilesLayout = (panel: Pick<DetailPanelConfig, 'layout' | 'compact'>): boolean =>
   panel.layout === 'tiles' || Boolean(panel.compact);
 
+/** Hide Linux-only Host metrics/cards on Windows instances instead of showing fake zeros. */
+export const isVisibleOnOs = (
+  item: { linuxOnly?: boolean } | undefined,
+  operatingSystem?: string
+): boolean => !(item?.linuxOnly && operatingSystem === 'windows');
+
 export interface RingSegmentConfig {
   label: string;
   metric: string;
   color: string;
   unit?: SimpleMetricUnit;
   transform?: 'percentRemaining';
+  linuxOnly?: boolean;
 }
 
 export interface RingPanelConfig {
@@ -159,6 +191,7 @@ export interface RingPanelConfig {
   emptyWhenAllZero?: boolean;
   /** 空态说明；缺省「暂无数据」。 */
   emptyDescription?: string;
+  linuxOnly?: boolean;
 }
 
 export interface BarPanelConfig {
@@ -441,9 +474,10 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
           uniqueOptions.set(value, {
             label,
             value,
-            instanceIdValues: Array.isArray(item.instance_id_values) && item.instance_id_values.length ? item.instance_id_values : [value],
+            instanceIdValues: resolveDashboardInstanceIdValues(item),
             searchTokens: buildInstanceSearchTokens(item, label),
-            interval: Number(item.interval) || undefined
+            interval: Number(item.interval) || undefined,
+            operatingSystem: String(item.operating_system || '').trim().toLowerCase() || undefined
           });
         });
         setInstanceOptions(Array.from(uniqueOptions.values()));
@@ -522,20 +556,75 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
       options.unshift({
         value: selectedValue,
         label: normalizedInstanceName,
-        instanceIdValues: idValues.length ? idValues : [selectedValue],
+        instanceIdValues: idValues.length ? idValues : resolveDashboardInstanceIdValues({ instance_id: selectedValue }),
         searchTokens: [normalizedInstanceName],
-        interval: currentInstanceOption?.interval
+        interval: currentInstanceOption?.interval,
+        operatingSystem: currentInstanceOption?.operatingSystem
       });
     }
     return options;
-  }, [activeCluster, currentInstanceOption?.interval, hasReadableInstanceName, idValues, instanceId, instanceOptions, normalizedInstanceName]);
+  }, [activeCluster, currentInstanceOption?.interval, currentInstanceOption?.operatingSystem, hasReadableInstanceName, idValues, instanceId, instanceOptions, normalizedInstanceName]);
   const instanceSelectValue = currentInstanceOption?.value || (hasReadableInstanceName && instanceId ? String(instanceId) : undefined);
   const currentInstanceInterval = currentInstanceOption?.interval;
+  const currentOperatingSystem = currentInstanceOption?.operatingSystem;
+
+  // 品牌 collect_type 来自 instance_id 模板；契约按 collect_type 覆盖 query / 哨兵 / 指引。
+  const instanceIdText = useMemo(
+    () => (idValues?.length ? idValues.join('_') : '') || String(instanceId ?? ''),
+    [idValues, instanceId]
+  );
+  const capabilityObjectType = config.instanceType as ObjectType;
+  const resolvedCollectType = useMemo(() => {
+    if (!['switch', 'router', 'firewall', 'loadbalance'].includes(capabilityObjectType)) {
+      return undefined;
+    }
+    return resolveCapability(capabilityObjectType, instanceIdText).collectType;
+  }, [capabilityObjectType, instanceIdText]);
+  const activeMetrics = useMemo(
+    () =>
+      overlayMetricsWithContracts(config.metrics, resolvedCollectType).filter((metric) =>
+        isVisibleOnOs(metric, currentOperatingSystem)
+      ),
+    [config.metrics, currentOperatingSystem, resolvedCollectType]
+  );
+  const activeMetricByName = useMemo(() => {
+    const map: Record<string, SimpleMetricConfig> = {};
+    activeMetrics.forEach((metric) => {
+      map[metric.name] = metric;
+    });
+    return map;
+  }, [activeMetrics]);
 
   // Metrics that StatCards directly depend on — loaded first so KPI cards fill in quickly.
+  const visibleSummaryCards = useMemo(
+    () => config.summaryCards.filter((card) => isVisibleOnOs(card, currentOperatingSystem)),
+    [config.summaryCards, currentOperatingSystem]
+  );
+  const visibleCharts = useMemo(
+    () =>
+      config.charts
+        .filter((chart) => isVisibleOnOs(chart, currentOperatingSystem))
+        .map((chart) => ({
+          ...chart,
+          series: chart.series.filter((item) => isVisibleOnOs(item, currentOperatingSystem))
+        }))
+        .filter((chart) => chart.series.length > 0),
+    [config.charts, currentOperatingSystem]
+  );
+  const visibleRingPanels = useMemo(
+    () =>
+      (config.ringPanels || [])
+        .filter((panel) => isVisibleOnOs(panel, currentOperatingSystem))
+        .map((panel) => ({
+          ...panel,
+          segments: panel.segments.filter((item) => isVisibleOnOs(item, currentOperatingSystem))
+        }))
+        .filter((panel) => panel.segments.length > 0),
+    [config.ringPanels, currentOperatingSystem]
+  );
   const summaryMetricNames = useMemo(
-    () => new Set(config.summaryCards.map((c) => c.metric)),
-    [config.summaryCards]
+    () => new Set(visibleSummaryCards.map((c) => c.metric)),
+    [visibleSummaryCards]
   );
 
   const loadSingleMetric = useCallback(
@@ -577,11 +666,11 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
         const frozenRange = resolveCollectionStatusRange(frozenTimeValues);
         if (frozenRange) setQueryTimeRange(frozenRange);
         const previousTimeValues = buildPreviousPeriodTimeValues(frozenTimeValues);
-        const compareMetrics = config.metrics.filter((m) => config.summaryCards.some((c) => c.compare && c.metric === m.name));
+        const compareMetrics = activeMetrics.filter((m) => visibleSummaryCards.some((c) => c.compare && c.metric === m.name));
 
         // ── Group 1: summary metrics (StatCard values) ──
-        const summaryMetrics = config.metrics.filter((m) => summaryMetricNames.has(m.name));
-        const trendMetrics = config.metrics.filter((m) => !summaryMetricNames.has(m.name));
+        const summaryMetrics = activeMetrics.filter((m) => summaryMetricNames.has(m.name));
+        const trendMetrics = activeMetrics.filter((m) => !summaryMetricNames.has(m.name));
 
         const summaryResultsPromise = runWithConcurrency(
           summaryMetrics,
@@ -677,7 +766,7 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
     } catch {
       if (loadSequence.isCurrent(loadSeq) && !silent) setLoading(false);
     }
-  }, [config, currentInstanceInterval, displayMode, getInstanceQuery, idValues, idValuesKey, instanceId, instanceIdKeys, loadSequence, loadSingleMetric, resolvedInstanceName, summaryMetricNames, timeValues]);
+  }, [activeMetrics, config, currentInstanceInterval, displayMode, getInstanceQuery, idValues, idValuesKey, instanceId, instanceIdKeys, loadSequence, loadSingleMetric, resolvedInstanceName, summaryMetricNames, timeValues, visibleSummaryCards]);
 
   useEffect(() => {
     if (displayMode === 'dashboard') {
@@ -746,7 +835,7 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
   }, [getTransformedValue, hasMetricData, metricMap]);
 
   const summaryCards = useMemo<PreparedSummaryCard[]>(() => (
-    config.summaryCards
+    visibleSummaryCards
       .filter((card) => {
         if (!card.hideWhenNoData) return true;
         const target = metricMap[card.metric];
@@ -754,25 +843,43 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
         return !(target?.loadState === 'success' && (!Array.isArray(target.viewData) || target.viewData.length === 0));
       })
       .map((card) => {
+        const guideFallback =
+          card.metric === 'device_temperature_celsius' ? GENERIC_DEVICE_TEMPERATURE_KPI_GUIDE : undefined;
+        const overlaidGuide = overlayGuideWithContract(
+          card.guide,
+          card.metric,
+          resolvedCollectType,
+          guideFallback
+        );
+        const cardWithGuide = overlaidGuide ? { ...card, guide: overlaidGuide } : card;
         const hasData = hasMetricData(card.metric);
-        const healthResult = card.formatter === 'enumHealth' && !card.enumMap && hasData
-          ? formatClusterHealth(getLatest(card.metric))
+        const metricConfig = metricMap[card.metric] || activeMetricByName[card.metric] || config.metrics.find((metric) => metric.name === card.metric);
+        const latest = hasData ? getLatest(card.metric) : NaN;
+        const unavailableLabel = resolveUnavailableSentinelLabel(
+          latest,
+          metricConfig?.unavailableSentinels,
+          metricConfig?.unavailableLabel
+        );
+        const healthResult = card.formatter === 'enumHealth' && !card.enumMap && hasData && !unavailableLabel
+          ? formatClusterHealth(latest)
           : null;
-        const enumResult = card.enumMap && hasData
-          ? formatMappedEnum(getLatest(card.metric), card.enumMap)
+        const enumResult = card.enumMap && hasData && !unavailableLabel
+          ? formatMappedEnum(latest, card.enumMap)
           : null;
 
-        const mainValue = !hasData
-          ? { value: card.emptyValue || '--', unit: '' }
-          : card.formatter === 'duration'
-            ? { value: formatDuration(getLatest(card.metric)), unit: '' }
-            : card.formatter === 'samplingRate'
-              ? formatSamplingRate(getLatest(card.metric))
-              : healthResult
-                ? { value: healthResult.value, unit: healthResult.unit }
-                : enumResult
-                  ? { value: enumResult.value, unit: enumResult.unit }
-                  : formatMetricValue(getLatest(card.metric), card.unit || metricMap[card.metric]?.unit || 'none');
+        const mainValue = unavailableLabel
+          ? { value: unavailableLabel, unit: '' }
+          : !hasData
+            ? { value: card.emptyValue || '--', unit: '' }
+            : card.formatter === 'duration'
+              ? { value: formatDuration(latest), unit: '' }
+              : card.formatter === 'samplingRate'
+                ? formatSamplingRate(latest)
+                : healthResult
+                  ? { value: healthResult.value, unit: healthResult.unit }
+                  : enumResult
+                    ? { value: enumResult.value, unit: enumResult.unit }
+                    : formatMetricValue(latest, card.unit || metricMap[card.metric]?.unit || 'none');
 
         const uptimeState = card.isUptimeCard
           ? !hasData
@@ -784,22 +891,30 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
 
         // 枚举卡失配时趋势线无语义（连续浮点冒充 0/1），清空避免误导。
         const enumUnresolved = Boolean(card.enumMap && hasData && enumResult?.value === '未知');
+        const hideNumericExtras = Boolean(unavailableLabel) || enumUnresolved;
 
         return {
-          card: enumUnresolved ? { ...card, hideTrend: true } : card,
+          card: hideNumericExtras ? { ...cardWithGuide, hideTrend: true } : cardWithGuide,
           mainValue,
-          valueColor: enumResult?.color || healthResult?.color || (!hasData && card.emptyValue ? '#8c95a8' : undefined),
+          valueColor: unavailableLabel
+            ? '#8c95a8'
+            : enumResult?.color || healthResult?.color || (!hasData && card.emptyValue ? '#8c95a8' : undefined),
           // 无数据时 getLatest 会退化成 0，若仍算环比会误显示「较上一周期 0.0%」。
-          compare: card.compare && hasData
-            ? getPeriodCompare(getLatest(card.metric), getLatestChartValue(previousMetricMap[card.metric]?.viewData || []))
+          compare: card.compare && hasData && !unavailableLabel
+            ? getPeriodCompare(latest, getLatestChartValue(previousMetricMap[card.metric]?.viewData || []))
             : null,
           footerItems: (card.footer || []).map((field) => ({ label: field.label, value: formatField(field) })),
-          trendData: enumUnresolved ? [] : (metricMap[card.metric]?.viewData || []),
+          trendData: hideNumericExtras
+            ? []
+            : stripUnavailableSentinelPoints(
+              metricMap[card.metric]?.viewData || [],
+              metricConfig?.unavailableSentinels
+            ),
           noDataType: getNoDataType(card.metric),
           uptimeState
         };
       })
-  ), [config.summaryCards, formatField, getLatest, getNoDataType, hasMetricData, metricMap, previousMetricMap]);
+  ), [activeMetricByName, visibleSummaryCards, config.metrics, formatField, getLatest, getNoDataType, hasMetricData, metricMap, previousMetricMap, resolvedCollectType]);
 
   const formatDimensionLegendLabel = (
     details: Array<{ name: string; label: string; value: string }> | undefined
@@ -818,9 +933,24 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
       : [];
 
   const chartPanels = useMemo<PreparedChartPanel[]>(() => (
-    config.charts.map((chart) => {
+    visibleCharts.map((chart) => {
+      const guideFallback =
+        chart.metric === 'device_temperature_celsius' ? GENERIC_DEVICE_TEMPERATURE_CHART_GUIDE : undefined;
+      const overlaidGuide = overlayGuideWithContract(
+        chart.guide,
+        chart.metric,
+        resolvedCollectType,
+        guideFallback
+      );
+      const chartWithGuide = overlaidGuide ? { ...chart, guide: overlaidGuide } : chart;
+      const metricSentinels = (metricName: string) =>
+        (metricMap[metricName] || activeMetricByName[metricName] || config.metrics.find((metric) => metric.name === metricName))
+          ?.unavailableSentinels;
       if (chart.keepDimensionSeries) {
-        const viewData = metricMap[chart.metric]?.viewData || [];
+        const viewData = stripUnavailableSentinelPoints(
+          metricMap[chart.metric]?.viewData || [],
+          metricSentinels(chart.metric)
+        );
         const latest = viewData[viewData.length - 1];
         const valueKeys = valueKeysFromChartData(latest);
         const legends = valueKeys.length
@@ -835,9 +965,9 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
             primary: index === 0
           }));
         return {
-          chart,
+          chart: chartWithGuide,
           data: viewData,
-          metric: buildMetricItem(metricMap[chart.metric] || config.metrics.find((metric) => metric.name === chart.metric) || config.metrics[0]),
+          metric: buildMetricItem(metricMap[chart.metric] || activeMetricByName[chart.metric] || config.metrics.find((metric) => metric.name === chart.metric) || config.metrics[0]),
           unit: metricMap[chart.metric]?.unit || config.metrics.find((metric) => metric.name === chart.metric)?.unit || 'none',
           legends,
           seriesStyles: legends.map((item, index) => ({
@@ -850,9 +980,16 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
         };
       }
       return {
-        chart,
-        data: mergeChartSeries(chart.series.map((item) => ({ key: item.metric, label: item.label, data: metricMap[item.metric]?.viewData || [] }))),
-        metric: buildMetricItem(metricMap[chart.metric] || config.metrics.find((metric) => metric.name === chart.metric) || config.metrics[0]),
+        chart: chartWithGuide,
+        data: mergeChartSeries(chart.series.map((item) => ({
+          key: item.metric,
+          label: item.label,
+          data: stripUnavailableSentinelPoints(
+            metricMap[item.metric]?.viewData || [],
+            metricSentinels(item.metric)
+          )
+        }))),
+        metric: buildMetricItem(metricMap[chart.metric] || activeMetricByName[chart.metric] || config.metrics.find((metric) => metric.name === chart.metric) || config.metrics[0]),
         unit: metricMap[chart.metric]?.unit || config.metrics.find((metric) => metric.name === chart.metric)?.unit || 'none',
         legends: chart.series.map((item, index) => ({ label: item.label, color: item.color, primary: index === 0 })),
         seriesStyles: chart.series.map((item, index) => {
@@ -868,10 +1005,10 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
         })
       };
     })
-  ), [config.charts, config.metrics, metricMap]);
+  ), [activeMetricByName, visibleCharts, config.metrics, metricMap, resolvedCollectType]);
 
   const ringPanels = useMemo<PreparedRingPanel[]>(() => (
-    (config.ringPanels || []).map((panel) => {
+    visibleRingPanels.map((panel) => {
       const data = panel.segments.map((item) => ({
         name: item.label,
         value: getTransformedValue(item.metric, item.transform),
@@ -895,7 +1032,7 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
         emptyDescription: panel.emptyDescription
       };
     })
-  ), [config.ringPanels, formatTransformedValue, getLatest, getTransformedValue, hasMetricData]);
+  ), [visibleRingPanels, formatTransformedValue, getLatest, getTransformedValue, hasMetricData]);
 
   const barPanels = useMemo<PreparedBarPanel[]>(() => (
     (config.barPanels || []).map((panel) => {
@@ -1005,7 +1142,9 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
     collectionStatusMetric?.loadState,
     collectionStatusMetric?.viewData,
     activeTimeRange?.startMs ?? Date.now() - 15 * 60_000,
-    activeTimeRange?.endMs ?? Date.now()
+    activeTimeRange?.endMs ?? Date.now(),
+    undefined,
+    currentInstanceInterval ? currentInstanceInterval * 1000 : undefined
   );
   const collectionStatusTimelineHint = activeTimeRange
     ? formatCollectionStatusTimelineHint(activeTimeRange.startMs, activeTimeRange.endMs)
@@ -1037,7 +1176,11 @@ export function useSimpleDashboardData(config: SimpleDashboardConfig) {
     const params = new URLSearchParams(searchParams.toString());
     params.set('instance_id', value);
     params.set('instance_name', String(target?.label || normalizedInstanceName || resolvedInstanceName || ''));
-    params.set('instance_id_values', encodeInstanceIdValuesParam(target?.instanceIdValues || [value]));
+    params.set('instance_id_values', encodeInstanceIdValuesParam(
+      target?.instanceIdValues?.length
+        ? target.instanceIdValues
+        : resolveDashboardInstanceIdValues({ instance_id: value }),
+    ));
     router.push(`/monitor/view/dashboard/${config.routeKey}?${params.toString()}`);
   };
   const onClusterFilterChange = (cluster: string) => {

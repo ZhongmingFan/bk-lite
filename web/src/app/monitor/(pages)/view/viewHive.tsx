@@ -23,6 +23,7 @@ import {
   MetricItem
 } from '@/app/monitor/types';
 import TimeSelector from '@/components/time-selector';
+import CatalogScopeSegmented from '@/components/catalog-scope-segmented';
 import HexGridChart from '@/app/monitor/components/charts/hexgrid';
 import HiveModal from './hiveModal';
 import { EditOutlined } from '@ant-design/icons';
@@ -67,6 +68,7 @@ const ViewHive: React.FC<ViewListProps> = ({ objects, objectId }) => {
   const [frequence, setFrequence] = useState<number>(0);
   const [mertics, setMertics] = useState<MetricItem[]>([]);
   const [node, setNode] = useState<string | null>(null);
+  const [unassignedOnly, setUnassignedOnly] = useState(false);
   const [queryMetric, setQueryMetric] = useState<string | null>(null);
   const [hexColor, setHexColor] = useState<NodeThresholdColor[]>([]);
   const [nodeList, setNodeList] = useState<ListItem[]>([]);
@@ -125,7 +127,7 @@ const ViewHive: React.FC<ViewListProps> = ({ objects, objectId }) => {
     if (objectId && objects?.length && !isLoading) {
       onRefresh();
     }
-  }, [node]);
+  }, [node, unassignedOnly]);
 
   // 更新与销毁定时器
   useEffect(() => {
@@ -148,7 +150,8 @@ const ViewHive: React.FC<ViewListProps> = ({ objects, objectId }) => {
     objectId,
     node,
     pagination.current,
-    pagination.pageSize
+    pagination.pageSize,
+    unassignedOnly
   ]);
 
   // 加载更多节流
@@ -207,7 +210,8 @@ const ViewHive: React.FC<ViewListProps> = ({ objects, objectId }) => {
       vm_params: {
         instance_id: '',
         node: node || ''
-      }
+      },
+      ...(unassignedOnly ? { unassigned: true } : {})
     };
   };
 
@@ -280,6 +284,8 @@ const ViewHive: React.FC<ViewListProps> = ({ objects, objectId }) => {
           isStringArray(tagetMerticItem.unit || '');
         return {
           name: '',
+          aiName: item.instance_name,
+          aiValue: getEnumValueUnit(tagetMerticItem, cellValue),
           description: (
             <>
               <div>{item.instance_name}</div>
@@ -296,6 +302,7 @@ const ViewHive: React.FC<ViewListProps> = ({ objects, objectId }) => {
       }
       return {
         name: '',
+        aiName: item.instance_name,
         description: item.instance_name,
         fill: '#10e433'
       };
@@ -406,11 +413,11 @@ const ViewHive: React.FC<ViewListProps> = ({ objects, objectId }) => {
 
   return (
     <div className="w-full h-[calc(100vh-216px)]">
-      <div className="flex justify-between flex-wrap">
-        <div className="flex items-center mb-[20px]">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-y-3">
+        <div className="flex items-center gap-3">
           {isPod && (
             <>
-              <span className="text-[14px] mr-[10px]">
+              <span className="text-sm">
                 {t('monitor.views.filterOptions')}
               </span>
               <Select
@@ -430,9 +437,20 @@ const ViewHive: React.FC<ViewListProps> = ({ objects, objectId }) => {
             </>
           )}
         </div>
-        <div className="flex items-center mb-[20px]">
-          <div className="mr-[8px]">
-            <span className="text-[14px] mr-[10px]">
+        <div className="ml-auto flex items-center gap-2">
+          <CatalogScopeSegmented
+            unassignedOnly={unassignedOnly}
+            onChange={(checked) => {
+              setUnassignedOnly(checked);
+              setChartData([]);
+              setPagination((prev: Pagination) => ({
+                ...prev,
+                current: 1
+              }));
+            }}
+          />
+          <div className="flex items-center">
+            <span className="mr-2.5 text-sm">
               {t('monitor.views.displayIndicators')}
             </span>
             <Select
@@ -452,7 +470,7 @@ const ViewHive: React.FC<ViewListProps> = ({ objects, objectId }) => {
               ))}
             </Select>
             <EditOutlined
-              className="ml-[10px] cursor-pointer"
+              className="ml-2.5 cursor-pointer"
               onClick={openHiveModal}
             />
           </div>
@@ -466,6 +484,10 @@ const ViewHive: React.FC<ViewListProps> = ({ objects, objectId }) => {
       <div
         className="w-full h-full overflow-hidden overflow-y-auto"
         ref={hexGridRef}
+        data-ai-hive-total={pagination.total}
+        data-ai-hive-loaded={chartData.length}
+        data-ai-hive-metric={metricList.find((item) => item.name === queryMetric)?.display_name || queryMetric || ''}
+        data-ai-hive-node={nodeList.find((item) => item.id === node)?.name || node || ''}
         onScroll={handleScroll}
       >
         <Spin spinning={tableLoading} className="w-full h-full">

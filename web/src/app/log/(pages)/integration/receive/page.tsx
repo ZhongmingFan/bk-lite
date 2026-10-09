@@ -9,6 +9,7 @@ import {
   Space,
   Modal
 } from 'antd';
+import CatalogScopeSegmented from '@/components/catalog-scope-segmented';
 import useApiClient from '@/utils/request';
 import useLogApi from '@/app/log/api/integration';
 import { useTranslation } from '@/utils/i18n';
@@ -36,7 +37,10 @@ import type { TableProps, MenuProps } from 'antd';
 import TreeSelector from '@/app/log/components/tree-selector';
 import { useRouter, useSearchParams } from 'next/navigation';
 import LogExtractorDrawer from './logExtractorDrawer';
-import { consumeExtractorCreateSample } from './logExtractorLogic';
+import {
+  consumeExtractorCreateHandoff,
+  consumeExtractorCreateSample
+} from './logExtractorLogic';
 const { confirm } = Modal;
 
 type TableRowSelection<T extends object = object> =
@@ -55,8 +59,8 @@ const Asset = () => {
   const router = useRouter();
   const searchParams = useSearchParams();
   const commonContext = useCommon();
-  const authList = useRef(commonContext?.authOrganizations || []);
-  const organizationList: Organization[] = authList.current;
+  const organizationList: Organization[] =
+    commonContext?.authOrganizations || [];
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const configRef = useRef<ModalRef>(null);
   const k8sConfigRef = useRef<ModalRef>(null);
@@ -74,6 +78,7 @@ const Asset = () => {
   const [tableLoading, setTableLoading] = useState<boolean>(false);
   const [tableData, setTableData] = useState<TableDataItem[]>([]);
   const [searchText, setSearchText] = useState<string>('');
+  const [unassignedOnly, setUnassignedOnly] = useState(false);
   const [frequence, setFrequence] = useState<number>(0);
   const [confirmLoading, setConfirmLoading] = useState(false);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
@@ -92,6 +97,8 @@ const Asset = () => {
   const [extractorInitialSample, setExtractorInitialSample] = useState<
     Record<string, unknown> | null
   >(null);
+  const [extractorInitialSourceField, setExtractorInitialSourceField] =
+    useState<string | null>(null);
   const extractorQueryHandled = useRef<string | null>(null);
 
   const handleAssetMenuClick: MenuProps['onClick'] = (e) => {
@@ -121,7 +128,11 @@ const Asset = () => {
       render: (_, { organization }) => (
         <EllipsisWithTooltip
           className="w-full overflow-hidden text-ellipsis whitespace-nowrap"
-          text={showGroupName(organization, organizationList)}
+          text={
+            organization?.length
+              ? showGroupName(organization, organizationList)
+              : t('common.unassigned')
+          }
         />
       )
     },
@@ -222,7 +233,7 @@ const Asset = () => {
     if (!isLoading) {
       getAssetInsts();
     }
-  }, [pagination.current, pagination.pageSize, objectId]);
+  }, [pagination.current, pagination.pageSize, objectId, unassignedOnly]);
 
   useEffect(() => {
     if (!isLoading) {
@@ -253,7 +264,8 @@ const Asset = () => {
     pagination.current,
     pagination.pageSize,
     searchText,
-    objectId
+    objectId,
+    unassignedOnly
   ]);
 
   useEffect(() => {
@@ -288,13 +300,21 @@ const Asset = () => {
           canOperate
         });
         setExtractorAutoCreate(shouldCreate && canOperate);
+        const handoff = shouldCreate
+          ? consumeExtractorCreateHandoff(searchParams.get('handoff'))
+          : null;
         setExtractorInitialSample(
-          shouldCreate
-            ? consumeExtractorCreateSample({
+          handoff?.event ||
+            (shouldCreate
+              ? consumeExtractorCreateSample({
                 kind: 'instance',
                 id: extractorId
               })
-            : null
+              : null)
+        );
+        setExtractorInitialSourceField(
+          handoff?.source_field ||
+            (shouldCreate ? searchParams.get('source_field') : null)
         );
       } catch {
         if (!cancelled) {
@@ -484,7 +504,8 @@ const Asset = () => {
         page: pagination.current,
         page_size: pagination.pageSize,
         collect_type_id: objectId === 'all' ? '' : String(objectId),
-        name: type === 'clear' ? '' : searchText
+        name: type === 'clear' ? '' : searchText,
+        ...(unassignedOnly ? { unassigned: true } : {})
       };
       const data = await getInstanceList(params, {
         signal: abortController.signal
@@ -548,7 +569,7 @@ const Asset = () => {
   };
 
   return (
-    <div className="flex overflow-hidden">
+    <div className="flex h-full min-h-0 w-full min-w-0 overflow-hidden">
       <TreeSelector
         data={treeData}
         loading={treeLoading}
@@ -557,18 +578,29 @@ const Asset = () => {
         onNodeSelect={handleObjectChange}
         style={{ width: 236, height: 'calc(100vh - 146px)' }}
       />
-      <div className="w-[calc(100vw-236px)] min-w-[1040px] bg-[var(--color-bg-1)] p-[20px]">
-        <div className="flex justify-between items-center mb-[10px]">
-          <Input
-            allowClear
-            className="w-[320px]"
-            placeholder={t('common.searchPlaceHolder')}
-            value={searchText}
-            onChange={(e) => setSearchText(e.target.value)}
-            onPressEnter={() => getAssetInsts()}
-            onClear={clearText}
-          ></Input>
-          <div className="flex">
+      <div className="min-w-0 flex-1 bg-[var(--color-bg-1)] p-[20px]">
+        <div className="mb-[10px] flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Input
+              allowClear
+              className="w-[320px]"
+              placeholder={t('common.searchPlaceHolder')}
+              value={searchText}
+              onChange={(e) => setSearchText(e.target.value)}
+              onPressEnter={() => getAssetInsts()}
+              onClear={clearText}
+            />
+          </div>
+          <div className="flex items-center">
+            <CatalogScopeSegmented
+              unassignedOnly={unassignedOnly}
+              onChange={(checked) => {
+                setUnassignedOnly(checked);
+                setSelectedRowKeys([]);
+                setPagination((prev) => ({ ...prev, current: 1 }));
+              }}
+              className="mr-[8px]"
+            />
             <Dropdown
               className="mr-[8px]"
               overlayClassName="customMenu"
@@ -591,7 +623,7 @@ const Asset = () => {
         </div>
         <CustomTable
           className="w-full"
-          scroll={{ y: 'calc(100vh - 340px)', x: 'calc(100vw- 280x)' }}
+          scroll={{ y: 'calc(100vh - 340px)', x: 'max-content' }}
           columns={columns}
           dataSource={tableData}
           pagination={pagination}
@@ -612,10 +644,12 @@ const Asset = () => {
           open={Boolean(extractorInstance)}
           autoCreate={extractorAutoCreate}
           initialSample={extractorInitialSample}
+          initialSourceField={extractorInitialSourceField}
           onClose={() => {
             setExtractorInstance(null);
             setExtractorAutoCreate(false);
             setExtractorInitialSample(null);
+            setExtractorInitialSourceField(null);
             extractorQueryHandled.current = null;
             if (searchParams.get('extractor')) {
               router.replace('/log/integration/receive');

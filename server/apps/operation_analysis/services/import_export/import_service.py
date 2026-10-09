@@ -43,6 +43,7 @@ from apps.operation_analysis.schemas.import_export_schema import (
 )
 from apps.operation_analysis.services.import_export.view_sets import rewrite_canvas_view_sets_refs_for_storage
 from apps.operation_analysis.services.string_param_multiple_migrate import migrate_filters_payload, migrate_param_items
+from apps.operation_analysis.services.user_messages import oa_message
 
 
 class ImportService:
@@ -78,6 +79,7 @@ class ImportService:
         groups: list[int] | None = None,
         existing_canvas_ids: dict[tuple[str, str], int] | None = None,
         preserve_existing_canvas_groups: bool = False,
+        datasource_groups: list[int] | None = None,
     ):
         """
         初始化导入服务
@@ -89,9 +91,10 @@ class ImportService:
             secret_supplements: 敏感字段补充，key为object_key，value为{field: value}
             created_by: 创建者
             updated_by: 更新者
-            groups: 导入对象所属的组织ID列表
+            groups: 导入画布所属的组织ID列表
             existing_canvas_ids: 由受信调用方按（对象类型，稳定键）解析的存量画布 ID
             preserve_existing_canvas_groups: 覆盖存量画布时保留其组织可见性配置
+            datasource_groups: 新建数据源的组织名单；None 时沿用 groups
         """
         self.doc = doc
         self.target_directory_id = target_directory_id
@@ -100,6 +103,7 @@ class ImportService:
         self.created_by = created_by
         self.updated_by = updated_by
         self.groups = groups or []
+        self.datasource_groups = self.groups if datasource_groups is None else list(datasource_groups)
         self.existing_canvas_ids = existing_canvas_ids or {}
         self.preserve_existing_canvas_groups = preserve_existing_canvas_groups
 
@@ -216,7 +220,7 @@ class ImportService:
             if candidate not in existing_names:
                 return candidate
 
-        raise ValueError(f"名称 {original_name} 已无可用的重命名空间")
+        raise ValueError(oa_message("messages.import_rename_exhausted", "名称 {name} 已无可用的重命名空间", name=original_name))
 
     def _record_result(
         self,
@@ -274,7 +278,7 @@ class ImportService:
                     ns_item.key,
                     ObjectType.NAMESPACE.value,
                     ImportStatus.SKIPPED.value,
-                    "跳过已存在的命名空间",
+                    oa_message("messages.import_namespace_skipped", "跳过已存在的命名空间"),
                     existing.id,
                 )
                 return existing.id
@@ -294,7 +298,7 @@ class ImportService:
                     ns_item.key,
                     ObjectType.NAMESPACE.value,
                     ImportStatus.OVERWRITTEN.value,
-                    "覆盖已存在的命名空间",
+                    oa_message("messages.import_namespace_overwritten", "覆盖已存在的命名空间"),
                     existing.id,
                 )
                 return existing.id
@@ -318,7 +322,7 @@ class ImportService:
                     ns_item.key,
                     ObjectType.NAMESPACE.value,
                     ImportStatus.SUCCESS.value,
-                    f"重命名为 {new_name}",
+                    oa_message("messages.import_renamed", "重命名为 {name}", name=new_name),
                     ns.id,
                 )
                 return ns.id
@@ -329,7 +333,7 @@ class ImportService:
                     ns_item.key,
                     ObjectType.NAMESPACE.value,
                     ImportStatus.FAILED.value,
-                    "新建命名空间缺少密码",
+                    oa_message("messages.import_namespace_password_missing", "新建命名空间缺少密码"),
                 )
                 return None
 
@@ -349,7 +353,7 @@ class ImportService:
                 ns_item.key,
                 ObjectType.NAMESPACE.value,
                 ImportStatus.SUCCESS.value,
-                "新建命名空间",
+                oa_message("messages.import_namespace_created", "新建命名空间"),
                 ns.id,
             )
             return ns.id
@@ -373,7 +377,7 @@ class ImportService:
                 ds_item.key,
                 ObjectType.DATASOURCE.value,
                 ImportStatus.FAILED.value,
-                LEGACY_RAW_MONITOR_QUERY_ERROR,
+                oa_message("messages.import_legacy_raw_monitor", LEGACY_RAW_MONITOR_QUERY_ERROR),
             )
             return None
 
@@ -389,7 +393,7 @@ class ImportService:
                     ds_item.key,
                     ObjectType.DATASOURCE.value,
                     ImportStatus.SKIPPED.value,
-                    "跳过已存在的数据源",
+                    oa_message("messages.import_datasource_skipped", "跳过已存在的数据源"),
                     existing.id,
                 )
                 return existing.id
@@ -401,7 +405,11 @@ class ImportService:
                         ds_item.key,
                         ObjectType.DATASOURCE.value,
                         ImportStatus.FAILED.value,
-                        f"数据源缺少敏感配置: {', '.join(missing_secrets)}",
+                        oa_message(
+                            "messages.import_datasource_secrets_missing",
+                            "数据源缺少敏感配置: {fields}",
+                            fields=", ".join(missing_secrets),
+                        ),
                     )
                     return None
                 previous_source_type = existing.source_type
@@ -431,7 +439,7 @@ class ImportService:
                     ds_item.key,
                     ObjectType.DATASOURCE.value,
                     ImportStatus.OVERWRITTEN.value,
-                    "覆盖已存在的数据源",
+                    oa_message("messages.import_datasource_overwritten", "覆盖已存在的数据源"),
                     existing.id,
                 )
                 return existing.id
@@ -443,7 +451,11 @@ class ImportService:
                         ds_item.key,
                         ObjectType.DATASOURCE.value,
                         ImportStatus.FAILED.value,
-                        f"数据源缺少敏感配置: {', '.join(missing_secrets)}",
+                        oa_message(
+                            "messages.import_datasource_secrets_missing",
+                            "数据源缺少敏感配置: {fields}",
+                            fields=", ".join(missing_secrets),
+                        ),
                     )
                     return None
                 new_name = self._generate_rename_name(ds_item.name, DataSourceAPIModel)
@@ -464,7 +476,7 @@ class ImportService:
                     field_schema=ds_item.field_schema,
                     created_by=self.created_by,
                     updated_by=self.updated_by,
-                    groups=self.groups,
+                    groups=self.datasource_groups,
                 )
                 ds.namespaces.set(namespace_ids)
                 ds.tag.set(tag_ids)
@@ -472,7 +484,7 @@ class ImportService:
                     ds_item.key,
                     ObjectType.DATASOURCE.value,
                     ImportStatus.SUCCESS.value,
-                    f"重命名为 {new_name}",
+                    oa_message("messages.import_renamed", "重命名为 {name}", name=new_name),
                     ds.id,
                 )
                 return ds.id
@@ -484,7 +496,11 @@ class ImportService:
                     ds_item.key,
                     ObjectType.DATASOURCE.value,
                     ImportStatus.FAILED.value,
-                    f"数据源缺少敏感配置: {', '.join(missing_secrets)}",
+                    oa_message(
+                        "messages.import_datasource_secrets_missing",
+                        "数据源缺少敏感配置: {fields}",
+                        fields=", ".join(missing_secrets),
+                    ),
                 )
                 return None
             ds = DataSourceAPIModel.objects.create(
@@ -504,7 +520,7 @@ class ImportService:
                 field_schema=ds_item.field_schema,
                 created_by=self.created_by,
                 updated_by=self.updated_by,
-                groups=self.groups,
+                groups=self.datasource_groups,
             )
             ds.namespaces.set(namespace_ids)
             ds.tag.set(tag_ids)
@@ -512,7 +528,7 @@ class ImportService:
                 ds_item.key,
                 ObjectType.DATASOURCE.value,
                 ImportStatus.SUCCESS.value,
-                "新建数据源",
+                oa_message("messages.import_datasource_created", "新建数据源"),
                 ds.id,
             )
             return ds.id
@@ -591,7 +607,7 @@ class ImportService:
                     canvas_item.key,
                     object_type.value,
                     ImportStatus.SKIPPED.value,
-                    f"跳过已存在的{object_type.value}",
+                    oa_message("messages.import_canvas_skipped", "跳过已存在的{object_type}", object_type=object_type.value),
                     existing.id,
                 )
                 return existing.id
@@ -605,7 +621,7 @@ class ImportService:
                     canvas_item.key,
                     object_type.value,
                     ImportStatus.OVERWRITTEN.value,
-                    f"覆盖已存在的{object_type.value}",
+                    oa_message("messages.import_canvas_overwritten", "覆盖已存在的{object_type}", object_type=object_type.value),
                     existing.id,
                 )
                 return existing.id
@@ -620,7 +636,7 @@ class ImportService:
                     canvas_item.key,
                     object_type.value,
                     ImportStatus.SUCCESS.value,
-                    f"重命名为 {new_name}",
+                    oa_message("messages.import_renamed", "重命名为 {name}", name=new_name),
                     canvas.id,
                 )
                 return canvas.id
@@ -634,7 +650,7 @@ class ImportService:
                 canvas_item.key,
                 object_type.value,
                 ImportStatus.SUCCESS.value,
-                f"新建{object_type.value}",
+                oa_message("messages.import_canvas_created", "新建{object_type}", object_type=object_type.value),
                 canvas.id,
             )
             return canvas.id

@@ -16,8 +16,11 @@ import type { Dayjs } from 'dayjs';
 import type { OpsChartThemeMode } from '@/app/ops-analysis/utils/chartTheme';
 import type {
   NetworkStatusTopologyConfig,
+  RelatedTopologyConfig,
+  Room3DConfig,
   SceneWidgetType,
 } from './sceneWidget';
+import type { Application3DWallConfig } from '@/app/ops-analysis/utils/application3DWallConfig';
 import type { OpsAnalysisWidgetSurface } from '@/app/ops-analysis/utils/chartTypeSurface';
 import type { DateRangeValue } from './dateRange';
 
@@ -69,6 +72,9 @@ export interface AddComponentConfig {
   chartType?: string;
   sceneWidgetType?: SceneWidgetType;
   networkStatusTopology?: NetworkStatusTopologyConfig;
+  relatedTopology?: RelatedTopologyConfig;
+  room3D?: Room3DConfig;
+  application3DWall?: Application3DWallConfig;
   dataSourceParams?: ParamItem[];
   tableConfig?: TableConfig;
 }
@@ -106,6 +112,9 @@ export interface ValueConfig {
   chartType?: string;
   sceneWidgetType?: SceneWidgetType;
   networkStatusTopology?: NetworkStatusTopologyConfig;
+  relatedTopology?: RelatedTopologyConfig;
+  room3D?: Room3DConfig;
+  application3DWall?: Application3DWallConfig;
   chartThemeMode?: OpsChartThemeMode;
   dataSource?: string | number;
   compare?: boolean;
@@ -119,6 +128,10 @@ export interface ValueConfig {
   descriptionField?: string;
   topNLabelField?: string;
   topNValueField?: string;
+  dimensionField?: string;
+  valueField?: string;
+  multiValueLabelField?: string;
+  multiValueValueField?: string;
   nodeGraphIdentityMode?: 'ip' | 'service';
   nodeGraphSourceField?: string;
   nodeGraphTargetField?: string;
@@ -138,6 +151,12 @@ export interface ValueConfig {
   gaugeShape?: 'semicircle' | 'circle';
   eventTimeline?: {
     sortOrder?: 'asc' | 'desc';
+    timeField?: string;
+    titleField?: string;
+    descriptionField?: string;
+    categoryField?: string;
+    statusField?: string;
+    linkField?: string;
   };
   radar?: {
     min?: number;
@@ -146,14 +165,18 @@ export interface ValueConfig {
       key: string;
       label?: string;
     }>;
+    arrayNameField?: string;
+    arrayValueField?: string;
   };
   cardList?: CardListConfig;
   actions?: DashboardActionConfig[];
   appearance?: ScreenWidgetAppearance;
 }
 
+export type ScreenWidgetFrame = 'panel' | 'bare';
+
 export interface ScreenWidgetAppearance {
-  frame?: 'panel' | 'bare';
+  frame?: ScreenWidgetFrame;
 }
 
 export interface ScreenRenderContext {
@@ -228,6 +251,8 @@ export interface ViewConfigProps {
   builtinNamespaceId?: number;
   showChartThemeMode?: boolean;
   surface?: OpsAnalysisWidgetSurface;
+  variant?: 'drawer' | 'panel';
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 export interface ComponentSelectorConfigItem extends DatasourceItem {
@@ -295,11 +320,11 @@ export interface UnifiedFilterDefinition {
   id: string;
   key: string; // 参数 key（如 "time_range", "env", "namespace"）
   name: string; // 显示名称（用户可编辑）
-  type: 'timeRange' | 'dateRange' | 'string'; // 参数类型，用于绑定匹配；列表传参由 inputConfig.multiple 表达
+  type: 'timeRange' | 'dateRange' | 'string' | 'number'; // 参数类型，用于绑定匹配；列表传参由 inputConfig.multiple 表达
   defaultValue?: FilterValue; // 默认值
   order: number; // 显示顺序
   enabled: boolean; // 是否启用
-  inputMode?: 'input' | 'select' | 'radio' | 'organization'; // 输入方式（仅 string 类型有效）
+  inputMode?: 'input' | 'select' | 'radio' | 'organization'; // 兼容只读；新保存走 inputConfig.control
   /**
    * 旧字段：手动下拉选项（仅 inputMode 为 select/radio 时有效）。
    * 读取时由 normalizeInputConfig 自动按 static 模式处理。
@@ -325,7 +350,7 @@ export interface FilterBindings {
 /** 扫描结果结构（用于配置弹窗） */
 export interface ScannedFilterParam {
   key: string;
-  type: 'string' | 'timeRange' | 'dateRange';
+  type: 'string' | 'timeRange' | 'dateRange' | 'number';
   componentCount: number;
   sampleAlias: string;
   sampleDefaultValue: FilterValue;

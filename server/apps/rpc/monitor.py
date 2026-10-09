@@ -40,6 +40,28 @@ class Monitor(object):
         """
         return self.ingest_client.run("monitor_ingest_from_source", params=kwargs)
 
+    def list_cmdb_bind_candidates(self, **kwargs):
+        """列出可手绑的监控实例（name/ip 检索）。
+
+        走 ingest_client（apps.monitor.nats.monitor）。NATS 签名为
+        monitor_list_cmdb_bind_candidates(params)，须整包为 params。
+        """
+        return self.ingest_client.run("monitor_list_cmdb_bind_candidates", params=kwargs)
+
+    def bind_cmdb_id(self, **kwargs):
+        """按监控实例 ID 写入 cmdb_id。
+
+        走 ingest_client。NATS 签名为 monitor_bind_cmdb_id(params)，须整包为 params。
+        """
+        return self.ingest_client.run("monitor_bind_cmdb_id", params=kwargs)
+
+    def clear_cmdb_id(self, **kwargs):
+        """按 expected_cmdb_id 清空监控实例 cmdb_id，不改 node_id。
+
+        走 ingest_client。NATS 签名为 monitor_clear_cmdb_id(params)，须整包为 params。
+        """
+        return self.ingest_client.run("monitor_clear_cmdb_id", params=kwargs)
+
     def query_active_alert_summaries_by_monitor_ids(self, monitor_ids, **kwargs):
         """CMDB room3D 等调用方：按 monitor_id 批量查活跃告警摘要。"""
         return self.ingest_client.run(
@@ -50,6 +72,14 @@ class Monitor(object):
 
 
 class MonitorOperationAnaRpc(BaseOperationAnaRpc):
+    def __init__(self, *args, **kwargs):
+        is_local_client = kwargs.pop("is_local_client", False)
+        is_local_client = os.getenv("IS_LOCAL_RPC", "0") == "1" or is_local_client
+        if is_local_client:
+            self.client = AppClient("apps.monitor.nats.monitor")
+            return
+        super().__init__(*args, **kwargs)
+
     def create_monitor_object_type(self, data: dict, **kwargs):
         """创建监控对象类型"""
         return self.client.run("create_monitor_object_type", data=data, **kwargs)
@@ -87,7 +117,7 @@ class MonitorOperationAnaRpc(BaseOperationAnaRpc):
         return self.client.run("monitor_objects", **kwargs)
 
     def monitor_object_instance_count(self, **kwargs):
-        """统计全部监控对象实例数量（不过滤权限）"""
+        """统计监控对象实例数量。携带 user_info 时按授权范围聚合。"""
         return self.client.run("monitor_object_instance_count", **kwargs)
 
     def license_instance_count(self, **kwargs):
@@ -235,6 +265,10 @@ class MonitorOperationAnaRpc(BaseOperationAnaRpc):
         """查询主机资源使用率 Top10，可选 instance_ids 收窄。"""
         return self.client.run("get_host_resource_top", metric_type=metric_type, **kwargs)
 
+    def get_host_resource_top_by_time(self, metric_type: str, **kwargs):
+        """按时间窗查询主机资源使用率排行（Top N），支持 max/avg 聚合。"""
+        return self.client.run("get_host_resource_top_by_time", metric_type=metric_type, **kwargs)
+
     def get_monitor_instance_list(self, **kwargs):
         """查询当前组织权限范围内的监控实例，供下拉选项使用。"""
         return self.client.run("get_monitor_instance_list", **kwargs)
@@ -242,3 +276,7 @@ class MonitorOperationAnaRpc(BaseOperationAnaRpc):
     def query_metric_series(self, **kwargs):
         """按已注册指标名查询趋势或排行，未选实例不退化为全量。"""
         return self.client.run("query_metric_series", **kwargs)
+
+    def get_zombie_host_report(self, **kwargs):
+        """按所选 CMDB 主机查询僵尸机报表（阈值过滤后分页）。"""
+        return self.client.run("get_zombie_host_report", **kwargs)

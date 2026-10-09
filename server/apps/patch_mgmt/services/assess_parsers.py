@@ -16,6 +16,8 @@ import re
 from dataclasses import replace
 from typing import Iterable
 
+from django.db.models import prefetch_related_objects
+
 from apps.core.logger import patch_mgmt_logger as logger
 from apps.patch_mgmt.constants import OSType, RequirementAssessmentStatus
 from apps.patch_mgmt.services.compliance_evaluator import (
@@ -27,12 +29,8 @@ from apps.patch_mgmt.services.compliance_evaluator import (
     WindowsUpdateFacts,
     evaluate_requirements,
 )
-from apps.patch_mgmt.services.linux_platform import (
-    package_manager_family,
-    parse_linux_host_facts,
-    validate_linux_host_facts,
-)
-
+from apps.patch_mgmt.services.linux_platform import package_manager_family, parse_linux_host_facts, validate_linux_host_facts
+from apps.patch_mgmt.utils.i18n import patch_message
 
 # WUA MsrcSeverity -> PatchSeverity 映射
 _WUA_SEVERITY_MAP = {
@@ -149,25 +147,25 @@ def parse_wua_search(stdout: str) -> dict[str, dict]:
     results: dict[str, dict] = {}
     for line in stdout.splitlines():
         line = line.strip()
-        if not line or '|' not in line:
+        if not line or "|" not in line:
             continue
-        parts = line.split('|', 2)
+        parts = line.split("|", 2)
         if len(parts) < 3:
             continue
         kb = parts[0].strip().upper()
         if not kb:
             continue
         # 确保 KB 号格式正确
-        if not re.match(r'^KB\d+$', kb, re.IGNORECASE):
+        if not re.match(r"^KB\d+$", kb, re.IGNORECASE):
             # 尝试从中提取 KB 号
-            match = re.search(r'KB\d+', kb, re.IGNORECASE)
+            match = re.search(r"KB\d+", kb, re.IGNORECASE)
             if match:
                 kb = match.group(0).upper()
             else:
                 continue
         results[kb] = {
-            'severity': parts[1].strip(),
-            'title': parts[2].strip(),
+            "severity": parts[1].strip(),
+            "title": parts[2].strip(),
         }
     return results
 
@@ -189,9 +187,7 @@ def _linux_specs(requirements: list) -> dict[int, list[RequirementSpec]]:
             architectures = tuple(getattr(detail, "architectures", None) or ())
             package_manager = (getattr(detail, "repo_type", "") or "").strip()
             source_families = {
-                package_manager_family(source.source_type)
-                for source in requirement.patch.sources.all()
-                if package_manager_family(source.source_type)
+                package_manager_family(source.source_type) for source in requirement.patch.sources.all() if package_manager_family(source.source_type)
             }
             source_families.update(
                 package_manager_family(snapshot.get("source_type", ""))
@@ -200,20 +196,22 @@ def _linux_specs(requirements: list) -> dict[int, list[RequirementSpec]]:
             )
             if package_manager_family(package_manager):
                 source_families.add(package_manager_family(package_manager))
-            configuration_error = (
-                "conflicting linux package families" if len(source_families) > 1 else ""
-            )
+            configuration_error = "conflicting linux package families" if len(source_families) > 1 else ""
             package_items = getattr(detail, "package_items", None)
             if callable(package_items):
                 items = package_items()
             else:
                 package_name = (getattr(detail, "pkg_name", "") or "").strip()
-                items = [
-                    {
-                        "name": package_name,
-                        "version": (getattr(detail, "pkg_version", "") or "").strip(),
-                    }
-                ] if package_name else []
+                items = (
+                    [
+                        {
+                            "name": package_name,
+                            "version": (getattr(detail, "pkg_version", "") or "").strip(),
+                        }
+                    ]
+                    if package_name
+                    else []
+                )
         except Exception:  # noqa: BLE001
             specs[requirement.id] = [
                 RequirementSpec(
@@ -253,7 +251,21 @@ def _linux_specs(requirements: list) -> dict[int, list[RequirementSpec]]:
 
 def linux_requirement_specs(requirements: Iterable) -> dict[int, list[RequirementSpec]]:
     """构造 Linux 要求规格，供评估与治理前适用性复核共享。"""
-    return _linux_specs(list(requirements))
+    materialized = list(requirements)
+    patches = []
+    seen_ids: set[int] = set()
+    for requirement in materialized:
+        patch = getattr(requirement, "patch", None)
+        patch_pk = getattr(patch, "pk", None)
+        if patch is None or patch_pk is None or patch_pk in seen_ids:
+            continue
+        if not hasattr(patch, "sources"):
+            continue
+        seen_ids.add(patch_pk)
+        patches.append(patch)
+    if patches:
+        prefetch_related_objects(patches, "sources")
+    return _linux_specs(materialized)
 
 
 def _parse_linux_fact_line(raw_line: str) -> tuple[int | None, int | None, str, LinuxPackageFact] | None:
@@ -308,7 +320,11 @@ def _parse_linux_facts(stdout: str) -> HostAssessmentFacts:
     if parsed_lines == 0:
         return HostAssessmentFacts(
             linux_host=linux_host,
-            collection_error="评估输出缺少结构化 Linux 包事实",
+            collection_error=patch_message(
+                None,
+                "assessment.missing_linux_package_facts",
+                "Assessment output is missing structured Linux package facts",
+            ),
         )
     return HostAssessmentFacts(linux_packages=packages, linux_host=linux_host)
 
@@ -361,32 +377,41 @@ def assess_linux_requirements(stdout: str, requirements: Iterable) -> dict[int, 
             continue
 
         missing_pkg_names = [
-            spec.identifier
-            for spec, assessment in zip(specs, assessments)
-            if assessment.status == RequirementAssessmentStatus.MISSING
+            spec.identifier for spec, assessment in zip(specs, assessments) if assessment.status == RequirementAssessmentStatus.MISSING
         ]
         unknown_pkg_names = [
-            spec.identifier
-            for spec, assessment in zip(specs, assessments)
-            if assessment.status == RequirementAssessmentStatus.UNKNOWN
+            spec.identifier for spec, assessment in zip(specs, assessments) if assessment.status == RequirementAssessmentStatus.UNKNOWN
         ]
         not_applicable_pkg_names = [
-            spec.identifier
-            for spec, assessment in zip(specs, assessments)
-            if assessment.status == RequirementAssessmentStatus.NOT_APPLICABLE
+            spec.identifier for spec, assessment in zip(specs, assessments) if assessment.status == RequirementAssessmentStatus.NOT_APPLICABLE
         ]
         if missing_pkg_names:
             status = RequirementAssessmentStatus.MISSING
-            reason = f"{'、'.join(missing_pkg_names)} 未满足最低版本要求"
+            reason = patch_message(
+                None,
+                "assessment.packages_below_minimum",
+                "{packages} do not meet the minimum version requirement",
+                packages="、".join(missing_pkg_names),
+            )
         elif unknown_pkg_names:
             status = RequirementAssessmentStatus.UNKNOWN
-            reason = f"无法确认 {'、'.join(unknown_pkg_names)} 的合规状态"
+            reason = patch_message(
+                None,
+                "assessment.packages_status_unknown",
+                "Unable to confirm compliance status for {packages}",
+                packages="、".join(unknown_pkg_names),
+            )
         elif len(not_applicable_pkg_names) == len(specs):
             status = RequirementAssessmentStatus.NOT_APPLICABLE
             reason = assessments[0].reason
         else:
             status = RequirementAssessmentStatus.SATISFIED
-            reason = f"{'、'.join(spec.identifier for spec in specs)} 均满足版本要求"
+            reason = patch_message(
+                None,
+                "assessment.packages_all_satisfied",
+                "{packages} all meet the version requirement",
+                packages="、".join(spec.identifier for spec in specs),
+            )
         result[requirement_id] = RequirementAssessment(
             requirement_id=requirement_id,
             status=status,
@@ -417,11 +442,7 @@ def _replacement_kbs(requirement) -> tuple[str, ...]:
         return ()
     from apps.patch_mgmt.models import WindowsPatchDetail
 
-    return tuple(
-        WindowsPatchDetail.objects.filter(patch_id__in=replacement_ids)
-        .exclude(kb_number="")
-        .values_list("kb_number", flat=True)
-    )
+    return tuple(WindowsPatchDetail.objects.filter(patch_id__in=replacement_ids).exclude(kb_number="").values_list("kb_number", flat=True))
 
 
 def assess_windows_requirements(stdout: str, requirements: Iterable) -> dict[int, RequirementAssessment]:
@@ -439,18 +460,18 @@ def assess_windows_requirements(stdout: str, requirements: Iterable) -> dict[int
     """
     # 分段解析。Defender 安全情报等 WUA 更新不会出现在
     # Get-HotFix 中，必须使用 IsInstalled=1 才能证明其当前安装状态。
-    if '===WUA_INSTALLED===' in stdout:
-        wua_part, _, installed_and_hotfix = stdout.partition('===WUA_INSTALLED===')
-        installed_part, hotfix_marker, hotfix_part = installed_and_hotfix.partition('===HOTFIX===')
+    if "===WUA_INSTALLED===" in stdout:
+        wua_part, _, installed_and_hotfix = stdout.partition("===WUA_INSTALLED===")
+        installed_part, hotfix_marker, hotfix_part = installed_and_hotfix.partition("===HOTFIX===")
         wua_results = parse_wua_search(wua_part)
         installed_kbs = parse_windows_hotfixes(installed_part)
         if hotfix_marker:
             installed_kbs.update(parse_windows_hotfixes(hotfix_part))
-    elif '===HOTFIX===' in stdout:
-        wua_part, _, hotfix_part = stdout.partition('===HOTFIX===')
+    elif "===HOTFIX===" in stdout:
+        wua_part, _, hotfix_part = stdout.partition("===HOTFIX===")
         wua_results = parse_wua_search(wua_part)
         installed_kbs = parse_windows_hotfixes(hotfix_part)
-    elif '|' in stdout:
+    elif "|" in stdout:
         # 纯 WUA 格式（向后兼容）
         wua_results = parse_wua_search(stdout)
         installed_kbs = set()
@@ -507,7 +528,13 @@ def assess_windows_requirements(stdout: str, requirements: Iterable) -> dict[int
             applicable_missing_kbs=frozenset(missing_kbs),
         ),
         windows_host=windows_host,
-        collection_error="" if stdout.strip() else "Windows 更新评估输出为空",
+        collection_error=""
+        if stdout.strip()
+        else patch_message(
+            None,
+            "assessment.windows_assessment_empty",
+            "Windows update assessment output is empty",
+        ),
     )
     result = evaluate_requirements(specs, facts)
     for req in requirements:
@@ -515,7 +542,7 @@ def assess_windows_requirements(stdout: str, requirements: Iterable) -> dict[int
         if assessment and assessment.status == RequirementAssessmentStatus.MISSING:
             kb_number = assessment.evidence.get("required_kb", "")
             wua_info = wua_results.get(kb_number, {})
-            severity = wua_info.get('severity', '')
+            severity = wua_info.get("severity", "")
             if severity:
                 result[req.id] = replace(
                     assessment,

@@ -1,8 +1,8 @@
 'use client';
-
+import './register-incidents-pilot';
 import React, { useState, useEffect } from 'react';
 import LevelIcon from '@/app/alarm/components/levelIcon';
-import AlarmFilters from '@/app/alarm/components/alarmFilters';
+import AlarmFilters from '@/app/alarm/components/alarm-filters';
 import CustomTable from '@/components/custom-table';
 import alertStyle from './index.module.scss';
 import TimeSelector from '@/components/time-selector';
@@ -15,14 +15,16 @@ import { IncidentTableDataItem } from '@/app/alarm/types/incidents';
 import { FiltersConfig } from '@/app/alarm/types/alarms';
 import { useTranslation } from '@/utils/i18n';
 import { incidentStates } from '@/app/alarm/constants/alarm';
-import { useRouter } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import { useCommon } from '@/app/alarm/context/common';
+import { toIncidentLevelFilterOptions } from '@/app/alarm/utils/incidentLevelFilters';
+import { getIncidentDetailTriggerCellProps } from '@/app/alarm/utils/incidentTableColumns';
 import { KeepAlive, useActivate } from 'react-activation';
 
 const IncidentsPage: React.FC = () => {
   const { getIncidentList } = useIncidentsApi();
   const { t } = useTranslation();
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const { levelListIncident, levelMapIncident } = useCommon();
   const [searchText, setSearchText] = useState('');
   const [data, setData] = useState<IncidentTableDataItem[]>([]);
@@ -31,6 +33,7 @@ const IncidentsPage: React.FC = () => {
     level: [],
     state: [],
     alarm_source: [],
+    push_source_ids: [],
   });
   const [pagination, setPagination] = useState<Pagination>({
     current: 1,
@@ -52,12 +55,20 @@ const IncidentsPage: React.FC = () => {
     fetchIncidentList();
   };
 
+  const onOpenDetail = (record: IncidentTableDataItem) => {
+    router.push(
+      `/alarm/incidents/detail?id=${record.id}&incident_id=${record.incident_id}`
+    );
+  };
+
   const columns: ColumnsType<IncidentTableDataItem> = [
     {
       title: t('alarms.level'),
       dataIndex: 'level',
       key: 'level',
       width: 100,
+      onCell: (record) =>
+        getIncidentDetailTriggerCellProps(record, 'level', onOpenDetail),
       render: (_: any, { level }: IncidentTableDataItem) => {
         const target = levelListIncident.find(
           (item) => item.level_id === Number(level)
@@ -85,6 +96,8 @@ const IncidentsPage: React.FC = () => {
       dataIndex: 'title',
       key: 'title',
       width: 180,
+      onCell: (record) =>
+        getIncidentDetailTriggerCellProps(record, 'title', onOpenDetail),
     },
     {
       title: t('alarms.source'),
@@ -97,12 +110,16 @@ const IncidentsPage: React.FC = () => {
       dataIndex: 'alert_count',
       key: 'alert_count',
       width: 140,
+      onCell: (record) =>
+        getIncidentDetailTriggerCellProps(record, 'alert_count', onOpenDetail),
     },
     {
       title: t('alarms.state'),
       dataIndex: 'status',
       key: 'status',
       width: 120,
+      onCell: (record) =>
+        getIncidentDetailTriggerCellProps(record, 'status', onOpenDetail),
       render: (val: string) => t(`alarms.${val}`),
     },
     {
@@ -110,6 +127,8 @@ const IncidentsPage: React.FC = () => {
       dataIndex: 'duration',
       key: 'duration',
       width: 120,
+      onCell: (record) =>
+        getIncidentDetailTriggerCellProps(record, 'duration', onOpenDetail),
     },
     {
       title: t('alarms.assignee'),
@@ -130,14 +149,7 @@ const IncidentsPage: React.FC = () => {
       width: 100,
       render: (_: any, record: IncidentTableDataItem) => (
         <div className="flex items-center">
-          <Button
-            type="link"
-            onClick={() => {
-              router.push(
-                `/alarm/incidents/detail?id=${record.id}&incident_id=${record.incident_id}`
-              );
-            }}
-          >
+          <Button type="link" onClick={() => onOpenDetail(record)}>
             {t('common.detail')}
           </Button>
         </div>
@@ -209,13 +221,14 @@ const IncidentsPage: React.FC = () => {
         <AlarmFilters
           filterSource={false}
           stateOptions={stateOptions}
+          levelOptions={toIncidentLevelFilterOptions(levelListIncident)}
           filters={filters}
           onFilterChange={onFilterChange}
           clearFilters={clearFilters}
         />
       </div>
       <div className={alertStyle.content}>
-        <div className="flex items-center justify-between space-x-2 mb-[16px]">
+        <div className="flex items-center justify-between space-x-2 mb-[16px] shrink-0">
           <Input
             allowClear
             className="w-[300px]"
@@ -231,15 +244,17 @@ const IncidentsPage: React.FC = () => {
             onRefresh={handleRefresh}
           />
         </div>
+        <div className="min-h-0 flex-1 overflow-hidden">
         <CustomTable
           rowKey="id"
-          scroll={{ y: 'calc(100vh - 280px)', x: 'calc(100vw - 320px)' }}
+          scroll={{ x: 'max-content' }}
           columns={columns}
           dataSource={data}
           pagination={pagination}
           loading={loading}
           onChange={onTableChange}
         />
+        </div>
       </div>
     </div>
   );
@@ -247,7 +262,12 @@ const IncidentsPage: React.FC = () => {
 
 const Incidents = () => {
   return (
-    <KeepAlive id="/alarm/incidents" name="/alarm/incidents">
+    <KeepAlive
+      id="/alarm/incidents"
+      name="/alarm/incidents"
+      wrapperProps={{ className: 'flex h-full min-h-0 w-full flex-1 flex-col' }}
+      contentProps={{ className: 'flex h-full min-h-0 w-full flex-1 flex-col' }}
+    >
       <IncidentsPage />
     </KeepAlive>
   );

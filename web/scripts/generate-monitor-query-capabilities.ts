@@ -4,6 +4,11 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { dashboardQueryCapabilityId } from '../src/app/monitor/dashboards/shared/utils/query-capability';
 import {
+  listContractDashboardQueries,
+  METRIC_UNAVAILABLE_CONTRACTS,
+  temperatureUint16ByCollectTypeQuery
+} from '../src/app/monitor/dashboards/shared/unavailable-contract';
+import {
   FLOW_SUPPORTED_OBJECT_NAMES,
   resolveInstanceTypeFromObjectName,
   type FlowProtocol,
@@ -127,9 +132,24 @@ const registerFlowCapabilities = () => {
   }
 };
 
+/** 契约构造的 PromQL 也必须进允许清单，否则运行时 overlay 会被网关拒绝。 */
+const registerUnavailableContractCapabilities = () => {
+  const objectNames = ['Switch', 'Router', 'Loadbalance'] as const;
+  for (const template of listContractDashboardQueries(METRIC_UNAVAILABLE_CONTRACTS)) {
+    for (const objectName of objectNames) {
+      register(template, objectName);
+    }
+  }
+  // 温度 65535 按序列标签 collect_type 判断，实例名不含 snmp_h3c 时也要能下发这条查询。
+  for (const objectName of objectNames) {
+    register(temperatureUint16ByCollectTypeQuery, objectName);
+  }
+};
+
 const main = async () => {
   await registerStaticModules();
   registerFlowCapabilities();
+  registerUnavailableContractCapabilities();
 
   const knownObjectNames = new Set(objectNameByRoute.values());
   const capabilities: CapabilityEntry[] = Array.from(capabilityMap, ([id, value]) => ({

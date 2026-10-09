@@ -75,6 +75,20 @@ def _network_instance(**overrides):
     return mock.Mock(**base)
 
 
+def test_device_and_topology_share_mixed_model_hosts():
+    instance = _network_instance(
+        instances=[
+            {"inst_uuid": "63e4a531-b6bb-43cc-9eae-8eb8a09f795e", "model_id": "switch", "ip_addr": "10.0.0.1"},
+            {"inst_uuid": "4c6643d2-4dc5-4a2a-8f24-3af72f33f7bc", "model_id": "router", "ip_addr": "10.0.0.2"},
+        ]
+    )
+    device = NetworkNodeParams(instance)
+    topo = NetworkTopoNodeParams(instance)
+
+    assert device.get_hosts() == ("hosts", "10.0.0.1,10.0.0.2")
+    assert topo.get_hosts() == device.get_hosts()
+
+
 def test_device_and_topology_config_ids_differ_metric_scope_same():
     instance = _network_instance()
     device = NetworkNodeParams(instance)
@@ -126,6 +140,30 @@ def test_expected_network_node_configs_returns_two_when_enabled(monkeypatch):
     assert [n["id"] for n in nodes] == ["cmdb_42", "cmdb_42_topology"]
     assert nodes[0]["type"] == "network"
     assert nodes[1]["type"] == "network_topo"
+
+
+def test_network_device_and_topology_share_one_vault_resolution_snapshot(monkeypatch):
+    from apps.cmdb.services import network_collection_reconcile as reconcile
+
+    calls = []
+    seen = []
+
+    def resolve(instance):
+        calls.append(instance.id)
+        return [{"version": "v2", "community": "current-secret", "snmp_port": 161}]
+
+    def push(self):
+        seen.append(self.credential)
+        return [{"id": self.config_id}]
+
+    monkeypatch.setattr(reconcile, "resolve_task_credential_pool", resolve)
+    monkeypatch.setattr(NetworkNodeParams, "push_params", push)
+    monkeypatch.setattr(NetworkTopoNodeParams, "push_params", push)
+    reconcile.expected_network_node_configs(_network_instance())
+    assert calls == [42]
+    assert len(seen) == 2
+    assert seen[0] is seen[1]
+    assert seen[0]["community"] == "current-secret"
 
 
 def test_reconcile_delete_clears_both_configs(monkeypatch):

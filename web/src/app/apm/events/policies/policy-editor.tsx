@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { DeleteOutlined } from '@ant-design/icons';
@@ -25,11 +25,15 @@ import ApmPageBreadcrumb from '@/app/apm/components/apm-page-breadcrumb';
 import ApmRouteShell, { ApmSurface } from '@/app/apm/components/apm-route-shell';
 import CatalogState from '@/app/apm/components/catalog-state';
 import { formatClockTime, formatErrorRate } from '@/app/apm/components/metric-format';
+import GroupTreeSelect from '@/components/group-tree-select';
 import TimeSeriesComposedChart from '@/components/time-series-composed-chart';
 import { ALERT_LEVEL_COLORS, OBSERVABILITY_SERIES_COLORS } from '@/constants/observabilityChart';
 import { useTranslation } from '@/utils/i18n';
+import { HandledRequestError } from '@/utils/request';
+import { formatUserName } from '@/utils/userDisplay';
 import type {
   ApmNotificationChannel,
+  ApmNotificationRecipient,
   ApmPolicy,
   ApmPolicyComparator,
   ApmPolicyInput,
@@ -39,21 +43,24 @@ import type {
   ApmService,
 } from '@/app/apm/types';
 import styles from '@/app/apm/events/event-workspace.module.scss';
+import NotificationTargetFields, {
+  type NotificationDirectoryState,
+} from '@/app/apm/events/policies/notification-target-fields';
 
 interface ThresholdEditorRow {
   severity: ApmPolicySeverity;
   comparator: ApmPolicyComparator;
-  value: number | string | null;
+  value: number | null;
 }
 
 interface PolicyEditorValues extends Omit<
   ApmPolicyInput,
-  'service_id' | 'environment' | 'version_mode' | 'versions' | 'thresholds' | 'notification_targets'
+  'service_id' | 'environment' | 'version_mode' | 'versions' | 'thresholds' | 'organizations'
 > {
   service_scope: string;
+  organizations: number[];
   no_data_alert_name: string;
-  notification_channel_ids: number[];
-  notification_recipients: string[];
+  handlers: Array<string | number>;
   thresholds: ThresholdEditorRow[];
 }
 
@@ -66,6 +73,7 @@ const SEVERITIES: Array<{ value: ApmPolicySeverity; i18nKey: string; color: stri
 const DEFAULT_VALUES: PolicyEditorValues = {
   name: '',
   service_scope: '',
+  organizations: [],
   alert_name: '${service} ${metric} ${comparator} ${threshold}',
   endpoints: [],
   metric_type: 'error_rate',
@@ -82,9 +90,13 @@ const DEFAULT_VALUES: PolicyEditorValues = {
   no_data_after: null,
   no_data_severity: '',
   no_data_alert_name: '${service} ${metric}',
-  notification_channel_ids: [],
-  notification_recipients: [],
+  handlers: [],
+  notification_targets: [],
 };
+
+function directoryErrorState(error: unknown): NotificationDirectoryState {
+  return error instanceof HandledRequestError && error.status === 403 ? 'forbidden' : 'error';
+}
 
 const METRICS: Array<{ value: ApmPolicyMetric; i18nKey: string }> = [
   { value: 'error_rate', i18nKey: 'apm.common.errorRate' },
@@ -122,12 +134,13 @@ function decodeServiceScope(scope: string) {
 
 function thresholdToEditorValue(metric: ApmPolicyMetric, value: number | string) {
   const numeric = Number(value);
-  return metric === 'error_rate' && Number.isFinite(numeric) ? numeric * 100 : value;
+  if (!Number.isFinite(numeric)) return null;
+  return metric === 'error_rate' ? numeric * 100 : numeric;
 }
 
 function normalizeThresholds(metric: ApmPolicyMetric, rows: ThresholdEditorRow[] = []) {
   return rows.flatMap((item, index) => {
-    if (item.value === null || item.value === '' || item.value === undefined) return [];
+    if (item.value === null || item.value === undefined) return [];
     const numericValue = Number(item.value);
     if (!Number.isFinite(numericValue)) return [];
     return [{
@@ -138,10 +151,10 @@ function normalizeThresholds(metric: ApmPolicyMetric, rows: ThresholdEditorRow[]
   });
 }
 
-function NumberWithUnit({ unit, ...props }: ComponentProps<typeof InputNumber> & { unit: string }) {
+function NumberWithUnit({ unit, ...props }: ComponentProps<typeof InputNumber<number>> & { unit: string }) {
   return (
     <Space.Compact className={styles.numberWithUnit}>
-      <InputNumber {...props} />
+      <InputNumber<number> {...props} />
       <span className={styles.numberUnit}>{unit}</span>
     </Space.Compact>
   );
@@ -153,6 +166,7 @@ function toEditorValues(policy: ApmPolicy, defaultNoDataAlertName: string): Poli
   return {
     name: policy.name,
     service_scope: encodeServiceScope(policy.service_id, policy.environment),
+    organizations: policy.organizations || [],
     alert_name: policy.alert_name,
     metric_type: policy.metric_type,
     evaluation_interval: policy.evaluation_interval,
@@ -172,10 +186,11 @@ function toEditorValues(policy: ApmPolicy, defaultNoDataAlertName: string): Poli
     no_data_severity: policy.no_data_severity,
     no_data_alert_name: policy.no_data_alert_name || defaultNoDataAlertName,
     endpoints: policy.endpoints,
-    notification_channel_ids: policy.notification_targets.map((target) => target.channel_id),
-    notification_recipients: Array.from(
-      new Set(policy.notification_targets.flatMap((target) => target.recipients)),
-    ),
+    handlers: policy.handlers || [],
+    notification_targets: policy.notification_targets.map((target) => ({
+      channel_id: target.channel_id,
+      recipients: target.recipient_mode === 'none' ? [] : [...target.recipients],
+    })),
   };
 }
 
@@ -201,6 +216,7 @@ function buildMetricPreviewPayload(
   return {
     name: values.name?.trim() || previewName,
     service_id: scope.serviceId,
+    organizations: values.organizations || [],
     environment: scope.environment,
     alert_name: values.alert_name || '',
     endpoints: values.endpoints || [],
@@ -241,6 +257,7 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
     createPolicy,
     deletePolicy,
     getNotificationChannels,
+    getNotificationRecipients,
     getPolicy,
     getServiceRed,
     getServices,
@@ -257,10 +274,16 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
   const watchedThresholds = Form.useWatch('thresholds', form);
   const selectedEndpoints = Form.useWatch('endpoints', form);
   const noDataSeverity = Form.useWatch('no_data_severity', form);
-  const notificationChannelIds = Form.useWatch('notification_channel_ids', form);
+  const notificationTargets = Form.useWatch('notification_targets', form) ?? [];
+  const organizations = Form.useWatch('organizations', form);
+  const selectedHandlers = Form.useWatch('handlers', form);
+  const organizationKey = (organizations || []).join(',');
   const policyName = Form.useWatch('name', form);
   const [services, setServices] = useState<ApmService[]>([]);
   const [channels, setChannels] = useState<ApmNotificationChannel[]>([]);
+  const [recipients, setRecipients] = useState<ApmNotificationRecipient[]>([]);
+  const [channelState, setChannelState] = useState<NotificationDirectoryState>('loading');
+  const [recipientState, setRecipientState] = useState<NotificationDirectoryState>('loading');
   const [availableEndpoints, setAvailableEndpoints] = useState<string[]>([]);
   const [loadedPolicy, setLoadedPolicy] = useState<ApmPolicy | null>(null);
   const [preview, setPreview] = useState<ApmPolicyQueryResult | null>(null);
@@ -270,20 +293,82 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
   const [previewing, setPreviewing] = useState(false);
   const [previewFailed, setPreviewFailed] = useState(false);
   const [noticeEnabled, setNoticeEnabled] = useState(false);
+  const [handlerUsers, setHandlerUsers] = useState<ApmNotificationRecipient[]>([]);
+  const [directoriesRefreshing, setDirectoriesRefreshing] = useState(false);
   const previewRequestRef = useRef(0);
   const previewDebounceRef = useRef<number | null>(null);
+  const recipientSearchRequestRef = useRef(0);
+  const recipientSearchDebounceRef = useRef<number | null>(null);
+
+  const loadNotificationDirectories = useCallback(async () => {
+    const recipientRequestId = recipientSearchRequestRef.current + 1;
+    recipientSearchRequestRef.current = recipientRequestId;
+    setDirectoriesRefreshing(true);
+    setChannelState('loading');
+    setRecipientState('loading');
+    const [channelResult, recipientResult] = await Promise.allSettled([
+      getNotificationChannels(),
+      getNotificationRecipients({ limit: 100 }),
+    ]);
+    if (channelResult.status === 'fulfilled') {
+      setChannels(channelResult.value);
+      setChannelState(channelResult.value.length ? 'ready' : 'empty');
+    } else {
+      setChannels([]);
+      setChannelState(directoryErrorState(channelResult.reason));
+    }
+    if (recipientSearchRequestRef.current === recipientRequestId) {
+      if (recipientResult.status === 'fulfilled') {
+        setRecipients(recipientResult.value);
+        setRecipientState(recipientResult.value.length ? 'ready' : 'empty');
+      } else {
+        setRecipients([]);
+        setRecipientState(directoryErrorState(recipientResult.reason));
+      }
+    }
+    setDirectoriesRefreshing(false);
+  }, [getNotificationChannels, getNotificationRecipients]);
+
+  const searchRecipients = useCallback(async (search: string) => {
+    const requestId = recipientSearchRequestRef.current + 1;
+    recipientSearchRequestRef.current = requestId;
+    setRecipientState('loading');
+    try {
+      const items = await getNotificationRecipients({ search, limit: 100 });
+      if (recipientSearchRequestRef.current !== requestId) return;
+      setRecipients(items);
+      setRecipientState(items.length ? 'ready' : 'empty');
+    } catch (error) {
+      if (recipientSearchRequestRef.current !== requestId) return;
+      setRecipients([]);
+      setRecipientState(directoryErrorState(error));
+    }
+  }, [getNotificationRecipients]);
+
+  const scheduleRecipientSearch = useCallback((search: string) => {
+    if (recipientSearchDebounceRef.current !== null) {
+      window.clearTimeout(recipientSearchDebounceRef.current);
+    }
+    recipientSearchDebounceRef.current = window.setTimeout(() => {
+      void searchRecipients(search.trim());
+    }, 300);
+  }, [searchRecipients]);
+
+  useEffect(() => () => {
+    if (recipientSearchDebounceRef.current !== null) {
+      window.clearTimeout(recipientSearchDebounceRef.current);
+    }
+  }, []);
 
   useEffect(() => {
     if (isLoading) return;
     setLoading(true);
     Promise.all([
       getServices({ include_archived: true }),
-      getNotificationChannels(),
       policyId ? getPolicy(policyId) : Promise.resolve(null),
     ])
-      .then(([serviceItems, channelItems, policy]) => {
+      .then(([serviceItems, policy]) => {
         setServices(serviceItems);
-        setChannels(channelItems);
         setLoadedPolicy(policy);
         setNoticeEnabled(Boolean(policy?.notification_targets.length));
         form.setFieldsValue(policy
@@ -291,7 +376,47 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
           : { ...DEFAULT_VALUES, no_data_alert_name: defaultNoDataAlertNameRef.current });
       })
       .finally(() => setLoading(false));
-  }, [form, getNotificationChannels, getPolicy, getServices, isLoading, policyId]);
+    void loadNotificationDirectories();
+  }, [form, getPolicy, getServices, isLoading, loadNotificationDirectories, policyId]);
+
+  useEffect(() => {
+    const orgIds = organizationKey
+      ? organizationKey.split(',').map((item) => Number(item)).filter((item) => Number.isInteger(item) && item > 0)
+      : [];
+    if (!orgIds.length) {
+      const formOrganizations = form.getFieldValue('organizations') || [];
+      if (Array.isArray(formOrganizations) && formOrganizations.length) {
+        return;
+      }
+      setHandlerUsers((prev) => (prev.length ? [] : prev));
+      const current = form.getFieldValue('handlers') || [];
+      if (Array.isArray(current) && current.length) {
+        form.setFieldValue('handlers', []);
+      }
+      return;
+    }
+    let cancelled = false;
+    void getNotificationRecipients({ organization_ids: orgIds.join(','), limit: 100 })
+      .then((users) => {
+        if (cancelled) return;
+        const list = Array.isArray(users) ? users : [];
+        setHandlerUsers((prev) => {
+          if (
+            prev.length === list.length
+            && prev.every((item, index) => item.id === list[index]?.id)
+          ) {
+            return prev;
+          }
+          return list;
+        });
+      })
+      .catch(() => {
+        // 拉取失败时不改动已选处理人，避免误清空
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [form, getNotificationRecipients, organizationKey]);
 
   useEffect(() => {
     const scope = decodeServiceScope(serviceScope ?? '');
@@ -348,26 +473,6 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
     ];
   }, [loadedPolicy, services, t]);
 
-  const channelOptions = useMemo(() => {
-    const options = channels.map((item) => ({
-      value: item.id,
-      label: item.availability === 'available'
-        ? item.name
-        : t('apm.policies.unavailableChannelOption', '{name}（当前不可用）', { name: item.name }),
-      disabled: item.availability !== 'available',
-    }));
-    for (const target of loadedPolicy?.notification_targets || []) {
-      if (options.some((item) => item.value === target.channel_id)) continue;
-      const name = target.channel_name || t('apm.alerts.channel', '渠道 {id}', { id: target.channel_id });
-      options.push({
-        value: target.channel_id,
-        label: t('apm.policies.unavailableChannelOption', '{name}（当前不可用）', { name }),
-        disabled: true,
-      });
-    }
-    return options;
-  }, [channels, loadedPolicy, t]);
-
   const endpointOptions = useMemo(
     () => Array.from(new Set([...(selectedEndpoints || []), ...availableEndpoints])).map((endpoint) => ({
       value: endpoint,
@@ -376,17 +481,42 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
     [availableEndpoints, selectedEndpoints],
   );
 
-  const channelRecipientModeMap = useMemo(() => {
-    const map = new Map<number, ApmNotificationChannel['recipient_mode'] | undefined>();
-    channels.forEach((item) => map.set(item.id, item.recipient_mode));
+  const handlerOptions = useMemo(() => {
+    const options: Array<{ value: string | number; label: string }> = handlerUsers.map((item) => ({
+      value: item.id,
+      label: formatUserName(item),
+    }));
+    for (const id of selectedHandlers || []) {
+      if (options.some((item) => String(item.value) === String(id))) continue;
+      options.push({
+        value: id,
+        label: String(id),
+      });
+    }
+    return options;
+  }, [handlerUsers, selectedHandlers]);
+
+  const channelById = useMemo(() => {
+    const map = new Map<number, ApmNotificationChannel>();
+    channels.forEach((item) => map.set(item.id, item));
     (loadedPolicy?.notification_targets || []).forEach((item) => {
-      if (!map.has(item.channel_id)) map.set(item.channel_id, item.recipient_mode);
+      if (map.has(item.channel_id)) return;
+      map.set(item.channel_id, {
+        id: item.channel_id,
+        name: item.channel_name || t('apm.alerts.channel', '渠道 {id}', { id: item.channel_id }),
+        channel_type: item.channel_type || '',
+        description: '',
+        delivery_mode: item.delivery_mode || 'message',
+        recipient_mode: item.recipient_mode || 'free_text',
+        availability: 'unavailable',
+      });
     });
     return map;
-  }, [channels, loadedPolicy]);
+  }, [channels, loadedPolicy, t]);
 
-  const needsNotificationRecipients = (notificationChannelIds || []).some(
-    (channelId) => channelRecipientModeMap.get(channelId) !== 'none',
+  const availableChannelsToAdd = channels.filter(
+    (channel) => channel.availability === 'available'
+      && !notificationTargets.some((target) => target.channel_id === channel.id),
   );
 
   const selectedScope = decodeServiceScope(serviceScope ?? '');
@@ -430,13 +560,25 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
       message.error(error);
       return null;
     }
-    if (noticeEnabled && !values.notification_channel_ids?.length) {
+    if (noticeEnabled && !values.notification_targets?.length) {
       message.error(t('apm.policies.channelRequiredWhenEnabled', '启用通知后请至少选择一个通知渠道'));
       return null;
     }
-    if (noticeEnabled && needsNotificationRecipients && !values.notification_recipients?.length) {
-      message.error(t('apm.policies.recipientsRequiredForChannel', '所选通知渠道需要配置通知对象'));
-      return null;
+    if (noticeEnabled) {
+      for (const target of values.notification_targets || []) {
+        const channel = channelById.get(target.channel_id);
+        if (
+          (channelState === 'ready' || channelState === 'empty')
+          && (!channel || channel.availability !== 'available')
+        ) {
+          message.error(t('apm.policies.invalidRemove', '已失效，保存前请移除'));
+          return null;
+        }
+        if (channel?.recipient_mode !== 'none' && !target.recipients?.length) {
+          message.error(t('apm.policies.recipientsRequiredForChannel', '所选通知渠道需要配置通知对象'));
+          return null;
+        }
+      }
     }
     const originalScope = loadedPolicy
       ? encodeServiceScope(loadedPolicy.service_id, loadedPolicy.environment)
@@ -445,6 +587,7 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
     return {
       name: values.name,
       service_id: scope.serviceId,
+      organizations: values.organizations || [],
       environment: scope.environment,
       alert_name: values.alert_name,
       endpoints: values.endpoints,
@@ -460,12 +603,13 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
       no_data_after: values.no_data_after,
       no_data_severity: values.no_data_severity,
       no_data_alert_name: values.no_data_severity ? values.no_data_alert_name : '',
+      handlers: values.handlers || [],
       notification_targets: noticeEnabled
-        ? values.notification_channel_ids.map((channelId) => ({
-          channel_id: channelId,
-          recipients: channelRecipientModeMap.get(channelId) === 'none'
+        ? values.notification_targets.map((target) => ({
+          channel_id: target.channel_id,
+          recipients: channelById.get(target.channel_id)?.recipient_mode === 'none'
             ? []
-            : values.notification_recipients,
+            : target.recipients,
         }))
         : [],
     };
@@ -628,10 +772,45 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
               optionFilterProp="label"
               options={serviceOptions}
               placeholder={t('apm.common.selectService', '选择服务')}
-              onChange={() => {
+              onChange={(value) => {
                 form.setFieldValue('endpoints', []);
                 setPreview(null);
+                const currentOrganizations = form.getFieldValue('organizations') || [];
+                if (currentOrganizations.length) return;
+                const selected = decodeServiceScope(value);
+                const service = services.find((item) => item.id === selected.serviceId);
+                if (service?.organization_ids?.length) {
+                  form.setFieldValue('organizations', service.organization_ids);
+                }
               }}
+            />
+          </Form.Item>
+          <Form.Item
+            name="organizations"
+            label={t('apm.policies.organizations', '所属组织')}
+            rules={[{ required: true, message: t('apm.common.organizationRequired', '请至少选择一个组织') }]}
+          >
+            <GroupTreeSelect
+              multiple
+              mode="ownership"
+              showSearch
+              placeholder={t('apm.common.selectOrganization', '选择组织')}
+            />
+          </Form.Item>
+          <Form.Item
+            name="handlers"
+            label={t('apm.policies.handlers', '处理人')}
+          >
+            <Select<(string | number)[]>
+              mode="multiple"
+              allowClear
+              showSearch
+              optionFilterProp="label"
+              disabled={!organizationKey}
+              options={handlerOptions}
+              placeholder={organizationKey
+                ? t('apm.policies.handlersPlaceholder', '从策略所属组织选择处理人')
+                : t('apm.policies.selectOrganizationFirst', '请先选择所属组织')}
             />
           </Form.Item>
           <Form.Item name="endpoints" label={t('apm.common.endpoint', '端点')} extra={t('apm.policies.endpointScopeHint', '不选则按服务级别监控（整体聚合）')}>
@@ -730,7 +909,7 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
               <span className={styles.conditionSentence}>
                 {t('apm.policies.consecutive', '连续')}
                 <Form.Item name="trigger_after" noStyle rules={[{ required: true }]}>
-                  <InputNumber min={1} max={60} aria-label={t('apm.policies.triggerCountAria', '连续触发次数')} />
+                  <InputNumber<number> min={1} max={60} aria-label={t('apm.policies.triggerCountAria', '连续触发次数')} />
                 </Form.Item>
                 {t('apm.policies.triggerSentenceSuffix', '个汇聚周期满足阈值时触发告警。')}
               </span>
@@ -740,7 +919,7 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
               <span className={styles.conditionSentence}>
                 {t('apm.policies.consecutive', '连续')}
                 <Form.Item name="recover_after" noStyle rules={[{ required: true }]}>
-                  <InputNumber min={1} max={60} aria-label={t('apm.policies.recoveryCountAria', '连续恢复次数')} />
+                  <InputNumber<number> min={1} max={60} aria-label={t('apm.policies.recoveryCountAria', '连续恢复次数')} />
                 </Form.Item>
                 {t('apm.policies.recoverySentenceSuffix', '个周期不满足阈值时自动恢复。')}
               </span>
@@ -761,7 +940,7 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
                     },
                   ]}
                 >
-                  <InputNumber min={1} max={60} placeholder={t('apm.common.close', '关闭')} aria-label={t('apm.policies.noDataCountAria', '无数据持续次数')} />
+                  <InputNumber<number> min={1} max={60} placeholder={t('apm.common.close', '关闭')} aria-label={t('apm.policies.noDataCountAria', '无数据持续次数')} />
                 </Form.Item>
                 {t('apm.policies.noDataSentenceSuffix', '个周期无数据时')}
                 <Form.Item
@@ -815,8 +994,7 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
                 onChange={(checked) => {
                   setNoticeEnabled(checked);
                   if (!checked) {
-                    form.setFieldValue('notification_channel_ids', []);
-                    form.setFieldValue('notification_recipients', []);
+                    form.setFieldValue('notification_targets', []);
                   }
                 }}
                 aria-label={t('apm.policies.enableNotification', '启用通知')}
@@ -825,43 +1003,17 @@ export default function ApmPolicyEditor({ policyId }: { policyId?: string }) {
             </Space>
           </Form.Item>
           {noticeEnabled ? (
-            <>
-              <Form.Item
-                name="notification_channel_ids"
-                label={t('apm.policies.notificationChannelLabel', '通知通道')}
-                rules={[
-                  { required: true, message: t('apm.policies.notificationChannelRequired', '请选择通知通道') },
-                  {
-                    validator: async (_, channelIds: number[] | undefined) => {
-                      const invalid = channelIds?.some(
-                        (channelId) => !channels.some(
-                          (item) => item.id === channelId && item.availability === 'available',
-                        ),
-                      );
-                      if (!invalid) return;
-                      throw new Error(t('apm.policies.invalidRemove', '已失效，保存前请移除'));
-                    },
-                  },
-                ]}
-              >
-                <Select
-                  mode="multiple"
-                  allowClear
-                  options={channelOptions}
-                  placeholder={t('apm.policies.notificationChannelPlaceholder', '选择一个或多个通知通道')}
-                />
-              </Form.Item>
-              {needsNotificationRecipients ? (
-                <Form.Item
-                  name="notification_recipients"
-                  label={t('apm.policies.notificationRecipients', '通知对象')}
-                  extra={t('apm.policies.notificationRecipientsHint', '仅需要接收人的通知通道使用此配置')}
-                  rules={[{ required: true, message: t('apm.policies.notificationRecipientsRequired', '请输入通知对象') }]}
-                >
-                  <Select mode="tags" placeholder={t('apm.policies.recipientsPlaceholder', '输入接收人后回车')} />
-                </Form.Item>
-              ) : null}
-            </>
+            <NotificationTargetFields
+              targets={notificationTargets}
+              channelById={channelById}
+              channelsToAdd={availableChannelsToAdd}
+              recipients={recipients}
+              channelState={channelState}
+              recipientState={recipientState}
+              refreshing={directoriesRefreshing}
+              onRetry={() => void loadNotificationDirectories()}
+              onSearchRecipients={scheduleRecipientSearch}
+            />
           ) : null}
         </div>
       ),

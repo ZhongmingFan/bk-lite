@@ -12,7 +12,8 @@ import { STATUS_TEXT } from '@/app/alarm/constants/colors';
 import { useLocalizedTime } from '@/hooks/useLocalizedTime';
 import { AlertAssignListItem } from '@/app/alarm/types/settings';
 import { useSettingApi } from '@/app/alarm/api/settings';
-import { Button, Input, Switch, Tag } from 'antd';
+import { Button, Input, Switch, Tag, Tooltip } from 'antd';
+import { QuestionCircleOutlined } from '@ant-design/icons';
 import { useTranslation } from '@/utils/i18n';
 import { typeLabel, weekMap } from '@/app/alarm/constants/settings';
 import { useSettingsTable } from '@/app/alarm/hooks/useSettingsTable';
@@ -149,6 +150,19 @@ const AlertAssign: React.FC = () => {
       },
     },
     {
+      title: (
+        <span className="inline-flex items-center gap-1">
+          {t('settings.assignPriority')}
+          <Tooltip title={t('settings.assignStrategy.priorityHelp')}>
+            <QuestionCircleOutlined />
+          </Tooltip>
+        </span>
+      ),
+      dataIndex: 'priority',
+      key: 'priority',
+      width: 100,
+    },
+    {
       title: t('settings.assignCreateTime'),
       dataIndex: 'created_at',
       key: 'created_at',
@@ -201,13 +215,13 @@ const AlertAssign: React.FC = () => {
   ], [t, groupTree, loadingIds, handleStatusToggle, handleEdit, handleDelete, convertToLocalizedTime]);
 
   return (
-    <>
+    <div className="flex h-full min-h-0 w-full flex-1 flex-col">
       <Introduction
         title={t('settings.alertAssign')}
         message={t('settings.assignStrategyMessage')}
       />
-      <div className="oid-library-container p-4 bg-[var(--color-bg-1)] rounded-lg shadow">
-        <div className="nav-box flex justify-between mb-[20px]">
+      <div className="oid-library-container flex min-h-0 flex-1 flex-col rounded-lg bg-[var(--color-bg-1)] p-4 shadow">
+        <div className="nav-box mb-[20px] flex shrink-0 justify-between">
           <div className="flex items-center">
             <Input
               allowClear
@@ -225,16 +239,17 @@ const AlertAssign: React.FC = () => {
             </Button>
           </PermissionWrapper>
         </div>
-        <CustomTable
-          size="middle"
-          rowKey="id"
-          loading={tableLoading}
-          columns={columns}
-          dataSource={dataList}
-          pagination={pagination}
-          onChange={handleTableChange}
-          scroll={{ y: 'calc(100vh - 460px)' }}
-        />
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <CustomTable
+            size="middle"
+            rowKey="id"
+            loading={tableLoading}
+            columns={columns}
+            dataSource={dataList}
+            pagination={pagination}
+            onChange={handleTableChange}
+          />
+        </div>
         <OperateModal
           open={operateVisible}
           onClose={() => setOperateVisible(false)}
@@ -242,7 +257,7 @@ const AlertAssign: React.FC = () => {
           onSuccess={() => refreshList({ current: 1 })}
         />
       </div>
-    </>
+    </div>
   );
 };
 

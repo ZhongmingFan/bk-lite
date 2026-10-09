@@ -10,9 +10,10 @@ export const RING_DONE = '#dfe5ef';    // 良性终态(Succeeded):更浅的中�
 export const NEUTRAL_INK = '#1f2937';  // KPI 数值「健康/中性」深色
 export const SATURATION_WARN = 70;
 export const SATURATION_CRIT = 85;
-// 排行榜统一展示条数:同时驱动 topk(N) 拉取与前端 buildTopBars 截断,
-// 避免「后端取 8、前端只显示 5」式的取多丢少和散落的魔法数 5。
-export const TOP_N = 5;
+// Pod/Node 排行卡条数:同时驱动 topk(N) 拉取与前端 buildTopBars 截断。
+// 命名空间 Top 用工单原条数，不跟排行卡一起扩。
+export const TOP_N = 10;
+export const NS_TOP_N = 5;
 
 const L = '{instance_type="k8s",__$labels__}';
 
@@ -42,9 +43,10 @@ export const QUERIES: Record<string, ClusterQuery> = {
   crashloop: { query: `count(prometheus_remote_write_kube_pod_container_status_waiting_reason{instance_type="k8s",reason="CrashLoopBackOff",__$labels__} > 0)`, unit: 'none' },
   restarts1h: { query: `sum(increase(prometheus_remote_write_kube_pod_container_status_restarts_total${L}[1h]))`, unit: 'counts' },
 
-  deployPct: { query: `100 * sum(prometheus_remote_write_kube_deployment_status_replicas_available${L}) / clamp_min(sum(prometheus_remote_write_kube_deployment_spec_replicas${L}),1)`, unit: 'percent' },
+  // 用 spec - unavailable：unavailable=0 时 KSM 仍出数，避免 sum(available) 为空导致整式空向量被画成 0.0%。
+  deployPct: { query: `100 * clamp_min(sum(prometheus_remote_write_kube_deployment_spec_replicas${L}) - (sum(prometheus_remote_write_kube_deployment_status_replicas_unavailable${L}) or vector(0)), 0) / clamp_min(sum(prometheus_remote_write_kube_deployment_spec_replicas${L}),1)`, unit: 'percent' },
   stsPct: { query: `100 * sum(prometheus_remote_write_kube_statefulset_status_replicas_ready${L}) / clamp_min(sum(prometheus_remote_write_kube_statefulset_replicas${L}),1)`, unit: 'percent' },
-  dsPct: { query: `100 * sum(prometheus_remote_write_kube_daemonset_status_number_available${L}) / clamp_min(sum(prometheus_remote_write_kube_daemonset_status_desired_number_scheduled${L}),1)`, unit: 'percent' },
+  dsPct: { query: `100 * clamp_min(sum(prometheus_remote_write_kube_daemonset_status_desired_number_scheduled${L}) - (sum(prometheus_remote_write_kube_daemonset_status_number_unavailable${L}) or vector(0)), 0) / clamp_min(sum(prometheus_remote_write_kube_daemonset_status_desired_number_scheduled${L}),1)`, unit: 'percent' },
 
   cpuAllocatable: { query: `sum(prometheus_remote_write_kube_node_status_allocatable{instance_type="k8s",resource="cpu", __$labels__})`, unit: 'none' },
   cpuRequests: { query: `sum(prometheus_remote_write_kube_pod_container_resource_requests{instance_type="k8s",resource="cpu", __$labels__})`, unit: 'none' },
@@ -58,7 +60,8 @@ export const QUERIES: Record<string, ClusterQuery> = {
 
   topPodCpu: { query: `topk(${TOP_N}, sum by (pod) (rate(prometheus_remote_write_container_cpu_usage_seconds_total${L}[__$window__])))`, unit: 'none' },
   topPodMem: { query: `topk(${TOP_N}, sum by (pod) (prometheus_remote_write_container_memory_working_set_bytes${L}))`, unit: 'bytes' },
-  topNsMem: { query: `topk(${TOP_N}, sum by (container_label_io_kubernetes_pod_namespace) (prometheus_remote_write_container_memory_working_set_bytes${L}))`, unit: 'bytes' },
+  // 按 namespace 聚合：relabel 后已有短标签；未滚动采集器时把 docker 长 label 写成 namespace。不用 pod 名 join，避免跨 ns 同名叠在一起。
+  topNsMem: { query: `topk(${NS_TOP_N}, sum by (namespace) (label_replace(prometheus_remote_write_container_memory_working_set_bytes${L}, "namespace", "$1", "container_label_io_kubernetes_pod_namespace", "(.+)")))`, unit: 'bytes' },
 
   memPct: { query: `100 * sum(prometheus_remote_write_mem_used${L}) / sum(prometheus_remote_write_mem_total${L})`, unit: 'percent' },
   cpuPct: { query: `100 - avg(prometheus_remote_write_cpu_usage_idle{instance_type="k8s",cpu="cpu-total",__$labels__})`, unit: 'percent' },
@@ -79,4 +82,4 @@ export const QUERY_GROUPS: Record<string, string[]> = {
   panels: ['deployPct', 'stsPct', 'dsPct', 'cpuAllocatable', 'cpuRequests', 'cpuUsedCores', 'memAllocatable', 'memRequests', 'memUsedBytes', 'nodeMemTop', 'restartTop', 'topPodCpu', 'topPodMem', 'topNsMem']
 };
 
-export const NS_LABEL = 'container_label_io_kubernetes_pod_namespace';
+export const NS_LABEL = 'namespace';

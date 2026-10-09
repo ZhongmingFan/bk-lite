@@ -53,8 +53,10 @@ const SNMPTask: React.FC<SNMPTaskFormProps> = ({
   const baseRef = useRef<BaseTaskRef>(null as any);
   const { copyTaskData, setCopyTaskData } = useAssetManageStore();
   const { model_id: modelId } = modelItem;
+  const supportsTopology = modelId === 'network';
   const initialFormValues = {
     ...SNMP_FORM_INITIAL_VALUES,
+    ...(!supportsTopology ? { hasNetworkTopo: false } : {}),
     credentialPool: [{ version: 'v2', snmp_port: '161' }],
   };
 
@@ -120,14 +122,15 @@ const SNMPTask: React.FC<SNMPTaskFormProps> = ({
             credential.community = community;
           }
           if (version === 'v3') {
-            credential.level = item.level;
+            // 与凭据编辑器显示的默认值一致，覆盖未重新选择下拉项的情况。
+            credential.level = item.level || 'authNoPriv';
             credential.username = username;
-            credential.integrity = item.integrity;
+            credential.integrity = item.integrity || 'sha';
             if (authkey && authkey !== PASSWORD_PLACEHOLDER) {
               credential.authkey = authkey;
             }
-            if (item.level === 'authPriv') {
-              credential.privacy = item.privacy;
+            if (credential.level === 'authPriv') {
+              credential.privacy = item.privacy || 'aes';
               if (privkey && privkey !== PASSWORD_PLACEHOLDER) {
                 credential.privkey = privkey;
               }
@@ -137,7 +140,7 @@ const SNMPTask: React.FC<SNMPTaskFormProps> = ({
         }),
         params: {
           ...baseData.params,
-          ...buildSnmpTopologyParams(values),
+          ...(supportsTopology ? buildSnmpTopologyParams(values) : {}),
         },
       };
     },
@@ -207,7 +210,7 @@ const SNMPTask: React.FC<SNMPTaskFormProps> = ({
   }, [modelId, copyTaskData, setCopyTaskData]);
 
   useEffect(() => {
-    if (!hasNetworkTopo) {
+    if (!supportsTopology || !hasNetworkTopo) {
       return;
     }
 
@@ -243,6 +246,7 @@ const SNMPTask: React.FC<SNMPTaskFormProps> = ({
     deviceCycleType,
     form,
     hasNetworkTopo,
+    supportsTopology,
     recommendedInterval,
     topologyIntervalMode,
   ]);
@@ -284,6 +288,7 @@ const SNMPTask: React.FC<SNMPTaskFormProps> = ({
             addonAfter: t('Collection.k8sTask.second'),
           }}
         >
+          {supportsTopology && (<>
           <Form.Item
             label={t('Collection.SNMPTask.collectRelationships')}
             name="hasNetworkTopo"
@@ -532,8 +537,12 @@ const SNMPTask: React.FC<SNMPTaskFormProps> = ({
             }
           </Form.Item>
 
+          </>)}
+
           <Form.Item name="credentialPool">
             <CredentialPoolEditor
+              vaultCategory={modelItem.credential_category}
+              vaultTypeKeys={modelItem.credential_type_keys}
               credentialShape="snmp"
               editMode={Boolean(editId)}
               credentialHelp={buildSnmpCredentialHelp(t)}

@@ -192,6 +192,8 @@ export interface HexagonData {
   name: string;
   description: React.ReactNode | string;
   fill: string;
+  aiName?: string;
+  aiValue?: string;
 }
 
 export interface TimeValuesProps {
@@ -217,6 +219,8 @@ export interface InstanceParam {
   ordering?: string;
   /** asc | desc */
   order?: 'asc' | 'desc';
+  /** 超级用户未归属目录，替换当前组织列表 */
+  unassigned?: boolean;
 }
 
 export interface GroupInfo {
@@ -231,6 +235,8 @@ export interface ObjectItem {
   template_id?: string;
   template_type?: string;
   is_custom?: boolean;
+  is_built_in?: boolean;
+  is_pre?: boolean;
   is_visible?: boolean;
   parent?: number | null;
   level?: 'base' | 'derivative';
@@ -247,6 +253,8 @@ export interface ObjectItem {
   display_name?: string;
   collector?: string;
   collect_type?: string;
+  pack_version?: string;
+  stale_instance_count?: number;
   display_type?: string;
   icon?: string;
   instance_count?: number;
@@ -254,7 +262,7 @@ export interface ObjectItem {
     column_key?: string;
     name: string;
     type?: 'metric' | 'field';
-    role?: 'resource_ip';
+    role?: 'resource_ip' | 'namespace';
     sort_order: number;
     variable_id?: string;
     metrics: { plugin: string; metric: string; field?: string }[];
@@ -309,8 +317,9 @@ export interface MetricItem {
   query?: string;
   view_query?: string;
   view_config?: {
-    mode: 'top' | 'bottom' | 'limited';
+    mode?: 'top' | 'bottom' | 'limited';
     limit?: number;
+    os?: string[];
   };
   unit?: string;
   displayType?: string;

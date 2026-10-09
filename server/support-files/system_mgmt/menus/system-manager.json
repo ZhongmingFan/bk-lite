@@ -28,15 +28,6 @@
           ]
         },
         {
-          "id": "super_admin",
-          "name": "Super Administrator",
-          "operation": [
-            "View",
-            "Add",
-            "Delete"
-          ]
-        },
-        {
           "id": "login_auth",
           "name": "Login Auth",
           "operation": [
@@ -63,6 +54,30 @@
             "View",
             "Edit",
             "Add",
+            "Delete"
+          ]
+        },
+        {
+          "id": "super_admin",
+          "name": "Super Administrator",
+          "operation": [
+            "View",
+            "Add",
+            "Delete"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Credential",
+      "children": [
+        {
+          "id": "credential",
+          "name": "Credential",
+          "operation": [
+            "View",
+            "Add",
+            "Edit",
             "Delete"
           ]
         }
@@ -173,15 +188,6 @@
       "icon": "settings-fill",
       "children": [
         {
-          "id": "api_secret_key",
-          "name": "API Secret Key",
-          "operation": [
-            "View",
-            "Add",
-            "Delete"
-          ]
-        },
-        {
           "id": "audit_log",
           "name": "Audit Logs",
           "operation": [
@@ -198,6 +204,32 @@
         {
           "id": "network_white_list",
           "name": "Network Whitelist",
+          "operation": [
+            "View",
+            "Add",
+            "Edit",
+            "Delete"
+          ]
+        },
+        {
+          "id": "openapi_docs",
+          "name": "API Documentation",
+          "operation": [
+            "View"
+          ]
+        },
+        {
+          "id": "api_secret_key",
+          "name": "API Token",
+          "operation": [
+            "View",
+            "Add",
+            "Delete"
+          ]
+        },
+        {
+          "id": "system_api_secret",
+          "name": "System Token",
           "operation": [
             "View",
             "Add",
@@ -236,7 +268,11 @@
         "security_settings-View",
         "security_settings-Add",
         "security_settings-Edit",
-        "security_settings-Delete"
+        "security_settings-Delete",
+        "credential-View",
+        "credential-Add",
+        "credential-Edit",
+        "credential-Delete"
       ]
     },
     {

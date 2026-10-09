@@ -8,7 +8,7 @@ import attrLayoutStyle from './layout.module.scss';
 import useApiClient from '@/utils/request';
 import PermissionWrapper from '@/components/permission';
 import { Card, Modal, message, Tooltip } from 'antd';
-import { useRouter } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import ModelIcon from '@/app/cmdb/components/model-icon';
 import { EditTwoTone, DeleteTwoTone, CopyOutlined } from '@ant-design/icons';
 import { useSearchParams } from 'next/navigation';
@@ -24,7 +24,7 @@ const AboutLayout = ({ children }: { children: React.ReactNode }) => {
   const { isLoading } = useApiClient();
   const { t } = useTranslation();
   const { confirm } = Modal;
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const commonContext = useCommon();
 
   const { getClassificationList } = useClassificationApi();
@@ -186,8 +186,8 @@ const AboutLayout = ({ children }: { children: React.ReactNode }) => {
 
   return (
     <ModelDetailContext.Provider value={modelDetail}>
-      <div className={`${attrLayoutStyle.attrLayout}`}>
-        <Card style={{ width: '100%' }} className="mb-[20px]">
+      <div className={`${attrLayoutStyle.attrLayout} flex h-full min-h-0 min-w-0 w-full flex-col`}>
+        <Card style={{ width: '100%' }} className="mb-[20px] shrink-0">
           <header className="flex items-center">
             <ModelIcon
               icon={modelDetail.icn}
@@ -265,11 +265,8 @@ const AboutLayout = ({ children }: { children: React.ReactNode }) => {
           </header>
         </Card>
         <div
-          style={{
-            height: 'calc(100vh - 244px)',
-            ['--custom-height' as string]: 'calc(100vh - 244px)',
-          }}
-          className={attrLayoutStyle.attrLayout}
+          className={`${attrLayoutStyle.attrLayout} min-h-0 min-w-0 flex-1`}
+          style={{ ['--custom-height' as string]: '100%' }}
         >
           <WithSideMenuLayout
             showBackButton={true}

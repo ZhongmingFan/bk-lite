@@ -11,10 +11,15 @@ from apps.operation_analysis.serializers.scene_widget_serializers import (
     Application3DMetricRequestSerializer,
     Application3DWallRequestSerializer,
     NetworkStatusTopologyRequestSerializer,
+    RelatedTopologyRequestSerializer,
+    Room3DLayoutRequestSerializer,
+    Room3DRoomsRequestSerializer,
 )
 from apps.operation_analysis.services.application3d import Application3DQueryService
 from apps.operation_analysis.services.application3d.errors import Application3DError
 from apps.operation_analysis.services.network_status_topology import NetworkStatusTopologyService
+from apps.operation_analysis.services.related_topology import RelatedTopologyError, RelatedTopologyService
+from apps.operation_analysis.services.room3d import Room3DError, Room3DService
 
 
 class SceneWidgetViewSet(ViewSet):
@@ -44,6 +49,7 @@ class SceneWidgetViewSet(ViewSet):
             request=request,
             inst_uuids=[str(value) for value in data["inst_uuids"]],
             node_limit=data["node_limit"],
+            depth=data.get("depth"),
         )
         return Response(result)
 
@@ -57,6 +63,7 @@ class SceneWidgetViewSet(ViewSet):
                 Application3DQueryService.wall(
                     request,
                     applied_filters=serializer.validated_data.get("applied_filters"),
+                    application_id=(str(serializer.validated_data["application_id"]) if serializer.validated_data.get("application_id") else None),
                 )
             )
         except Application3DError as exc:
@@ -107,6 +114,55 @@ class SceneWidgetViewSet(ViewSet):
             )
         except Application3DError as exc:
             return self.application3d_error_response(exc)
+
+    @action(detail=False, methods=["post"], url_path="related_topology")
+    def related_topology(self, request):
+        """只读关联拓扑拼图。对象读权限走 CMDB NATS user_info，不绑运营分析 view-View。"""
+        serializer = RelatedTopologyRequestSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        try:
+            return Response(
+                RelatedTopologyService.build(
+                    request,
+                    inst_uuid=serializer.validated_data["inst_uuid"],
+                )
+            )
+        except RelatedTopologyError as exc:
+            return Response(
+                {"code": exc.code, "detail": exc.message},
+                status=self._APPLICATION3D_ERROR_STATUS.get(exc.code, status.HTTP_500_INTERNAL_SERVER_ERROR),
+            )
+
+    def _room3d_error_response(self, exc: Room3DError):
+        return Response(
+            {"code": exc.code, "detail": exc.message},
+            status=self._APPLICATION3D_ERROR_STATUS.get(exc.code, status.HTTP_500_INTERNAL_SERVER_ERROR),
+        )
+
+    @HasPermission("view-View")
+    @action(detail=False, methods=["post"], url_path="room3d/rooms")
+    def room3d_rooms(self, request):
+        serializer = Room3DRoomsRequestSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        try:
+            return Response(Room3DService.list_rooms(request))
+        except Room3DError as exc:
+            return self._room3d_error_response(exc)
+
+    @HasPermission("view-View")
+    @action(detail=False, methods=["post"], url_path="room3d/layout")
+    def room3d_layout(self, request):
+        serializer = Room3DLayoutRequestSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        try:
+            return Response(
+                Room3DService.layout(
+                    request,
+                    server_room_id=str(serializer.validated_data["server_room_id"]),
+                )
+            )
+        except Room3DError as exc:
+            return self._room3d_error_response(exc)
 
     @HasPermission("view-View")
     @action(detail=False, methods=["post"], url_path="application3d/metric")

@@ -41,7 +41,7 @@
 |---|---|---|---|
 | 策略操作 | 策略的创建、编辑、删除、查询与启用、停用 | 策略名与采集方式联合唯一；停用后不再产生新扫描结果；删除为单事务原子操作（先清绑定的 `PeriodicTask` 再删策略），避免产生周期性漏扫的孤儿策略 | GA |
 | 告警类型 | 策略告警类型 | `keyword` 关键字告警 / `aggregate` 聚合告警 | GA |
-| 策略定义 | 含组织范围、日志分组、查询条件、执行频率、检测周期、告警等级与通知配置 | `schedule` 执行周期、`period` 数据周期 | GA |
+| 策略定义 | 含组织范围、日志分组、查询条件、执行频率、检测周期、告警等级、通知配置与处理人 | `schedule` 执行周期、`period` 数据周期；处理人可空、多选，必须是策略所属组织内未禁用用户；组织变更后越界处理人拒绝 | GA |
 | 关键字告警 | 关键字告警支持展示字段配置 | — | GA |
 | 聚合告警 | 聚合告警支持聚合维度与多条件规则组合 | — | GA |
 | 告警等级 | 告警级别取值 | `info` / `warning` / `error` / `critical` | GA |
@@ -52,12 +52,13 @@
 
 | 功能项 | 功能说明 | 规格 / 约束 | 状态 |
 |---|---|---|---|
-| 告警列表 | 活跃告警与历史告警的列表查询、分页展示与筛选 | 告警状态：`new` 活跃 / `closed` 关闭 | GA |
+| 告警列表 | 活跃告警与历史告警的列表查询、分页展示与筛选 | 告警状态：`new` 活跃 / `closed` 关闭；组织在生成时从策略快照，策略删除后仍按快照可见；支持 `my_alert=1` 在当前可见集合中再筛处理人包含当前用户的告警，不靠 `operator`；主列表、`/all` 与 stats 同一套筛选 | GA |
 | 告警统计 | 提供告警统计用于态势观察 | — | GA |
 | 告警详情 | 查看告警详情、最近原始日志 | — | GA |
-| 事件时间线 | 查看事件时间线与单事件原始日志 | 告警须可追溯到关联事件与原始日志 | GA |
+| 事件时间线 | 查看事件时间线与单事件原始日志 | 告警须可追溯到关联事件与原始日志；命中热力图与 raw log 只看命中事件，认领 / 分派 / 转派 / 关闭以动作标签出现在同一序列 | GA |
 | 原始日志快照 | 告警生命周期内累积存储事件原始数据快照 | 快照存于对象存储（S3/MinIO），自动压缩 | GA |
-| 告警关闭 | 人工关闭告警并记录关闭操作人 | 列表与详情可查看关闭操作人 | GA |
+| 告警关闭 | 人工关闭告警并记录关闭操作人 | 列表与详情可查看关闭操作人；没有处理人时可关，已有处理人时只有当前处理人能关 | GA |
+| 告警认领 / 分派 / 转派 | 空处理人的活跃告警可认领给自己或分派给告警所属组织用户；当前处理人可把活跃告警转派给该组织一名或多名用户 | 空单不能转派；转派整表替换 `handlers`，写 `reassigned` Event；认领 / 分派 / 转派 / 关闭写 Event（`claimed` / `assigned` / `reassigned` / `closed`）；手工分派与转派按策略已开的人工渠道通知新处理人，告警中心副本 / 仅 NATS 不发；创建与认领不发分派通知 | GA |
 
 ### 5. 集成管理 - 采集接入
 
@@ -89,13 +90,13 @@
 
 ## 五、支持的采集类型与采集器范围
 
-平台随包预置 **18 种**内置采集类型，按 `display_category` 归入 **7 大分类**，由 **6 种**采集器（`collector`）承载，开箱即用、无需手动定义。下表按分类列出采集类型，括号内为该采集类型预置的解析字段数（基于内置 `support-files/plugins/*/collect_type.json` 的 `attrs` 统计），合计预置约 **328 个**解析字段。
+平台随包预置 **19 种**内置采集类型，按 `display_category` 归入 **7 大分类**，由 **6 种**采集器（`collector`）承载，开箱即用、无需手动定义。下表按分类列出采集类型，括号内为该采集类型预置的解析字段数（基于内置 `support-files/plugins/*/collect_type.json` 的 `attrs` 统计）。
 
 ### 5.1 内置采集类型（按分类）
 
 | 分类（display_category） | 采集类型（预置字段数） | 采集器 |
 |---|---|---|
-| 通用（general，3 种） | file 文件（9）、syslog（16）、snmp_trap（8） | Vector / Vector / Snmptrapd |
+| 通用（general，4 种） | file 文件（9）、kafka_subscribe Kafka 日志订阅（12）、syslog（16）、snmp_trap（8） | Vector / Vector / Vector / Snmptrapd |
 | Kubernetes（k8s，1 种） | kubernetes（10） | Vector |
 | 数据库（database，5 种） | mysql（17）、postgresql（18）、redis（15）、mongodb（11）、elasticsearch（24） | Filebeat |
 | 中间件（middleware，4 种） | apache（22）、nginx（22）、kafka（14）、rabbitmq（10） | Filebeat |
@@ -107,19 +108,19 @@
 
 | 采集器（collector） | 承载采集类型数 | 适用对象 |
 |---|---|---|
-| Vector | 4 | file、syslog、kubernetes、docker |
+| Vector | 5 | file、syslog、kubernetes、docker、kafka_subscribe |
 | Filebeat | 9 | mysql、postgresql、redis、mongodb、elasticsearch、apache、nginx、kafka、rabbitmq |
 | Packetbeat | 2 | flows、http |
 | Auditbeat | 1 | file_integrity |
 | Winlogbeat | 1 | winlogbeat |
 | Snmptrapd | 1 | snmp_trap |
 
-> 说明：18 种采集类型与 7 大分类口径与 PRD 一致；分类排序按代码 `DISPLAY_CATEGORY_ORDER`（general → k8s → database → middleware → network → container → security）。括号内字段数为各采集类型 `collect_type.json` 中 `attrs` 预置字段条目数，反映该类型默认抽取/规范化的日志字段，实际入库字段可随解析规则扩展。源码中内置采集类型与采集器均未标注 Beta，全部为 GA；除内置类型外，日志支持基于 Vector / Filebeat 等采集器自定义采集配置扩展自定义日志源。
+> 说明：19 种采集类型与 7 大分类口径一致；分类排序按代码 `DISPLAY_CATEGORY_ORDER`（general → k8s → database → middleware → network → container → security）。括号内字段数为各采集类型 `collect_type.json` 中 `attrs` 预置字段条目数，反映该类型默认抽取/规范化的日志字段，实际入库字段可随解析规则扩展。源码中内置采集类型与采集器均未标注 Beta，全部为 GA；除内置类型外，日志支持基于 Vector / Filebeat 等采集器自定义采集配置扩展自定义日志源。
 
 
 ## 六、采集类型字段明细（逐项）
 
-> 本节逐项列出各日志采集类型的预置字段，源自各采集类型 `collect_type.json` 的 `attrs` 定义。共 18 种采集类型、328 个字段。
+> 本节逐项列出各日志采集类型的预置字段，源自各采集类型 `collect_type.json` 的 `attrs` 定义。共 19 种采集类型。
 
 ### 容器
 
@@ -268,6 +269,23 @@
 | `source_type` | 数据来源类型 |
 | `timestamp` | 日志时间戳 |
 | `instance_id` | 采集实例ID |
+
+#### kafka_subscribe（采集器 Vector · 12 字段）
+
+| 字段 | 中文含义 |
+|---|---|
+| `collect_type` | 采集类型标识 |
+| `collector` | 采集器名称 |
+| `instance_id` | 采集实例ID |
+| `host_name` | 采集节点主机名 |
+| `host_ip` | 采集节点 IP |
+| `message` | 日志正文 |
+| `offset` | Kafka 分区偏移量 |
+| `partition` | Kafka 分区号 |
+| `source_type` | 数据来源类型 |
+| `timestamp` | 日志服务端时间 |
+| `collect_timestamp` | 日志采集时间 |
+| `topic` | Kafka Topic 名称 |
 
 #### snmp_trap（采集器 Snmptrapd · 8 字段）
 

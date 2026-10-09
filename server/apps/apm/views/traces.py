@@ -7,7 +7,7 @@ from django.http import Http404
 from rest_framework import status, viewsets
 from rest_framework.response import Response
 
-from apps.apm.adapters import TelemetryStoreUnavailable, VictoriaTracesTelemetryStore
+from apps.apm.adapters import TelemetryStoreUnavailable, VictoriaTracesTelemetryStore, telemetry_error_payload
 from apps.apm.adapters.victoriatraces import _encode_cursor
 from apps.apm.renderers import ApmRenderer
 from apps.apm.serializers import TraceSearchSerializer
@@ -77,7 +77,7 @@ class ApmTraceViewSet(viewsets.ViewSet):
         organization_ids = visible_organization_ids(request)
         if not organization_ids:
             return Response({"items": [], "next_cursor": None})
-        serializer = TraceSearchSerializer(data=request.query_params)
+        serializer = TraceSearchSerializer(data=request.query_params, context={"request": request})
         if not serializer.is_valid():
             return Response(
                 {"code": "invalid_query", "detail": serializer.errors},
@@ -110,7 +110,7 @@ class ApmTraceViewSet(viewsets.ViewSet):
                 filter_items=lambda items: self.access.filter_summaries(items, organization_ids),
                 cursor=query.cursor,
                 limit=query.limit,
-                encode_cursor=lambda item: _encode_cursor(item.started_at),
+                encode_cursor=lambda item: _encode_cursor(item.started_at, item.trace_id),
             )
         except ValueError as exc:
             return Response(
@@ -118,10 +118,7 @@ class ApmTraceViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         except TelemetryStoreUnavailable as exc:
-            return Response(
-                {"detail": str(exc), "code": "telemetry_unavailable"},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
+            return Response(telemetry_error_payload(exc), status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response({"items": [_summary_data(item) for item in visible], "next_cursor": next_cursor})
 
     @HasPermission("traces-View")
@@ -131,11 +128,11 @@ class ApmTraceViewSet(viewsets.ViewSet):
         try:
             detail = self._query_service().get_trace(pk.lower())
         except TelemetryStoreUnavailable as exc:
-            return Response(
-                {"detail": str(exc), "code": "telemetry_unavailable"},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
+            return Response(telemetry_error_payload(exc), status=status.HTTP_503_SERVICE_UNAVAILABLE)
         organization_ids = visible_organization_ids(request)
-        if detail is None or not organization_ids or not self.access.can_view_detail(detail, organization_ids):
+        if detail is None or not organization_ids:
             raise Http404
-        return Response(_detail_data(detail))
+        visible = self.access.filter_detail(detail, organization_ids)
+        if visible is None:
+            raise Http404
+        return Response(_detail_data(visible))

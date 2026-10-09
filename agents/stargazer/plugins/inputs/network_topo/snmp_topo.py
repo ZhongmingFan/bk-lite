@@ -10,7 +10,6 @@ try:
     from pysnmp.hlapi.asyncio import bulkCmd as hlapi_bulk_cmd
     from pysnmp.hlapi.asyncio import getCmd as hlapi_get_cmd
     from pysnmp.hlapi.asyncio import nextCmd as hlapi_next_cmd
-    from pysnmp.hlapi.asyncio import usmAesCfb128Protocol, usmDESPrivProtocol, usmHMACMD5AuthProtocol, usmHMACSHAAuthProtocol
     from pysnmp.proto import errind
     from pysnmp.proto.rfc1902 import Null
     from pysnmp.proto.rfc1905 import EndOfMibView, endOfMibView
@@ -21,8 +20,6 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in environments with
     CommunityData = ContextData = ObjectIdentity = ObjectType = None  # type: ignore
     UdpTransportTarget = UsmUserData = None  # type: ignore
     hlapi_bulk_cmd = hlapi_get_cmd = hlapi_next_cmd = None  # type: ignore
-    usmAesCfb128Protocol = usmDESPrivProtocol = None  # type: ignore
-    usmHMACMD5AuthProtocol = usmHMACSHAAuthProtocol = None  # type: ignore
     errind = None  # type: ignore
     Null = None  # type: ignore
     endOfMibView = None  # type: ignore
@@ -32,6 +29,8 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in environments with
 
 
 from core.infra.snmp_engine_pool import shared_snmp_engine
+from core.infra.snmp_usm import normalize_integrity, normalize_privacy, normalize_security_level, v3_usm_kwargs
+from core.logger import safe_exception_info, safe_log_value
 from plugins.inputs.network_topo.protocol_oids import PROTOCOL_OID_GROUPS, flatten_oid_registry, get_oid_meta
 from plugins.inputs.network_topo.protocol_oids import get_root_oid as lookup_root_oid
 from plugins.inputs.network_topo.topology_facts import build_topology_fact as build_protocol_topology_fact
@@ -77,6 +76,22 @@ class FallbackOidResult:
     def __init__(self, records, skipped=False):
         self.records = records
         self.skipped = skipped
+
+
+def _is_expected_collection_error(error: BaseException) -> bool:
+    if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
+        return True
+    message = str(error).lower()
+    return any(
+        token in message
+        for token in (
+            "no snmp response",
+            "request timed out",
+            "request timeout",
+            "empty snmp response",
+            "snmp fallback collection returned no data",
+        )
+    )
 
 
 def get_root_oid(oid, roots=None):
@@ -164,7 +179,7 @@ class SnmpAuth(object):
         self.version = version
         self.community = community
         self.username = username
-        self.level = level
+        self.level = normalize_security_level(level)
         self.integrity = integrity
         self.privacy = privacy
         self.authKey = authkey
@@ -177,44 +192,34 @@ class SnmpAuth(object):
         if self.version in ("v2", "v2c"):
             if self.community is None:
                 raise Exception("Community not set when using network version 2")
+            return
         if self.version == "v3":
-            if self.username is None:
+            if not self.username:
                 raise Exception("Username not set when using network version 3")
+            if self.level not in {"noAuthNoPriv", "authNoPriv", "authPriv"}:
+                raise Exception("Invalid SNMP security level")
+            if self.level in {"authNoPriv", "authPriv"}:
+                self.integrity = normalize_integrity(self.integrity)
+                if self.integrity is None or len(self.authKey or "") < 8:
+                    raise Exception("Authentication algorithm and an authkey of at least 8 characters are required.")
+            if self.level == "authPriv":
+                self.privacy = normalize_privacy(self.privacy)
+                if self.privacy is None or len(self.privKey or "") < 8:
+                    raise Exception("Privacy algorithm and a privkey of at least 8 characters are required.")
 
-        if self.level == "authPriv" and self.privacy is None:
-            raise Exception("Privacy algorithm not set when using authPriv")
-
-    def auth(self):  # Use SNMP Version 2
+    def auth(self):
         if self.version in ("v2", "v2c"):
-            snmp_auth = CommunityData(self.community)
-
-        # Use SNMP Version 3 with authNoPriv
-        else:
-            integrity_proto = None
-            privacy_proto = None
-            if self.integrity == "sha":
-                integrity_proto = usmHMACSHAAuthProtocol
-            elif self.integrity == "md5":
-                integrity_proto = usmHMACMD5AuthProtocol
-
-            if self.privacy == "aes":
-                privacy_proto = usmAesCfb128Protocol
-            elif self.privacy == "des":
-                privacy_proto = usmDESPrivProtocol
-
-            if self.level == "authNoPriv":
-                snmp_auth = UsmUserData(self.username, authKey=self.authKey, authProtocol=integrity_proto)
-
-            # Use SNMP Version 3 with authPriv
-            else:
-                snmp_auth = UsmUserData(
-                    self.username,
-                    authKey=self.authKey,
-                    privKey=self.privKey,
-                    authProtocol=integrity_proto,
-                    privProtocol=privacy_proto,
-                )
-        return snmp_auth
+            return CommunityData(self.community)
+        return UsmUserData(
+            self.username,
+            **v3_usm_kwargs(
+                level=self.level,
+                integrity=self.integrity,
+                privacy=self.privacy,
+                authkey=self.authKey,
+                privkey=self.privKey,
+            ),
+        )
 
     def get_transport_opts(self):
         """获取传输配置"""
@@ -405,8 +410,7 @@ class SnmpTopo:
                     if null_var_binds[col]:
                         row[col] = (previous_var_binds[col][0], endOfMibView)
                         continue
-                    stop_flag = False
-                    if isinstance(val, Null):
+                    if isinstance(val, Null) or _is_ended_value(val):
                         row[col] = (previous_var_binds[col][0], endOfMibView)
                         null_var_binds[col] = True
                         continue
@@ -414,6 +418,7 @@ class SnmpTopo:
                         row[col] = (previous_var_binds[col][0], endOfMibView)
                         null_var_binds[col] = True
                         continue
+                    stop_flag = False
                 if stop_flag:
                     break
                 processed_rows.append(row)
@@ -444,7 +449,11 @@ class SnmpTopo:
         except RuntimeError as err:
             if not self._is_retryable_fallback_error(err):
                 raise
-            logger.warning(f"bulkCmd retryable error host={self.host}, falling back to per-OID walk: {err}")
+            logger.debug(
+                "event=snmp_topo_bulk_fallback host=%s error_type=%s",
+                safe_log_value(self.host),
+                type(err).__name__,
+            )
             return await self._fallback_walk_cmd()
 
     @staticmethod
@@ -538,12 +547,22 @@ class SnmpTopo:
         ) = await self._next_walk_oid(oid, row_consumer=append_records)
         if errorIndication:
             if self._is_retryable_fallback_error(errorIndication):
-                logger.warning(f"Skipping OID subtree host={self.host} oid={oid}: {errorIndication}")
+                logger.debug(
+                    "event=snmp_topo_oid_skipped host=%s oid=%s error_type=%s",
+                    safe_log_value(self.host),
+                    safe_log_value(oid),
+                    type(errorIndication).__name__,
+                )
                 return FallbackOidResult(records=[], skipped=True)
             raise RuntimeError(str(errorIndication))
         if errorStatus:
             if self._is_retryable_fallback_error(errorStatus):
-                logger.warning(f"Skipping OID subtree host={self.host} oid={oid}: {errorStatus.prettyPrint()}")
+                logger.debug(
+                    "event=snmp_topo_oid_skipped host=%s oid=%s error_type=%s",
+                    safe_log_value(self.host),
+                    safe_log_value(oid),
+                    type(errorStatus).__name__,
+                )
                 return FallbackOidResult(records=[], skipped=True)
             raise RuntimeError(f"SNMP error: {errorStatus.prettyPrint()} (oid={oid})")
         return FallbackOidResult(records=records)
@@ -580,7 +599,11 @@ class SnmpTopo:
             oid_result = await self._fallback_collect_oid(oid)
             if oid_result.skipped:
                 if oid in OPTIONAL_FALLBACK_ROOTS:
-                    logger.info(f"Optional fallback OID unavailable host={self.host} oid={oid}; continuing")
+                    logger.debug(
+                        "event=snmp_topo_optional_oid_unavailable host=%s oid=%s",
+                        safe_log_value(self.host),
+                        safe_log_value(oid),
+                    )
                     continue
                 skipped_required_oids.append(oid)
                 continue
@@ -823,13 +846,22 @@ class SnmpTopo:
             model_data = {"network_topo": snmp_data}
             inst_data = {"result": model_data, "success": True}
         except Exception as err:
-            logger.exception(
-                "event=snmp_topo_collect_failed host=%s task_id=%s failed_stage=%s error_type=%s",
-                self.host,
-                self.collection_task_id,
+            log_args = (
+                safe_log_value(self.host),
                 "list_all_resources",
                 type(err).__name__,
             )
+            if _is_expected_collection_error(err):
+                logger.debug(
+                    "event=snmp_topo_collect_unavailable host=%s " "failed_stage=%s error_type=%s",
+                    *log_args,
+                )
+            else:
+                logger.error(
+                    "event=snmp_topo_collect_failed host=%s " "failed_stage=%s error_type=%s",
+                    *log_args,
+                    exc_info=safe_exception_info(err),
+                )
             inst_data = {"result": {"cmdb_collect_error": str(err)}, "success": False}
 
         return inst_data

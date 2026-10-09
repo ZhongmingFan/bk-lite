@@ -8,7 +8,11 @@ import PermissionWrapper from "@/components/permission";
 import type { KnowledgePage } from "@/app/opspilot/types/wiki";
 import { useTranslation } from "@/utils/i18n";
 
-import { PAGE_STATUS_LABEL } from "./wikiFormat";
+import {
+  PAGE_STATUS_LABEL,
+  formatPageTypeLabel,
+  formatWikiDirectoryLabel,
+} from "./wikiFormat";
 
 const PAGE_STATUS_COLOR: Record<string, string> = {
   active: "green",
@@ -72,7 +76,7 @@ const WikiPageTable: React.FC<WikiPageTableProps> = ({
       .map((item) =>
         item.id === unclassifiedDirectoryId
           ? t("wiki.directoryUnclassified")
-          : item.name,
+          : formatWikiDirectoryLabel(t, item),
       )
       .join(" / ");
 
@@ -83,6 +87,7 @@ const WikiPageTable: React.FC<WikiPageTableProps> = ({
       dataIndex: "page_type",
       key: "page_type",
       width: 120,
+      render: (pageType: string) => formatPageTypeLabel(t, pageType, "--"),
     },
     {
       title: t("wiki.directory"),
@@ -164,7 +169,7 @@ const WikiPageTable: React.FC<WikiPageTableProps> = ({
               </Button>
             </Popconfirm>
             <Popconfirm
-              title={t("wiki.deleteConfirm")}
+              title={t("wiki.deletePageConfirm")}
               disabled={!pageLifecycleMutationAllowed}
               onConfirm={() => actions.archive(page.id)}
             >
@@ -214,7 +219,7 @@ const WikiPageTable: React.FC<WikiPageTableProps> = ({
               </Button>
             )}
             <Popconfirm
-              title={t("wiki.deleteConfirm")}
+              title={t("wiki.deletePageConfirm")}
               disabled={!pageLifecycleMutationAllowed}
               onConfirm={() => actions.archive(page.id)}
             >

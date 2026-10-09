@@ -1,7 +1,6 @@
 Transmission Ciena SNMP:
   name: Transmission Ciena SNMP
-  desc: SNMP monitoring template for Ciena transmission device. It reports system
-    uptime, per-port inbound traffic rate, and per-port outbound traffic rate
+  desc: "SNMP monitoring template for Ciena transmission device. It reports uptime, CPU utilization, memory used, and interface traffic, for CES/SAOS (enterprise PEN 1271)."
 monitor_object:
   Transmission: Transmission
 monitor_object_type:
@@ -40,9 +39,14 @@ monitor_object_metric:
         assess sending performance for traffic management and optimization.
     device_cpu_usage:
       name: CPU Usage
-      desc: CPU utilization of the transmission device reported directly as a 0-100
-        percentage. Sustained high CPU usage can indicate wireless backhaul traffic
-        pressure, control-plane load or abnormal traffic.
+      desc: Per-slot CES/SAOS chassis CPU utilization from cienaCesChassisCPUHealthCurrMeasurement
+        (cpu-Usage), reported directly as a 0-100 percentage. Sustained high CPU usage
+        can indicate control-plane load, forwarding pressure or abnormal traffic.
+    device_memory_used:
+      name: Memory Used
+      desc: CES/SAOS chassis memory current measurement from cienaCesChassisMemoryHealthCurrMeasurement,
+        reported by the device in KB and scaled to bytes. The table has no paired
+        used/total, so memory utilization percent is not derived.
     device_memory_usage:
       name: Memory Usage
       desc: Memory utilization of the transmission device reported directly as a 0-100
@@ -55,14 +59,21 @@ monitor_object_metric:
         hardware.
     device_fan_state:
       name: Fan Status
-      desc: Operational state of each transmission device fan or fan controller. A
-        non-normal state indicates a cooling module fault, offline module, or communication
-        failure and may lead to overheating.
+      desc: Fan state of the Ciena CES/SAOS chassis. 1 means ok or uninstalled (empty
+        slots keep a series); 2 means rpm-warning (abnormal); 3 means unknown (gray,
+        no alert).
+      enum:
+        "1": Normal
+        "2": Abnormal
+        "3": Unknown
     device_psu_state:
       name: Power Supply Status
-      desc: Operational state of each transmission device power supply. A non-normal
-        state indicates offline power, missing input, over-temperature, hardware fault,
-        or alert condition that should be investigated.
+      desc: Power-supply state of the Ciena CES/SAOS chassis. 1 means online or uninstalled
+        (empty slots keep a series); 2 means faulted or operationally offline.
+      enum:
+        "1": Normal
+        "2": Abnormal
+        "3": Unknown
 monitor_object_metric_group:
   Transmission:
     Base: Base

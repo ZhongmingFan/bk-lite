@@ -12,7 +12,6 @@ from apps.cmdb.services import unique_rule as ur
 from apps.cmdb.services.unique_rule import ModelUniqueRule
 from apps.core.exceptions.base_app_exception import BaseAppException
 
-
 # --------------------------------------------------------------------------
 # value helpers
 # --------------------------------------------------------------------------
@@ -46,6 +45,27 @@ def test_build_rule_signature_with_empty_returns_none():
 def test_build_rule_signature_ok():
     sig = ur._build_rule_signature({"a": "1", "b": "2"}, ["a", "b"])
     assert sig == ('"1"', '"2"')
+
+
+def test_build_rule_signature_cloud_int_matches_numeric_string():
+    assert ur._build_rule_signature({"ip_addr": "10.0.0.1", "cloud": 1}, ["ip_addr", "cloud"]) == ur._build_rule_signature(
+        {"ip_addr": "10.0.0.1", "cloud": "1"},
+        ["ip_addr", "cloud"],
+    )
+
+
+def test_collect_conflicts_cloud_int_vs_legacy_string():
+    rules = [ModelUniqueRule(rule_id="r1", order=1, field_ids=["ip_addr", "cloud"])]
+    items = [{"ip_addr": "10.0.0.1", "cloud": 1, "_id": 10}]
+    exist_items = [{"ip_addr": "10.0.0.1", "cloud": "1", "_id": 1, "inst_name": "old"}]
+    conflicts = ur.collect_unique_rule_conflicts(
+        rules,
+        items,
+        exist_items,
+        {"ip_addr": {"attr_name": "IP"}, "cloud": {"attr_name": "云区域"}},
+    )
+    assert len(conflicts) == 1
+    assert conflicts[0].exist_instance_ids == [1]
 
 
 def test_get_attr_name():
@@ -318,7 +338,7 @@ def test_build_unique_rule_context(monkeypatch):
         {"attr_id": "sn", "attr_name": "序列号", "attr_type": "str", "is_only": True, "is_required": True},
     ]
     monkeypatch.setattr(
-        "apps.cmdb.services.model.ModelManage.search_model_info",
+        "apps.cmdb.services.unique_rule.search_model_info",
         lambda model_id: {"model_id": "host", "attrs": json.dumps(attrs), "unique_rules": "[]"},
     )
     ctx = ur.build_unique_rule_context("host")
@@ -328,7 +348,7 @@ def test_build_unique_rule_context(monkeypatch):
 
 @pytest.mark.django_db
 def test_build_unique_rule_context_model_missing(monkeypatch):
-    monkeypatch.setattr("apps.cmdb.services.model.ModelManage.search_model_info", lambda model_id: {})
+    monkeypatch.setattr("apps.cmdb.services.unique_rule.search_model_info", lambda model_id: {})
     with pytest.raises(BaseAppException):
         ur.build_unique_rule_context("nope")
 
@@ -338,7 +358,7 @@ def test_list_unique_rules(monkeypatch):
     attrs = [{"attr_id": "sn", "attr_name": "序列号", "attr_type": "str", "is_required": True}]
     rules = json.dumps([{"rule_id": "r1", "order": 1, "field_ids": ["sn"]}])
     monkeypatch.setattr(
-        "apps.cmdb.services.model.ModelManage.search_model_info",
+        "apps.cmdb.services.unique_rule.search_model_info",
         lambda model_id: {"model_id": "host", "attrs": json.dumps(attrs), "unique_rules": rules},
     )
     out = ur.list_unique_rules("host")
@@ -352,7 +372,7 @@ def test_list_unique_rule_candidate_fields(monkeypatch):
         {"attr_id": "inst_name", "attr_name": "名称", "attr_type": "str"},
     ]
     monkeypatch.setattr(
-        "apps.cmdb.services.model.ModelManage.search_model_info",
+        "apps.cmdb.services.unique_rule.search_model_info",
         lambda model_id: {"model_id": "host", "attrs": json.dumps(attrs), "unique_rules": "[]"},
     )
     out = ur.list_unique_rule_candidate_fields("host")

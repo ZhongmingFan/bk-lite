@@ -28,6 +28,7 @@ export const CARD_GLASS = {
   fontFamily: '"PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif',
   titleSize: 48,
   statusSize: 42,
+  coverageSize: 28,
   iconSize: 64,
 } as const;
 
@@ -195,8 +196,20 @@ const rgbaAlpha = (value: string) => {
   return match ? Number(match[1]) : 0;
 };
 
+/** Paint coordinates stay in the 768×320 layout even when the bitmap is smaller. */
+const logicalCanvasSize = (ctx: CanvasRenderingContext2D) => {
+  const transform = typeof ctx.getTransform === 'function' ? ctx.getTransform() : null;
+  const scaleX = transform && Number.isFinite(transform.a) && transform.a !== 0 ? transform.a : 1;
+  const scaleY = transform && Number.isFinite(transform.d) && transform.d !== 0 ? transform.d : 1;
+  return {
+    w: ctx.canvas.width / scaleX,
+    h: ctx.canvas.height / scaleY,
+  };
+};
+
 const paintGlassBody = (ctx: CanvasRenderingContext2D) => {
-  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  const { w, h } = logicalCanvasSize(ctx);
+  ctx.clearRect(0, 0, w, h);
 };
 
 const paintCubeIcon = (
@@ -252,8 +265,7 @@ const paintFrontChrome = (
   ctx: CanvasRenderingContext2D,
   visual: Application3DCardVisual,
 ) => {
-  const w = ctx.canvas.width;
-  const h = ctx.canvas.height;
+  const { w, h } = logicalCanvasSize(ctx);
   const tone = visual.cardTone;
   const tokens = CARD_TONE[tone];
   const padX = 40;
@@ -297,6 +309,15 @@ const paintFrontChrome = (
   ctx.stroke();
   ctx.fillStyle = tokens.statusText;
   ctx.fillText(visual.statusLabel, tagX + tagPadX, tagY + tagH / 2 + 1);
+
+  if (visual.coverageLabel) {
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.font = `500 ${CARD_GLASS.coverageSize}px ${CARD_GLASS.fontFamily}`;
+    ctx.fillStyle = 'rgba(148, 160, 176, 0.72)';
+    ctx.fillText(visual.coverageLabel, w - padX, tagY + tagH / 2 + 1);
+    ctx.textAlign = 'left';
+  }
 
   if (!visual.showBadge || !badge) return;
   roundRectPath(ctx, badge.x, badge.y, badge.width, badge.height, badge.radius);
@@ -343,8 +364,7 @@ export const paintApplication3DCardSide = (
 };
 
 const paintBackChrome = (ctx: CanvasRenderingContext2D) => {
-  const w = ctx.canvas.width;
-  const h = ctx.canvas.height;
+  const { w, h } = logicalCanvasSize(ctx);
   const inset = CARD_GLASS.inset + 18;
   roundRectPath(
     ctx,

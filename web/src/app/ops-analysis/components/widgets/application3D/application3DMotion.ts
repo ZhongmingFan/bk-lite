@@ -1,3 +1,5 @@
+import type { Application3DPageEffect } from '@/app/ops-analysis/utils/application3DWallConfig';
+
 /**
  * First-open Application Wall entrance and filter substitute motion.
  * Kept out of the legacy visual palette file so motion can change without
@@ -23,6 +25,55 @@ export const WALL_FILTER_MOTION = {
   durationMs: 180,
   startScale: 0.98,
 } as const;
+
+export const WALL_PAGE_TURN_MOTION = {
+  durationMs: 320,
+  /** World X offset: next comes from right (+), prev comes from left (-). */
+  offsetX: 1.6,
+  /** World Z offset: cards start slightly deeper into the scene for 3D depth perception. */
+  offsetZ: -0.7,
+  /** Y-axis tilt in degrees: subtle yaw towards view center during slide. */
+  rotateYDeg: 2.2,
+  /** Subtle column-based stagger to create a refined wave effect without delaying completion. */
+  columnStaggerMs: 14,
+} as const;
+
+/**
+ * Old page fades out before the new page fades in, so the wall dims in
+ * between. The two pages overlap only while both are still partial.
+ * durationMs is the settle time: incoming delay plus incoming fade.
+ */
+export const WALL_PAGE_FADE_MOTION = {
+  outgoingMs: 560,
+  incomingDelayMs: 280,
+  incomingMs: 560,
+  durationMs: 840,
+} as const;
+
+export const WALL_PAGE_FLIP_MOTION = {
+  durationMs: 360,
+  /** Incoming cards start edge-on (side facing the camera), then turn to face it. */
+  rotateYDeg: 90,
+  columnStaggerMs: 16,
+} as const;
+
+/** Time from the start of a page turn until the wall has settled. Stays under the 5s minimum dwell. */
+export const application3DPageEffectLeadMs = (
+  effect: Application3DPageEffect,
+) => {
+  if (effect === 'cut') return 0;
+  if (effect === 'fade') {
+    return Math.max(
+      WALL_PAGE_FADE_MOTION.durationMs,
+      WALL_PAGE_FADE_MOTION.incomingDelayMs + WALL_PAGE_FADE_MOTION.incomingMs,
+      WALL_PAGE_FADE_MOTION.outgoingMs,
+    );
+  }
+  if (effect === 'flip') {
+    return WALL_PAGE_FLIP_MOTION.durationMs + 5 * WALL_PAGE_FLIP_MOTION.columnStaggerMs;
+  }
+  return WALL_PAGE_TURN_MOTION.durationMs + 5 * WALL_PAGE_TURN_MOTION.columnStaggerMs;
+};
 
 export const FOCUS_MOTION = {
   durationMs: 380,

@@ -27,6 +27,20 @@ export const SCENE_WIDGET_CAPABILITIES: Record<
     shareSupported: true,
     reportSupported: false,
   },
+  relatedTopology: {
+    type: 'relatedTopology',
+    selfFetch: true,
+    surfaces: ['dashboard', 'screen'],
+    shareSupported: true,
+    reportSupported: false,
+  },
+  room3D: {
+    type: 'room3D',
+    selfFetch: true,
+    surfaces: ['screen'],
+    shareSupported: true,
+    reportSupported: false,
+  },
 };
 
 export const getSceneWidgetCapability = (

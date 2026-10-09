@@ -55,6 +55,15 @@ def fake_graph(monkeypatch):
     def _install(module_path: str, **returns):
         fake = FakeGraphClient(**returns)
         monkeypatch.setattr(f"{module_path}.GraphClient", lambda *a, **k: fake)
+        if module_path == "apps.cmdb.services.model":
+            monkeypatch.setattr("apps.cmdb.services.model_graph_query.GraphClient", lambda *a, **k: fake)
         return fake
 
     return _install
+
+
+@pytest.fixture
+def transfer_owner(db):
+    from apps.system_mgmt.models.user import User
+
+    return User.objects.create(username="transfer-test", domain="tenant-a")

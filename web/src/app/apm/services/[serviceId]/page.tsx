@@ -1,7 +1,8 @@
 'use client';
 
+import './register-service-pilot';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useParams, useSearchParams } from 'next/navigation';
+import { useParams, usePathname, useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import {
   AppstoreOutlined,
@@ -36,6 +37,7 @@ import CatalogState, {
   type CatalogStateKind,
 } from '@/app/apm/components/catalog-state';
 import { DEPLOYMENT_LOOKBACK_MS, DEPLOYMENT_STATUS_META } from '@/app/apm/components/deployment-status';
+import { isTimeWindow } from '@/app/apm/components/service-catalog-model';
 import HealthDot from '@/app/apm/components/health-dot';
 import { StatusPill } from '@/app/apm/components/home/section-card';
 import {
@@ -66,6 +68,7 @@ import { isInferredTopologyNode } from '@/app/apm/services/topology/topology-lay
 import ServiceErrorTab from '@/app/apm/services/[serviceId]/error-tab';
 import Permission from '@/components/permission';
 import TimeSeriesComposedChart from '@/components/time-series-composed-chart';
+import { createLatestRequestGuard } from '@/context/latestRequestGuard';
 import { useTranslation } from '@/utils/i18n';
 
 type PageState = CatalogStateKind | 'ready';
@@ -92,6 +95,8 @@ export default function ApmServiceDetailPage() {
   const { token } = theme.useToken();
   const params = useParams<{ serviceId: string }>();
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
   const {
     getService,
     getServiceRed,
@@ -108,20 +113,27 @@ export default function ApmServiceDetailPage() {
     searchParams.get('environment') ?? undefined
   );
   const [red, setRed] = useState<ApmServiceRed>();
-  const [timeRange, setTimeRange] = useState<TimeRange>('1h');
+  const [timeRange, setTimeRange] = useState<TimeRange>(() => {
+    const value = searchParams.get('window');
+    return isTimeWindow(value) ? value : '1h';
+  });
   const [activeTab, setActiveTab] = useState<DetailTab>('overview');
   const [catalogState, setCatalogState] = useState<PageState>('loading');
   const [metricState, setMetricState] = useState<PageState>('loading');
+  const [metricError, setMetricError] = useState<unknown>();
   const [traces, setTraces] = useState<ApmTraceSummary[]>([]);
   const [tracesState, setTracesState] = useState<PageState>('loading');
+  const [tracesError, setTracesError] = useState<unknown>();
   const [errorBreakdown, setErrorBreakdown] = useState<ApmServiceErrorBreakdown>();
   const [errorsState, setErrorsState] = useState<PageState>('loading');
+  const [errorsError, setErrorsError] = useState<unknown>();
   const [upstream, setUpstream] = useState<{ node: ApmTopologyNode; edge: ApmTopologyEdge }[]>([]);
   const [downstream, setDownstream] = useState<{ node: ApmTopologyNode; edge: ApmTopologyEdge }[]>([]);
   const [serviceSlos, setServiceSlos] = useState<ApmSlo[]>([]);
   const [deployments, setDeployments] = useState<ApmDeploymentEvent[]>([]);
   const [deploymentsState, setDeploymentsState] = useState<PageState>('loading');
   const [refreshKey, setRefreshKey] = useState(0);
+  const [errorRequestGuard] = useState(createLatestRequestGuard);
   const queryWindow = useMemo(() => {
     const endedAt = new Date().toISOString();
     return {
@@ -129,6 +141,18 @@ export default function ApmServiceDetailPage() {
       startedAt: new Date(new Date(endedAt).getTime() - RANGE_MS[timeRange]).toISOString(),
     };
   }, [refreshKey, timeRange]);
+  const currentQuery = searchParams.toString();
+
+  useEffect(() => {
+    const nextParams = new URLSearchParams(currentQuery);
+    if (environment) nextParams.set('environment', environment);
+    else nextParams.delete('environment');
+    if (timeRange !== '1h') nextParams.set('window', timeRange);
+    else nextParams.delete('window');
+    const next = nextParams.toString();
+    if (next === currentQuery) return;
+    router.replace(next ? `${pathname}?${next}` : pathname, { scroll: false });
+  }, [currentQuery, environment, pathname, router, timeRange]);
 
   useEffect(() => {
     if (authLoading || !params.serviceId) return;
@@ -159,6 +183,7 @@ export default function ApmServiceDetailPage() {
     }
     let active = true;
     setMetricState('loading');
+    setMetricError(undefined);
     const { startedAt, endedAt } = queryWindow;
     getServiceRed(service.id, environment, startedAt, endedAt)
       .then((value) => {
@@ -167,7 +192,9 @@ export default function ApmServiceDetailPage() {
         setMetricState('ready');
       })
       .catch((error) => {
-        if (active) setMetricState(catalogErrorKind(error));
+        if (!active) return;
+        setMetricError(error);
+        setMetricState(catalogErrorKind(error));
       });
     return () => {
       active = false;
@@ -178,55 +205,70 @@ export default function ApmServiceDetailPage() {
     if (!service || environment === undefined || authLoading) return;
     let active = true;
     setTracesState('loading');
+    setTracesError(undefined);
     const endedAt = new Date().toISOString();
     const startedAt = new Date(new Date(endedAt).getTime() - RANGE_MS[timeRange]).toISOString();
-    Promise.all([
-      getTraces({
-        service_namespace: service.namespace,
-        service_name: service.name,
-        environment,
-        started_at: startedAt,
-        ended_at: endedAt,
-        limit: 20,
-      }),
-      getTopology({ started_at: startedAt, ended_at: endedAt, environment }).catch(() => null),
-      getSlos().catch(() => [] as ApmSlo[]),
-    ])
-      .then(([page, topology, slos]) => {
+    getTraces({
+      service_namespace: service.namespace,
+      service_name: service.name,
+      environment,
+      started_at: startedAt,
+      ended_at: endedAt,
+      limit: 20,
+    })
+      .then((page) => {
         if (!active) return;
         setTraces(page.items);
         setTracesState(page.items.length ? 'ready' : 'empty');
-        setServiceSlos(slos.filter((slo) => slo.service_id === service.id && slo.environment === environment));
-        if (topology) {
-          const self = topology.nodes.find(
-            (node) => node.service_namespace === service.namespace && node.service_name === service.name
-          );
-          if (self) {
-            const nodeMap = new Map<string, ApmTopologyNode>(topology.nodes.map((node) => [node.id, node]));
-            setUpstream(
-              topology.edges
-                .filter((edge) => edge.target === self.id)
-                .flatMap((edge) => {
-                  const node = nodeMap.get(edge.source);
-                  return node && !isInferredTopologyNode(node) ? [{ node, edge }] : [];
-                })
-            );
-            setDownstream(
-              topology.edges
-                .filter((edge) => edge.source === self.id)
-                .flatMap((edge) => {
-                  const node = nodeMap.get(edge.target);
-                  return node && !isInferredTopologyNode(node) ? [{ node, edge }] : [];
-                })
-            );
-          } else {
-            setUpstream([]);
-            setDownstream([]);
-          }
-        }
       })
       .catch((error) => {
-        if (active) setTracesState(catalogErrorKind(error));
+        if (!active) return;
+        setTracesError(error);
+        setTracesState(catalogErrorKind(error));
+      });
+    getTopology({ started_at: startedAt, ended_at: endedAt, environment })
+      .then((topology) => {
+        if (!active) return;
+        const self = topology.nodes.find(
+          (node) => node.service_namespace === service.namespace && node.service_name === service.name
+        );
+        if (self) {
+          const nodeMap = new Map<string, ApmTopologyNode>(topology.nodes.map((node) => [node.id, node]));
+          setUpstream(
+            topology.edges
+              .filter((edge) => edge.target === self.id)
+              .flatMap((edge) => {
+                const node = nodeMap.get(edge.source);
+                return node && !isInferredTopologyNode(node) ? [{ node, edge }] : [];
+              })
+          );
+          setDownstream(
+            topology.edges
+              .filter((edge) => edge.source === self.id)
+              .flatMap((edge) => {
+                const node = nodeMap.get(edge.target);
+                return node && !isInferredTopologyNode(node) ? [{ node, edge }] : [];
+              })
+          );
+        } else {
+          setUpstream([]);
+          setDownstream([]);
+        }
+      })
+      .catch(() => {
+        if (!active) {
+          return;
+        }
+        setUpstream([]);
+        setDownstream([]);
+      });
+    getSlos()
+      .then((slos) => {
+        if (!active) return;
+        setServiceSlos(slos.filter((slo) => slo.service_id === service.id && slo.environment === environment));
+      })
+      .catch(() => {
+        if (active) setServiceSlos([]);
       });
     return () => {
       active = false;
@@ -261,7 +303,9 @@ export default function ApmServiceDetailPage() {
 
   const loadErrorBreakdown = useCallback(() => {
     if (!service || environment === undefined || authLoading) return;
+    const requestId = errorRequestGuard.begin();
     setErrorsState('loading');
+    setErrorsError(undefined);
     void getServiceErrorBreakdown(service.id, {
       environment,
       started_at: queryWindow.startedAt,
@@ -269,16 +313,26 @@ export default function ApmServiceDetailPage() {
       sample_limit: 20,
     })
       .then((result) => {
-        setErrorBreakdown(result);
-        setErrorsState('ready');
+        errorRequestGuard.commitIfCurrent(requestId, () => {
+          setErrorBreakdown(result);
+          setErrorsState('ready');
+        });
       })
-      .catch((error) => setErrorsState(catalogErrorKind(error)));
-  }, [authLoading, environment, getServiceErrorBreakdown, queryWindow, service]);
+      .catch((error) => {
+        errorRequestGuard.commitIfCurrent(requestId, () => {
+          setErrorsError(error);
+          setErrorsState(catalogErrorKind(error));
+        });
+      });
+  }, [authLoading, environment, errorRequestGuard, getServiceErrorBreakdown, queryWindow, service]);
 
   useEffect(() => {
     if (activeTab !== 'errors') return;
     loadErrorBreakdown();
-  }, [activeTab, loadErrorBreakdown, refreshKey]);
+    return () => {
+      errorRequestGuard.invalidate();
+    };
+  }, [activeTab, errorRequestGuard, loadErrorBreakdown, refreshKey]);
 
   const exploreHref = service && red
     ? `/apm/explore/traces?${new URLSearchParams({
@@ -773,6 +827,7 @@ export default function ApmServiceDetailPage() {
                   <ApmSurface padding="none">
                     <CatalogState
                       kind={metricState === 'ready' ? 'error' : metricState}
+                      error={metricError}
                       description={metricState === 'empty' ? t('apm.serviceDetail.noEnvironments', '当前服务尚无可查询的环境视图。') : undefined}
                       onRetry={metricState === 'forbidden' || metricState === 'empty' ? undefined : () => setRefreshKey((value) => value + 1)}
                     />
@@ -800,6 +855,7 @@ export default function ApmServiceDetailPage() {
                     ) : (
                       <CatalogState
                         kind={tracesState}
+                        error={tracesError}
                         description={tracesState === 'empty' ? t('apm.serviceDetail.noTraces', '当前时间窗暂无调用链样本。') : undefined}
                         onRetry={tracesState === 'forbidden' || tracesState === 'empty' ? undefined : () => setRefreshKey((value) => value + 1)}
                       />
@@ -815,6 +871,7 @@ export default function ApmServiceDetailPage() {
                     <ServiceErrorTab
                       breakdown={errorBreakdown}
                       state={errorsState}
+                      error={errorsError}
                       chartData={chartData}
                       exploreHref={errorsExploreHref}
                       onRetry={loadErrorBreakdown}

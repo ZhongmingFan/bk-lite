@@ -21,7 +21,7 @@ from apps.cmdb.constants.field_constraints import (
 )
 from apps.cmdb.display_field import ExcludeFieldsCache
 from apps.cmdb.graph.falkordb_format import FormatDBResult
-from apps.cmdb.graph.format_type import FORMAT_TYPE, FORMAT_TYPE_PARAMS, ParameterCollector
+from apps.cmdb.graph.format_type import FORMAT_TYPE, FORMAT_TYPE_PARAMS, ParameterCollector, attr_values_equal, coerce_cloud_id_properties
 from apps.cmdb.graph.validators import CQLValidator
 from apps.cmdb.services.instance_identity import (
     EDGE_DST_UUID_FIELD,
@@ -322,7 +322,7 @@ class FalkorDBClient:
             for attr in check_attrs:
                 exist_item_attr = exist_item.get(attr)
                 item_attr = item.get(attr)
-                if exist_item_attr and item_attr and item_attr == exist_item_attr:
+                if exist_item_attr and item_attr and attr_values_equal(attr, exist_item_attr, item_attr):
                     not_only_attr.add(attr)
 
         if not not_only_attr:
@@ -731,6 +731,7 @@ class FalkorDBClient:
         organization_field: str = "organization",
         case_sensitive: bool = True,
         include_count: bool = True,
+        fields: list[str] | None = None,
     ):
         """
         查询实体（参数化版本）
@@ -819,7 +820,10 @@ class FalkorDBClient:
         final_params_str = " AND ".join(final_conditions) if final_conditions else ""
         params_str = f"WHERE {final_params_str}" if final_params_str else ""
 
-        sql_str = f"MATCH (n{label_str}) {params_str} RETURN n"
+        from apps.cmdb.graph.export_query import entity_projection
+
+        projection = "n" if fields is None else entity_projection(fields)
+        sql_str = f"MATCH (n{label_str}) {params_str} RETURN {projection}"
 
         # 调试日志：打印 query_entity 的查询
         logger.debug(f"[query_entity] SQL: {sql_str}")
@@ -844,6 +848,8 @@ class FalkorDBClient:
             sql_str += f" SKIP {page['skip']} LIMIT {page['limit']}"
 
         objs = self._execute_query(sql_str, params=query_params if self.ENABLE_PARAMETERIZATION else None)
+        if fields is not None:
+            return [coerce_cloud_id_properties(row) for row in FormatDBResult(objs).to_list_of_lists()], count
         return self.entity_to_list(objs), count
 
     def query_cloud_cost(self, plan):
@@ -857,10 +863,7 @@ class FalkorDBClient:
             timeout=CLOUD_COST_QUERY_TIMEOUT_SECONDS * 1000,
         )
         formatted = FormatDBResult(result)
-        headers = [
-            header[1] if isinstance(header, (list, tuple)) and len(header) > 1 else header
-            for header in result.header
-        ]
+        headers = [header[1] if isinstance(header, (list, tuple)) and len(header) > 1 else header for header in result.header]
         return [dict(zip(headers, record, strict=True)) for record in formatted.records]
 
     def query_entity_by_id(self, id: int):
@@ -957,6 +960,15 @@ class FalkorDBClient:
                 raise BaseAppException("inst_uuid 查询结果不唯一")
             by_uuid[key] = item
         return [by_uuid[value] for value in normalized if value in by_uuid]
+
+    def query_export_associations(self, model_id, inst_uuids, association_ids):
+        from apps.cmdb.graph.export_query import EXPORT_ASSOCIATION_FIELDS, export_association_queries
+
+        rows = []
+        for statement, params in export_association_queries(model_id, inst_uuids, association_ids):
+            result = self._execute_query(statement, params=params)
+            rows.extend(dict(zip(EXPORT_ASSOCIATION_FIELDS, row, strict=True)) for row in result.result_set)
+        return rows
 
     def query_edge(
         self,
@@ -1653,8 +1665,7 @@ class FalkorDBClient:
                 child_entity = self.find_entity_by_id(edge[f"{child_entity_key}_inst_id"], entities)
                 if child_entity:
                     child_node = self.create_node(child_entity, edges, entities, entity_is_src)
-                    child_node["model_asst_id"] = edge["model_asst_id"]
-                    child_node["asst_id"] = edge["asst_id"]
+                    self._attach_association_fields(child_node, edge)
                     node["children"].append(child_node)
         return node
 
@@ -1752,10 +1763,17 @@ class FalkorDBClient:
                         level=level + 1,
                         max_depth=max_depth,
                     )
-                    child_node["model_asst_id"] = edge.get("model_asst_id")
-                    child_node["asst_id"] = edge.get("asst_id")
+                    self._attach_association_fields(child_node, edge)
                     node["children"].append(child_node)
         return node
+
+    @staticmethod
+    def _attach_association_fields(child_node, edge):
+        child_node["model_asst_id"] = edge.get("model_asst_id")
+        child_node["asst_id"] = edge.get("asst_id")
+        asst_name = edge.get("asst_name")
+        if asst_name not in (None, ""):
+            child_node["asst_name"] = asst_name
 
     def find_entity_by_id(self, entity_id, entities):
         """根据ID找实体"""
@@ -1884,8 +1902,6 @@ class FalkorDBClient:
 
         # 获取排除字段
         exclude_fields = ExcludeFieldsCache.get_exclude_fields()
-        if not exclude_fields:
-            raise BaseAppException("排除字段缓存未初始化")
 
         # 参数化查询参数（合并权限参数）
         query_params = permission_params_dict.copy() if permission_params_dict else {}
@@ -2020,8 +2036,6 @@ class FalkorDBClient:
 
         # 获取排除字段
         exclude_fields = ExcludeFieldsCache.get_exclude_fields()
-        if not exclude_fields:
-            raise BaseAppException("排除字段缓存未初始化")
 
         # 参数化查询参数（合并权限参数）
         query_params = permission_params_dict.copy() if permission_params_dict else {}
@@ -2129,6 +2143,7 @@ class FalkorDBClient:
         inst_name_params: str = "",
         created: str = "",
         case_sensitive: bool = False,
+        permission_params_dict: dict = None,
     ):
         """
         全文检索（兼容旧接口，参数化版本）
@@ -2148,11 +2163,8 @@ class FalkorDBClient:
 
         # 获取排除字段
         exclude_fields = ExcludeFieldsCache.get_exclude_fields()
-        if not exclude_fields:
-            raise BaseAppException("排除字段缓存未初始化")
 
-        # 参数化查询参数
-        query_params = {}
+        query_params = dict(permission_params_dict or {})
         conditions = []
 
         # 权限和实例名称过滤

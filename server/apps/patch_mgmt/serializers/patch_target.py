@@ -43,9 +43,25 @@ class PatchTargetConnectivitySerializer(serializers.Serializer):
             return attrs
         if attrs.get("source_type") == PatchTargetSource.NODE_MGMT:
             if not attrs.get("node_id"):
-                raise serializers.ValidationError({"node_id": "节点管理目标缺少 node_id"})
+                raise serializers.ValidationError(
+                    {
+                        "node_id": serializer_message(
+                            self,
+                            "error.node_id_required",
+                            "Node-management targets require node_id",
+                        )
+                    }
+                )
         elif not attrs.get("cloud_region_id"):
-            raise serializers.ValidationError({"cloud_region_id": "手动目标必须选择云区域"})
+            raise serializers.ValidationError(
+                {
+                    "cloud_region_id": serializer_message(
+                        self,
+                        "error.cloud_region_required",
+                        "Manual targets must select a cloud region",
+                    )
+                }
+            )
         return attrs
 
 
@@ -174,34 +190,43 @@ class PatchTargetSerializer(PatchPermissionSerializer):
         from apps.patch_mgmt.services.risk_service import compute_host_compliance_status
 
         try:
+            projected_map = self.context.get("assessment_status_by_target")
+            if projected_map is not None:
+                return compute_host_compliance_status(obj, projected=projected_map.get(obj.id))
             return compute_host_compliance_status(obj)
         except Exception:  # noqa: BLE001
             return "unconfigured" if getattr(obj, "baseline_binding", None) is None else "pending"
 
     def get_missing_count(self, obj):
         binding = getattr(obj, "baseline_binding", None)
-        if not binding:
+        if binding is None:
             return 0
-        if binding.missing_count:
+        if binding.missing_count is not None:
             return binding.missing_count
-        # 兜底：实时数一次
+        counts = self.context.get("baseline_requirement_counts")
+        if counts is not None:
+            return counts.get(binding.baseline_id, 0)
         return binding.baseline.requirements.count() if binding.baseline_id else 0
 
     def get_compliance_failure_reason(self, obj):
         binding = getattr(obj, "baseline_binding", None)
         if not binding or binding.compliance_status != "failed":
             return ""
-        host = (
-            GovernanceTaskHost.objects.filter(
-                target_id=obj.id,
-                task__task_type__in=("assess", "verify"),
-                stage__in=("failed", "pending_confirmation"),
-            )
-            .order_by("-created_at")
-            .first()
-        )
         fallback = serializer_message(self, "error.assessment_execution_failed", "Assessment execution failed")
-        reason = (host.reason or host.timeout_reason or fallback) if host else fallback
+        reason_map = self.context.get("assessment_failure_reason_by_target")
+        if reason_map is not None:
+            reason = reason_map.get(obj.id) or fallback
+        else:
+            host = (
+                GovernanceTaskHost.objects.filter(
+                    target_id=obj.id,
+                    task__task_type__in=("assess", "verify"),
+                    stage__in=("failed", "pending_confirmation"),
+                )
+                .order_by("-created_at")
+                .first()
+            )
+            reason = (host.reason or host.timeout_reason or fallback) if host else fallback
         return re.sub(
             r"(?i)(password|passwd|pwd|token|secret)\s*[:=]\s*\S+",
             r"\1=***",
@@ -218,6 +243,9 @@ class PatchTargetSerializer(PatchPermissionSerializer):
     def get_has_active_task(self, obj):
         from apps.patch_mgmt.services.governance_convergence import target_has_effective_active_task
 
+        active_map = self.context.get("active_task_by_target")
+        if active_map is not None:
+            return bool(active_map.get(obj.id, False))
         return target_has_effective_active_task(obj.id)
 
     def get_has_pending_reboot(self, obj):

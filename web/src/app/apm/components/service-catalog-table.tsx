@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { BellOutlined } from '@ant-design/icons';
 import { Button, Grid, Space, Tag, Typography, type TableColumnsType, type TableProps } from 'antd';
 import ApmDataTable, { APM_TABLE_COLUMN_WIDTHS } from '@/app/apm/components/apm-data-table';
+import EllipsisWithTooltip from '@/components/ellipsis-with-tooltip';
 import {
   formatDateTime,
   formatErrorRate,
@@ -15,9 +16,9 @@ import {
 import MetricValue from '@/app/apm/components/metric-value';
 import MiniTrend from '@/app/apm/components/mini-trend';
 import {
-  alertKey,
   alertStatusFromLevel,
   alertStatusMeta,
+  lookupActiveAlert,
   metricKey,
   type ServiceEnvironmentRow,
   type TimeWindow,
@@ -71,26 +72,27 @@ export default function ServiceCatalogTable({
         </Space>
       ),
       key: 'service',
-      width: '24%',
+      ellipsis: true,
       render: (_, item) => {
         const silent = item.status === 'silent';
         const href = item.environment
           ? `/apm/services/${item.serviceId}?environment=${encodeURIComponent(item.environment)}&window=${timeWindow}`
           : undefined;
+        const name = href ? (
+          <Link
+            href={href}
+            className="min-w-0 font-medium text-[var(--color-primary)] hover:underline"
+          >
+            <EllipsisWithTooltip className="truncate" text={item.serviceName} />
+          </Link>
+        ) : (
+          <EllipsisWithTooltip className="truncate font-medium" text={item.serviceName} />
+        );
         return (
-          <Space size={8} align="center" className={silent ? 'opacity-60' : undefined}>
+          <Space size={8} align="center" className={silent ? 'min-w-0 opacity-60' : 'min-w-0'}>
             <ServiceLanguage language={item.language} />
-            {href ? (
-              <Link
-                href={href}
-                className="font-medium text-[var(--color-primary)] hover:underline"
-              >
-                {item.serviceName}
-              </Link>
-            ) : (
-              <Typography.Text strong className="!text-sm">{item.serviceName}</Typography.Text>
-            )}
-            {silent ? <Tag bordered={false} className="!m-0 !text-xs text-[var(--color-text-3)]">{t('apm.status.silent', '静默')}</Tag> : null}
+            {name}
+            {silent ? <Tag bordered={false} className="!m-0 !shrink-0 !text-xs text-[var(--color-text-3)]">{t('apm.status.silent', '静默')}</Tag> : null}
           </Space>
         );
       },
@@ -101,7 +103,7 @@ export default function ServiceCatalogTable({
       width: APM_TABLE_COLUMN_WIDTHS.status,
       align: 'center',
       render: (_, item) => {
-        const status = alertStatusFromLevel(alertCounts.get(alertKey(item.serviceName, item.environment))?.level);
+        const status = alertStatusFromLevel(lookupActiveAlert(alertCounts, item.serviceId, item.serviceName, item.environment)?.level);
         const presentation = alertStatusMeta[status];
         const label = t(presentation.id, presentation.fallback);
         return (
@@ -123,7 +125,7 @@ export default function ServiceCatalogTable({
       align: 'center',
       responsive: ['md'],
       render: (_, item) => {
-        const alert = alertCounts.get(alertKey(item.serviceName, item.environment));
+        const alert = lookupActiveAlert(alertCounts, item.serviceId, item.serviceName, item.environment);
         const count = alert?.count ?? 0;
         const dangerous = count > 0 && (alert?.level ?? 5) <= 2;
         const eventsHref = `/apm/events/alerts?service=${encodeURIComponent(item.serviceName)}${
@@ -210,7 +212,7 @@ export default function ServiceCatalogTable({
       title: t('apm.services.trend', '趋势'),
       key: 'trend',
       width: APM_TABLE_COLUMN_WIDTHS.trend,
-      responsive: ['xl'],
+      responsive: ['xxl'],
       render: (_, item) => {
         const metric = redMetrics[metricKey(item.serviceId, item.environment)];
         return (
@@ -259,7 +261,7 @@ export default function ServiceCatalogTable({
       title: t('apm.common.lastSeen', '最近活跃'),
       dataIndex: 'last_seen_at',
       width: APM_TABLE_COLUMN_WIDTHS.timestamp,
-      responsive: ['xl'],
+      responsive: ['xxl'],
       render: (value) => (
         <time
           className="whitespace-nowrap tabular-nums text-[var(--color-text-1)]"
@@ -279,7 +281,7 @@ export default function ServiceCatalogTable({
         ? value.map((id) => (
           <Tag bordered={false} key={id}>{groupNames.get(id) ?? `#${id}`}</Tag>
         ))
-        : <Typography.Text type="secondary">—</Typography.Text>,
+        : t('common.unassigned'),
     },
     {
       title: t('apm.common.operation', '操作'),
@@ -345,6 +347,7 @@ export default function ServiceCatalogTable({
       columns={columns}
       dataSource={rows}
       headerAlignment="column"
+      identityColumnMinWidth={APM_TABLE_COLUMN_WIDTHS.entryService}
       rowKey="key"
       rowSelection={rowSelection}
       pagination={{

@@ -8,6 +8,7 @@ from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
 
 from apps.apm.services.contracts import IngestSnippet, IngestSnippetRequest
+from apps.apm.utils.locale_text import apm_text
 from apps.apm.services.probe_artifacts import (
     DOTNET_AUTO_ARTIFACT_NAME,
     GO_SDK_ARTIFACT_NAME,
@@ -17,14 +18,17 @@ from apps.apm.services.probe_artifacts import (
     PYTHON_WHEELS_ARTIFACT_NAME,
     ProbeArtifactNotFound,
     build_probe_artifact_download_url,
+    get_probe_artifact_sha256,
 )
 
 
 class CloudRegionConfigurationError(ValueError):
-    def __init__(self, code: str, detail: str):
+    def __init__(self, code: str, detail: str, *, message_key: str | None = None):
         super().__init__(detail)
         self.code = code
         self.detail = detail
+        self.message_key = message_key
+        self.message_values = {}
 
 
 @dataclass(frozen=True)
@@ -282,11 +286,31 @@ def _kubernetes_snippet(language: str, environment: dict[str, str], probe_downlo
 def _curl_download(url: str, output: str) -> str:
     return " \\\n  ".join(
         (
-            "curl --fail --silent --show-error --location",
+            "curl --fail --silent --show-error --location --insecure",
             shlex.quote(url),
             f"--output {output}",
         )
     )
+
+
+def _probe_sha256_check(path: str, digest: str) -> str:
+    if len(digest) != 64 or any(character not in "0123456789abcdefABCDEF" for character in digest):
+        raise ProbeArtifactNotFound(path)
+    quoted_digest = shlex.quote(digest.lower())
+    quoted_path = shlex.quote(path)
+    return (
+        "if command -v sha256sum >/dev/null 2>&1; then "
+        f"printf '%s  %s\\n' {quoted_digest} {quoted_path} | sha256sum -c -; "
+        f"else printf '%s  %s\\n' {quoted_digest} {quoted_path} | shasum -a 256 -c -; fi"
+    )
+
+
+def _require_probe_sha256(language: str) -> str:
+    artifact_name = LANGUAGE_PROBE_ARTIFACTS[language]
+    digest = get_probe_artifact_sha256(artifact_name)
+    if len(digest) != 64 or any(character not in "0123456789abcdefABCDEF" for character in digest):
+        raise ProbeArtifactNotFound(artifact_name)
+    return digest.lower()
 
 
 def _python_offline_install(wheels_dir: str) -> tuple[str, str, str]:
@@ -297,12 +321,13 @@ def _python_offline_install(wheels_dir: str) -> tuple[str, str, str]:
     )
 
 
-def _host_install_commands(language: str, probe_download_url: str) -> str:
+def _host_install_commands(language: str, probe_download_url: str, probe_sha256: str) -> str:
     if language == "python":
         pip_install, bootstrap_requirements, bootstrap_install = _python_offline_install("otel-python-wheels")
         return "\n".join(
             (
                 _curl_download(probe_download_url, PYTHON_WHEELS_ARTIFACT_NAME),
+                _probe_sha256_check(PYTHON_WHEELS_ARTIFACT_NAME, probe_sha256),
                 "mkdir -p otel-python-wheels",
                 f"tar -xf {PYTHON_WHEELS_ARTIFACT_NAME} -C otel-python-wheels",
                 pip_install,
@@ -314,15 +339,22 @@ def _host_install_commands(language: str, probe_download_url: str) -> str:
         return "\n".join(
             (
                 _curl_download(probe_download_url, NODEJS_AUTO_ARTIFACT_NAME),
+                _probe_sha256_check(NODEJS_AUTO_ARTIFACT_NAME, probe_sha256),
                 f"npm install --offline --save ./{NODEJS_AUTO_ARTIFACT_NAME}",
             )
         )
     if language == "java":
-        return _curl_download(probe_download_url, JAVA_AGENT_ARTIFACT_NAME)
+        return "\n".join(
+            (
+                _curl_download(probe_download_url, JAVA_AGENT_ARTIFACT_NAME),
+                _probe_sha256_check(JAVA_AGENT_ARTIFACT_NAME, probe_sha256),
+            )
+        )
     if language == "go":
         return "\n".join(
             (
                 _curl_download(probe_download_url, GO_SDK_ARTIFACT_NAME),
+                _probe_sha256_check(GO_SDK_ARTIFACT_NAME, probe_sha256),
                 "mkdir -p .otel-go-sdk",
                 f"unzip -o -q {GO_SDK_ARTIFACT_NAME} -d .otel-go-sdk",
                 'export GOPROXY="file://$(pwd)/.otel-go-sdk"',
@@ -334,6 +366,7 @@ def _host_install_commands(language: str, probe_download_url: str) -> str:
         return "\n".join(
             (
                 _curl_download(probe_download_url, DOTNET_AUTO_ARTIFACT_NAME),
+                _probe_sha256_check(DOTNET_AUTO_ARTIFACT_NAME, probe_sha256),
                 'mkdir -p "$HOME/.otel-dotnet-auto"',
                 f'unzip -o -q {DOTNET_AUTO_ARTIFACT_NAME} -d "$HOME/.otel-dotnet-auto"',
                 *_dotnet_host_clr_exports(),
@@ -342,49 +375,59 @@ def _host_install_commands(language: str, probe_download_url: str) -> str:
     return "# Install the selected OpenTelemetry SDK."
 
 
-def _docker_install_commands(language: str, probe_download_url: str) -> str:
+def _docker_install_commands(language: str, probe_download_url: str, probe_sha256: str) -> str:
     quoted_url = shlex.quote(probe_download_url)
     if language == "python":
+        output = f"/tmp/{PYTHON_WHEELS_ARTIFACT_NAME}"
         return " && ".join(
             (
-                f"RUN curl --fail --silent --show-error --location {quoted_url} --output /tmp/{PYTHON_WHEELS_ARTIFACT_NAME}",
+                f"RUN curl --fail --silent --show-error --location --insecure {quoted_url} --output {output}",
+                _probe_sha256_check(output, probe_sha256),
                 "mkdir -p /opt/otel-python-wheels",
-                f"tar -xf /tmp/{PYTHON_WHEELS_ARTIFACT_NAME} -C /opt/otel-python-wheels",
+                f"tar -xf {output} -C /opt/otel-python-wheels",
                 'python -m pip install --no-index --find-links /opt/otel-python-wheels "opentelemetry-distro[otlp]"',
                 "opentelemetry-bootstrap -a requirements > /tmp/otel-bootstrap-requirements.txt",
                 "python -m pip install --no-index --find-links /opt/otel-python-wheels -r /tmp/otel-bootstrap-requirements.txt",
             )
         )
     if language == "nodejs":
+        output = f"/tmp/{NODEJS_AUTO_ARTIFACT_NAME}"
         return " && ".join(
             (
-                f"RUN curl --fail --silent --show-error --location {quoted_url} --output /tmp/{NODEJS_AUTO_ARTIFACT_NAME}",
-                f"npm install --offline --save /tmp/{NODEJS_AUTO_ARTIFACT_NAME}",
+                f"RUN curl --fail --silent --show-error --location --insecure {quoted_url} --output {output}",
+                _probe_sha256_check(output, probe_sha256),
+                f"npm install --offline --save {output}",
             )
         )
     if language == "java":
-        return " \\\n  ".join(
+        output = f"/opt/{JAVA_AGENT_ARTIFACT_NAME}"
+        curl = " \\\n  ".join(
             (
-                "RUN curl --fail --silent --show-error --location",
+                "RUN curl --fail --silent --show-error --location --insecure",
                 quoted_url,
-                f"--output /opt/{JAVA_AGENT_ARTIFACT_NAME}",
+                f"--output {output}",
             )
         )
+        return f"{curl} && {_probe_sha256_check(output, probe_sha256)}"
     if language == "go":
+        output = f"/tmp/{GO_SDK_ARTIFACT_NAME}"
         return " && ".join(
             (
-                f"RUN curl --fail --silent --show-error --location {quoted_url} --output /tmp/{GO_SDK_ARTIFACT_NAME}",
+                f"RUN curl --fail --silent --show-error --location --insecure {quoted_url} --output {output}",
+                _probe_sha256_check(output, probe_sha256),
                 "mkdir -p /opt/otel-go-sdk",
-                f"unzip -o -q /tmp/{GO_SDK_ARTIFACT_NAME} -d /opt/otel-go-sdk",
+                f"unzip -o -q {output} -d /opt/otel-go-sdk",
                 "GOPROXY=file:///opt/otel-go-sdk GOSUMDB=off go mod download go.opentelemetry.io/otel go.opentelemetry.io/otel/sdk go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp",
             )
         )
     if language == "dotnet":
+        output = f"/tmp/{DOTNET_AUTO_ARTIFACT_NAME}"
         return " && ".join(
             (
-                f"RUN curl --fail --silent --show-error --location {quoted_url} --output /tmp/{DOTNET_AUTO_ARTIFACT_NAME}",
+                f"RUN curl --fail --silent --show-error --location --insecure {quoted_url} --output {output}",
+                _probe_sha256_check(output, probe_sha256),
                 f"mkdir -p {_DOTNET_CONTAINER_HOME}",
-                f"unzip -o -q /tmp/{DOTNET_AUTO_ARTIFACT_NAME} -d {_DOTNET_CONTAINER_HOME}",
+                f"unzip -o -q {output} -d {_DOTNET_CONTAINER_HOME}",
             )
         )
     return "# Install the selected OpenTelemetry SDK in the image."
@@ -451,12 +494,14 @@ class DjangoIntegrationConfigurationService:
             except (KeyError, TypeError, ValueError) as exc:
                 raise CloudRegionConfigurationError(
                     "invalid_cloud_region",
-                    "云区域目录返回了无效数据，请联系运维检查 NodeMgmt。",
+                    apm_text(None, "error.invalid_cloud_region"),
+                    message_key="error.invalid_cloud_region",
                 ) from exc
             if region_id < 1 or not region_name:
                 raise CloudRegionConfigurationError(
                     "invalid_cloud_region",
-                    "云区域目录返回了无效数据，请联系运维检查 NodeMgmt。",
+                    apm_text(None, "error.invalid_cloud_region"),
+                    message_key="error.invalid_cloud_region",
                 )
             normalized.append({"id": region_id, "name": region_name})
         return normalized
@@ -473,12 +518,17 @@ class DjangoIntegrationConfigurationService:
         if not organization_ids:
             raise CloudRegionConfigurationError(
                 "cloud_region_receiver_unavailable",
-                "当前组织无法使用所选云区域的被动接收地址。",
+                apm_text(None, "error.cloud_region_receiver_unavailable"),
+                message_key="error.cloud_region_receiver_unavailable",
             )
         regions = self.list_regions(node_mgmt)
         region = next((item for item in regions if item["id"] == cloud_region_id), None)
         if region is None:
-            raise CloudRegionConfigurationError("cloud_region_not_found", "云区域不存在或已不可用。")
+            raise CloudRegionConfigurationError(
+                "cloud_region_not_found",
+                apm_text(None, "error.cloud_region_not_found"),
+                message_key="error.cloud_region_not_found",
+            )
 
         env_config_cache: dict[str, dict] = {}
 
@@ -496,21 +546,24 @@ class DjangoIntegrationConfigurationService:
             if not str(node_server_url or "").strip():
                 raise CloudRegionConfigurationError(
                     "cloud_region_receiver_unavailable",
-                    "所选云区域没有可用的被动接收地址。",
+                    apm_text(None, "error.cloud_region_address_missing"),
+                    message_key="error.cloud_region_address_missing",
                 )
             try:
                 proxy_address = _receiver_host_from_node_server_url(node_server_url)
             except ValueError as exc:
                 raise CloudRegionConfigurationError(
                     "invalid_cloud_region_proxy_address",
-                    "云区域接收地址格式无效，请联系管理员检查配置。",
+                    apm_text(None, "error.cloud_region_address_invalid"),
+                    message_key="error.cloud_region_address_invalid",
                 ) from exc
         try:
             proxy_address = _normalize_proxy_address(proxy_address)
         except ValueError as exc:
             raise CloudRegionConfigurationError(
                 "invalid_cloud_region_proxy_address",
-                "云区域接收地址格式无效，请联系管理员检查配置。",
+                apm_text(None, "error.cloud_region_address_invalid"),
+                message_key="error.cloud_region_address_invalid",
             ) from exc
 
         probe_download_url = ""
@@ -519,7 +572,8 @@ class DjangoIntegrationConfigurationService:
             if not str(node_server_url or "").strip():
                 raise CloudRegionConfigurationError(
                     "probe_download_unavailable",
-                    "所选云区域缺少 NODE_SERVER_URL，无法生成探针下载地址，请联系管理员配置。",
+                    apm_text(None, "error.probe_download_url_missing"),
+                    message_key="error.probe_download_url_missing",
                 )
             try:
                 download_base = _download_base_from_node_server_url(node_server_url)
@@ -527,7 +581,8 @@ class DjangoIntegrationConfigurationService:
             except (ValueError, ProbeArtifactNotFound) as exc:
                 raise CloudRegionConfigurationError(
                     "probe_download_unavailable",
-                    "云区域 NODE_SERVER_URL 格式无效，无法生成探针下载地址，请联系管理员检查配置。",
+                    apm_text(None, "error.probe_download_url_invalid"),
+                    message_key="error.probe_download_url_invalid",
                 ) from exc
 
         return CloudRegionEndpoints(
@@ -562,25 +617,14 @@ class DjangoIntegrationConfigurationService:
         }
         if request.language == "dotnet":
             environment.update(_dotnet_traces_only_environment())
-        install_commands = {
-            language: _host_install_commands(language, request.probe_download_url)
-            for language in LANGUAGE_PROBE_ARTIFACTS
-        }
-        start_commands = {
-            "python": "opentelemetry-instrument python app.py",
-            "nodejs": "node --require @opentelemetry/auto-instrumentations-node/register app.js",
-            "java": "java -javaagent:./opentelemetry-javaagent.jar -jar app.jar",
-            "go": _GO_SDK_GUIDE,
-            "dotnet": "dotnet App.dll",
-        }
 
         if request.runtime == "kubernetes":
             code = _kubernetes_snippet(request.language, environment, request.probe_download_url)
         elif request.runtime == "docker":
-            image_install_commands = {
-                language: _docker_install_commands(language, request.probe_download_url)
-                for language in LANGUAGE_PROBE_ARTIFACTS
-            }
+            probe_sha256 = _require_probe_sha256(request.language)
+            image_install_commands = _docker_install_commands(
+                request.language, request.probe_download_url, probe_sha256
+            )
             docker_start_commands = {
                 "python": "opentelemetry-instrument python app.py",
                 "nodejs": "node app.js",
@@ -610,7 +654,7 @@ class DjangoIntegrationConfigurationService:
             code = "\n".join(
                 (
                     "# 1. 安装探针（将以下命令写入应用 Dockerfile）",
-                    image_install_commands.get(request.language, "# Install the selected OpenTelemetry SDK in the image."),
+                    image_install_commands,
                     "",
                     "# 2. 配置上报（端点与资源属性通过容器环境注入）",
                     f"# {runtime_profile.guidance}",
@@ -623,6 +667,15 @@ class DjangoIntegrationConfigurationService:
                 )
             )
         else:
+            probe_sha256 = _require_probe_sha256(request.language)
+            install_commands = _host_install_commands(request.language, request.probe_download_url, probe_sha256)
+            start_commands = {
+                "python": "opentelemetry-instrument python app.py",
+                "nodejs": "node --require @opentelemetry/auto-instrumentations-node/register app.js",
+                "java": "java -javaagent:./opentelemetry-javaagent.jar -jar app.jar",
+                "go": _GO_SDK_GUIDE,
+                "dotnet": "dotnet App.dll",
+            }
             export_lines = [f"# {runtime_profile.guidance}", *runtime_profile.identity_setup]
             for key, value in environment.items():
                 if key == "OTEL_RESOURCE_ATTRIBUTES":
@@ -632,7 +685,7 @@ class DjangoIntegrationConfigurationService:
             code = "\n".join(
                 (
                     "# 1. 安装探针",
-                    install_commands.get(request.language, "# Install the selected OpenTelemetry SDK."),
+                    install_commands,
                     "",
                     "# 2. 配置上报（端点与资源属性使用标准 OTEL_* 环境变量）",
                     *export_lines,

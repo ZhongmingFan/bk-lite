@@ -1,7 +1,7 @@
 """Permission-visible System → Application → Host tree for 部署架构.
 
-Compose only exact `system_contains_application` and `application_run_host`
-edges. Callers pass already-visible instances; this module never invents
+Compose service-tree contains edges plus `application_run_host`.
+Callers pass already-visible instances; this module never invents
 system→host edges and never emits hidden identities.
 """
 
@@ -27,10 +27,11 @@ def compose_architecture_tree(
     hosts: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     """
-    Build a 3-rank directed tree for one System.
+    Build a directed tree for one System.
 
     - Root is always the System.
-    - Child applications keep input order; isolated apps (no host edges) stay.
+    - Child applications hang directly under the system and keep input order;
+      isolated apps (no host edges) stay.
     - Hosts are unique by inst_uuid; a shared host is one node with one edge
       from each parent application.
     - Invisible / wrong-peer identities must already be omitted by the caller.
@@ -46,25 +47,7 @@ def compose_architecture_tree(
     edges: list[dict[str, Any]] = []
     seen_hosts: set[str] = set()
 
-    for application_id in application_ids:
-        application = applications.get(application_id)
-        if application is None:
-            continue
-        nodes.append(
-            _node(
-                node_id=application_id,
-                kind=ARCHITECTURE_NODE_APPLICATION,
-                name=str(application.get("name") or application_id),
-                health=application.get("health"),
-            )
-        )
-        edges.append(
-            _edge(
-                source_id=system_id,
-                target_id=application_id,
-                relation=SYSTEM_CONTAINS_APPLICATION_ASST,
-            )
-        )
+    def _emit_hosts(application_id: str) -> None:
         for host_id in hosts_by_application.get(application_id, []):
             host = hosts.get(host_id)
             if host is None:
@@ -88,6 +71,27 @@ def compose_architecture_tree(
                     relation=APPLICATION_RUN_HOST_ASST,
                 )
             )
+
+    for application_id in application_ids:
+        application = applications.get(application_id)
+        if application is None:
+            continue
+        nodes.append(
+            _node(
+                node_id=application_id,
+                kind=ARCHITECTURE_NODE_APPLICATION,
+                name=str(application.get("name") or application_id),
+                health=application.get("health"),
+            )
+        )
+        edges.append(
+            _edge(
+                source_id=system_id,
+                target_id=application_id,
+                relation=SYSTEM_CONTAINS_APPLICATION_ASST,
+            )
+        )
+        _emit_hosts(application_id)
 
     return {
         "systemId": system_id,

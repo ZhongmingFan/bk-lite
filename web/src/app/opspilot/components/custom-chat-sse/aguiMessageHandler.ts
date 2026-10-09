@@ -3,6 +3,7 @@
  * 负责处理不同类型的 AG-UI 消息
  */
 
+import { getOpspilotTranslate } from './i18n';
 import {
   AgentStepProgressValue,
   AGUIMessage,
@@ -49,6 +50,7 @@ import {
 import {
   applyPlannedExecutionStep,
   attachToolCallToCurrentStep,
+  plannedStepIndexFromToolEvent,
   createPlannedExecutionState,
   finalizePlannedExecutionSteps,
   isFailedPlannedStepStatus,
@@ -230,6 +232,7 @@ export class AGUIMessageHandler {
       objective: step.objective,
       status: step.status,
       toolCallIds: [...step.toolCallIds],
+      reusedPriorResult: step.reusedPriorResult,
       error: step.error,
     }));
   }
@@ -335,6 +338,13 @@ export class AGUIMessageHandler {
       } else if (block.type === 'toolCall') {
         // 已挂到 planned_execution_step 的工具改由 React 面板渲染，避免与扁平工具组重复
         if (isToolAssignedToPlannedStep(this.plannedExecutionState, block.id)) {
+          continue;
+        }
+        // 有执行计划时不再渲染独立「已调用 N 个工具」组，未归属的只打调试日志
+        if (this.plannedExecutionState.steps.length > 0) {
+          if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+            console.debug('[planned-execution] unassigned tool call', block.id);
+          }
           continue;
         }
         const toolInfo = this.toolCallsRef.get(block.id);
@@ -493,7 +503,7 @@ export class AGUIMessageHandler {
   /**
    * 处理 TOOL_CALL_START 事件
    */
-  handleToolCallStart(toolCallId: string, toolCallName: string) {
+  handleToolCallStart(toolCallId: string, toolCallName: string, stepIndex?: number | null) {
     this.stopThinking();
     // 工具轮次前的流式正文视为旁白：丢弃而非落盘，避免「先分析再调工具」泄漏到对话。
     this.currentTextBlock = '';
@@ -505,7 +515,7 @@ export class AGUIMessageHandler {
       args: '',
       status: 'calling'
     });
-    this.plannedExecutionState = attachToolCallToCurrentStep(this.plannedExecutionState, toolCallId);
+    this.plannedExecutionState = attachToolCallToCurrentStep(this.plannedExecutionState, toolCallId, stepIndex);
     this.updateMessageContent(this.getFullContent(), undefined, undefined, this.thinkingContent, this.isThinking);
   }
 
@@ -528,7 +538,10 @@ export class AGUIMessageHandler {
       const errorText =
         (typeof value.error === 'string' && value.error.trim()) ||
         step?.error ||
-        '步骤因凭据、权限或配置失败已中止';
+        getOpspilotTranslate()(
+          'chat.plannedStep.abortedByCredentials',
+          '步骤因凭据、权限或配置失败已中止'
+        );
       for (const toolCallId of step?.toolCallIds || []) {
         const toolCall = this.toolCallsRef.get(toolCallId);
         if (!toolCall || toolCall.status !== 'calling') continue;
@@ -618,7 +631,9 @@ export class AGUIMessageHandler {
           if (items.length > 0 && this.configDiffReports.length === 0) {
             const report: ConfigDiffReport = {
               report_id: `fallback_repair_${toolCallId}`,
-              title: parsed.title || 'K8S 配置修复对比',
+              title:
+                parsed.title ||
+                getOpspilotTranslate()('chat.diffReport.k8sDefaultTitle', 'K8S 配置修复对比'),
               cluster_name: parsed.cluster_name || '',
               items,
               received_at: Date.now(),
@@ -908,13 +923,19 @@ export class AGUIMessageHandler {
   handleError(error: string) {
     this.stopThinking();
     this.isStreaming = false;
-    finalizePendingToolCalls(this.toolCallsRef, '工具调用已结束，但流中断前未收到结果事件。');
+    finalizePendingToolCalls(
+      this.toolCallsRef,
+      getOpspilotTranslate()(
+        'chat.toolCall.streamInterrupted',
+        '工具调用已结束，但流中断前未收到结果事件。'
+      )
+    );
     this.plannedExecutionState = finalizePlannedExecutionSteps(this.plannedExecutionState);
     if (this.plannedExecutionStatus) {
       this.plannedExecutionStatus = { ...this.plannedExecutionStatus, phase: 'idle' };
     }
     this.flushCurrentTextBlock();
-    const errorMessage = renderErrorMessage(error, 'error');
+    const errorMessage = renderErrorMessage(error, 'error', undefined, getOpspilotTranslate());
     this.contentBlocks.push({ type: 'text', content: errorMessage });
     this.updateMessageContent(this.getFullContent(), undefined, undefined, this.thinkingContent, this.isThinking);
   }
@@ -925,7 +946,13 @@ export class AGUIMessageHandler {
   handleRunError(message: string, code?: string) {
     this.stopThinking();
     this.isStreaming = false;
-    finalizePendingToolCalls(this.toolCallsRef, '工具调用已结束，但运行错误前未收到结果事件。');
+    finalizePendingToolCalls(
+      this.toolCallsRef,
+      getOpspilotTranslate()(
+        'chat.toolCall.runErrorBeforeResult',
+        '工具调用已结束，但运行错误前未收到结果事件。'
+      )
+    );
     this.plannedExecutionState = finalizePlannedExecutionSteps(this.plannedExecutionState);
     if (this.plannedExecutionStatus) {
       this.plannedExecutionStatus = { ...this.plannedExecutionStatus, phase: 'idle' };
@@ -1011,7 +1038,11 @@ export class AGUIMessageHandler {
         const toolCallId = aguiData.toolCallId || snake.tool_call_id;
         const toolCallName = aguiData.toolCallName || snake.tool_call_name;
         if (toolCallId && toolCallName) {
-          this.handleToolCallStart(toolCallId, toolCallName);
+          this.handleToolCallStart(
+            toolCallId,
+            toolCallName,
+            plannedStepIndexFromToolEvent(aguiData as { rawEvent?: unknown; raw_event?: unknown })
+          );
         }
         return false;
       }
@@ -1045,7 +1076,10 @@ export class AGUIMessageHandler {
 
       case 'RUN_ERROR':
         if (aguiData.message || aguiData.error) {
-          const errorContent = aguiData.message || aguiData.error || '未知错误';
+          const errorContent =
+            aguiData.message ||
+            aguiData.error ||
+            getOpspilotTranslate()('chat.defaultError', '未知错误');
           this.handleRunError(errorContent, aguiData.code);
         }
         return true;
@@ -1053,7 +1087,10 @@ export class AGUIMessageHandler {
       case 'RUN_FINISHED':
         // 流式回复结束，设置 isStreaming 为 false 并更新内容（收起工具列表）
         this.isStreaming = false;
-        finalizePendingToolCalls(this.toolCallsRef, '工具调用已结束，但未收到结果事件。');
+        finalizePendingToolCalls(
+          this.toolCallsRef,
+          getOpspilotTranslate()('chat.toolCall.noResultEvent', '工具调用已结束，但未收到结果事件。')
+        );
         this.plannedExecutionState = finalizePlannedExecutionSteps(this.plannedExecutionState);
         if (this.plannedExecutionStatus) {
           this.plannedExecutionStatus = { ...this.plannedExecutionStatus, phase: 'idle' };
@@ -1069,7 +1106,9 @@ export class AGUIMessageHandler {
           ? String((customValue as { name?: string }).name || '')
           : '');
         const plannedKind = looksLikePlannedExecutionPayload(customValue);
-        if (customName === 'browser_step_progress' && customValue) {
+        if (customName === 'stream_keepalive' || customName === 'planned_step_hidden_text') {
+          return false;
+        } else if (customName === 'browser_step_progress' && customValue) {
           this.handleBrowserStepProgress(customValue as BrowserStepProgressValue);
         } else if (customName === 'browser_task_received' && customValue) {
           this.handleBrowserTaskReceived(customValue as BrowserTaskReceivedValue);

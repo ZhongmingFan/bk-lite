@@ -3,6 +3,7 @@
 对照 specs/capabilities/legacy-prd-运营分析-管理.md：内置命名空间/数据源/默认组织的初始化。
 """
 
+import logging
 from io import StringIO
 
 import pytest
@@ -21,12 +22,53 @@ from apps.operation_analysis.services.canvas.registry import CANVAS_TYPE_REGISTR
 @pytest.mark.django_db
 def test_init_default_namespace_creates_from_nats_url(settings):
     settings.NATS_SERVERS = "nats://admin:secret@127.0.0.1:4222"
+    settings.NATS_NAMESPACE = "bklite"
     call_command("init_default_namespace")
 
     ns = NameSpace.objects.get(name="默认命名空间")
     assert ns.account == "admin"
     assert ns.domain == "127.0.0.1:4222"
     assert ns.enable_tls is False
+    assert ns.namespace == "bklite"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("nats_namespace", ["", "   ", None])
+def test_init_default_namespace_uses_bklite_when_namespace_unset(settings, monkeypatch, nats_namespace):
+    settings.NATS_SERVERS = "nats://admin:secret@127.0.0.1:4222"
+    settings.NATS_NAMESPACE = nats_namespace
+    monkeypatch.delenv("NATS_NAMESPACE", raising=False)
+
+    call_command("init_default_namespace")
+
+    assert NameSpace.objects.get(name="默认命名空间").namespace == "bklite"
+
+
+@pytest.mark.django_db
+def test_init_default_namespace_reads_nats_namespace_and_updates_on_rerun(settings):
+    settings.NATS_SERVERS = "nats://admin:secret@127.0.0.1:4222"
+    settings.NATS_NAMESPACE = "team-a"
+    call_command("init_default_namespace")
+    assert NameSpace.objects.get(name="默认命名空间").namespace == "team-a"
+
+    settings.NATS_NAMESPACE = " team-b "
+    call_command("init_default_namespace")
+
+    assert NameSpace.objects.get(name="默认命名空间").namespace == "team-b"
+
+
+@pytest.mark.django_db
+def test_namespace_defaults_follow_nats_namespace_setting(settings, monkeypatch):
+    from apps.operation_analysis.schemas.import_export_schema import NamespaceItem
+
+    settings.NATS_NAMESPACE = "from-setting"
+    monkeypatch.delenv("NATS_NAMESPACE", raising=False)
+
+    created = NameSpace.objects.create(name="implicit", account="a", password="p", domain="h:4222")
+    imported = NamespaceItem(key="k", name="n", domain="d", account="a")
+
+    assert created.namespace == "from-setting"
+    assert imported.namespace == "from-setting"
 
 
 @pytest.mark.django_db
@@ -212,27 +254,106 @@ def test_init_source_api_data_creates_tags_and_sources(settings):
     assert all(source.groups == [] for source in DataSourceAPIModel.objects.filter(is_build_in=True))
 
 
+_RETIRE_SUMMARY_TEMPLATE = "[SourceApiInit] 已下架内置场景数据源 %s 个"
+_RETIRE_ITEM_TEMPLATE = "[SourceApiInit] 下架内置数据源：%s"
+_RETIRED_LAYOUT_KEY = "CMDB 3D机房布局::cmdb/get_room3d_layout"
+_RETIRED_ROOMS_KEY = "CMDB 机房列表::cmdb/get_room_list"
+_CUSTOM_DATASOURCE_SENTINEL = "custom-room3d-ds-sentinel"
+
+
+def _retire_log_records(caplog, template):
+    return [record for record in caplog.records if record.name == "operation_analysis" and record.msg == template]
+
+
 @pytest.mark.django_db
-def test_init_source_api_data_creates_room3d_datasource(settings):
+def test_init_source_api_data_retires_room3d_builtin_datasources(settings, caplog):
     settings.NATS_SERVERS = "nats://admin:secret@127.0.0.1:4222"
     call_command("init_default_namespace")
-    call_command("init_source_api_data")
+    leftover_layout = DataSourceAPIModel.objects.create(
+        name="CMDB 3D机房布局",
+        rest_api="cmdb/get_room3d_layout",
+        chart_type=["room3D"],
+        is_build_in=True,
+        is_active=True,
+        build_in_key=_RETIRED_LAYOUT_KEY,
+        created_by="system",
+        updated_by="system",
+    )
+    leftover_rooms = DataSourceAPIModel.objects.create(
+        name="CMDB 机房列表（选项）",
+        rest_api="cmdb/get_room_list",
+        chart_type=[],
+        is_build_in=True,
+        is_active=True,
+        build_in_key=_RETIRED_ROOMS_KEY,
+        created_by="system",
+        updated_by="system",
+    )
+    custom = DataSourceAPIModel.objects.create(
+        name=f"我的机房布局-{_CUSTOM_DATASOURCE_SENTINEL}",
+        rest_api="cmdb/get_room3d_layout",
+        chart_type=["room3D"],
+        is_build_in=False,
+        is_active=True,
+        created_by="alice",
+        updated_by="alice",
+    )
 
-    source = DataSourceAPIModel.objects.get(name="CMDB 3D机房布局", rest_api="cmdb/get_room3d_layout")
+    with caplog.at_level(logging.DEBUG, logger="operation_analysis"):
+        call_command("init_source_api_data")
 
-    assert source.chart_type == ["room3D"]
-    server_room_param = source.params[0]
-    assert {key: server_room_param[key] for key in ("name", "type", "value", "alias_name", "filterType")} == {
-        "name": "server_room_id",
-        "type": "string",
-        "value": "",
-        "alias_name": "机房ID",
-        "filterType": "params",
+    leftover_layout.refresh_from_db()
+    leftover_rooms.refresh_from_db()
+    custom.refresh_from_db()
+    assert leftover_layout.chart_type == []
+    assert leftover_layout.is_active is False
+    assert leftover_rooms.is_active is False
+    assert custom.chart_type == ["room3D"]
+    assert custom.is_active is True
+    assert custom.name == f"我的机房布局-{_CUSTOM_DATASOURCE_SENTINEL}"
+    assert not DataSourceAPIModel.objects.filter(name="CMDB 3D机房布局", chart_type=["room3D"]).exists()
+
+    summary_records = _retire_log_records(caplog, _RETIRE_SUMMARY_TEMPLATE)
+    assert len(summary_records) == 1
+    summary = summary_records[0]
+    assert summary.levelno == logging.INFO
+    assert summary.args == (2,)
+    assert summary.getMessage() == "[SourceApiInit] 已下架内置场景数据源 2 个"
+    formatted_summary = logging.Formatter().format(summary)
+    assert "[SourceApiInit] 已下架内置场景数据源 2 个" in formatted_summary
+    assert _CUSTOM_DATASOURCE_SENTINEL not in summary.getMessage()
+    assert _CUSTOM_DATASOURCE_SENTINEL not in formatted_summary
+    assert _CUSTOM_DATASOURCE_SENTINEL not in str(summary.args)
+
+    item_records = _retire_log_records(caplog, _RETIRE_ITEM_TEMPLATE)
+    assert len(item_records) == 2
+    assert {record.levelno for record in item_records} == {logging.DEBUG}
+    assert {record.args for record in item_records} == {
+        (_RETIRED_LAYOUT_KEY,),
+        (_RETIRED_ROOMS_KEY,),
     }
-    assert server_room_param["inputConfig"]["componentSwitch"] is True
-    assert server_room_param["inputConfig"]["control"] == "select"
-    assert server_room_param["inputConfig"]["optionsSource"]["valueField"] == "inst_uuid"
-    assert list(source.tag.values_list("tag_id", flat=True)) == ["cmdb"]
+    assert {record.getMessage() for record in item_records} == {
+        f"[SourceApiInit] 下架内置数据源：{_RETIRED_LAYOUT_KEY}",
+        f"[SourceApiInit] 下架内置数据源：{_RETIRED_ROOMS_KEY}",
+    }
+    for record in item_records:
+        formatted = logging.Formatter().format(record)
+        assert record.getMessage() in formatted
+        assert _CUSTOM_DATASOURCE_SENTINEL not in record.getMessage()
+        assert _CUSTOM_DATASOURCE_SENTINEL not in formatted
+        assert _CUSTOM_DATASOURCE_SENTINEL not in str(record.args)
+
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="operation_analysis"):
+        call_command("init_source_api_data")
+    leftover_layout.refresh_from_db()
+    leftover_rooms.refresh_from_db()
+    custom.refresh_from_db()
+    assert leftover_layout.is_active is False
+    assert leftover_rooms.is_active is False
+    assert custom.is_active is True
+    assert not _retire_log_records(caplog, _RETIRE_SUMMARY_TEMPLATE)
+    assert not _retire_log_records(caplog, _RETIRE_ITEM_TEMPLATE)
 
 
 @pytest.mark.django_db
@@ -402,17 +523,19 @@ def test_init_source_api_data_force_update_is_idempotent(settings):
     call_command("init_default_namespace")
     call_command("init_source_api_data")
     count_before = DataSourceAPIModel.objects.count()
-    room3d_source = DataSourceAPIModel.objects.get(rest_api="cmdb/get_room3d_layout")
-    legacy_params = room3d_source.params
-    legacy_params[0]["inputConfig"]["optionsSource"]["valueField"] = "_id"
-    room3d_source.params = legacy_params
-    room3d_source.save(update_fields=["params"])
+    cloud_source = DataSourceAPIModel.objects.get(rest_api="cmdb/get_cloud_resource_cost_distribution")
+    legacy_params = cloud_source.params
+    group_by = next(param for param in legacy_params if param["name"] == "group_by")
+    group_by["alias_name"] = "旧别名"
+    cloud_source.params = legacy_params
+    cloud_source.save(update_fields=["params"])
 
     # 强制更新模式再次运行 → 覆盖 force_update 分支，不应新增
     call_command("init_source_api_data", "--force-update")
     assert DataSourceAPIModel.objects.count() == count_before
-    room3d_source.refresh_from_db()
-    assert room3d_source.params[0]["inputConfig"]["optionsSource"]["valueField"] == "inst_uuid"
+    cloud_source.refresh_from_db()
+    group_by = next(param for param in cloud_source.params if param["name"] == "group_by")
+    assert group_by["alias_name"] == "分组维度"
 
 
 @pytest.mark.django_db

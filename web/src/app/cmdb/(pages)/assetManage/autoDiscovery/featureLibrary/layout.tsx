@@ -2,7 +2,8 @@
 
 import React from 'react';
 import { Tabs } from 'antd';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import { useTranslation } from '@/utils/i18n';
 
 const SOID_PATH = '/cmdb/assetManage/autoDiscovery/featureLibrary/soid';
@@ -15,7 +16,7 @@ export default function FeatureLibraryLayout({
 }) {
   const { t } = useTranslation();
   const pathname = usePathname();
-  const router = useRouter();
+  const router = useScreenAwareRouter();
 
   const isFeatureLibrary =
     pathname?.includes('/featureLibrary/soid') ||
@@ -52,7 +53,7 @@ export default function FeatureLibraryLayout({
           ]}
         />
       </div>
-      <div className="min-h-0 flex-1 overflow-hidden">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         {children}
       </div>
     </div>

@@ -219,3 +219,51 @@ def test_build_bulk_policy_payloads_prefers_config_trigger_count_then_template_d
         config={},
     )
     assert template_payload[0]["trigger_count"] == 2
+
+
+def test_build_bulk_policy_payloads_keeps_rate_and_defaults_new_fields():
+    payloads = build_bulk_policy_payloads(
+        monitor_object_id=3,
+        templates=[
+            {
+                "name": "网卡入字节速率",
+                "metric_id": 101,
+                "algorithm": "rate",
+                "collect_type": 9,
+            }
+        ],
+        assets=[{"instance_id": "('host-a',)", "organizations": [7]}],
+        config={},
+    )
+    payload = payloads[0]
+    assert payload["group_algorithm"] == "avg"
+    assert payload["algorithm"] == "rate"
+    assert payload["compare_mode"] == "absolute"
+    assert payload["compare_value_kind"] == ""
+    assert payload["count_predicate"] == {}
+    assert payload["forecast_target"] is None
+    assert payload["forecast_target_unit"] == ""
+    assert payload["compare_offset_hours"] is None
+    assert payload["compare_offset_days"] is None
+    assert payload["compare_baseline_weeks"] is None
+    assert payload["forecast_lookback"] == {}
+    assert payload["recovery_threshold"] == {}
+
+
+def test_build_bulk_policy_payloads_keeps_metric_dimensions_in_group_by():
+    payloads = build_bulk_policy_payloads(
+        monitor_object_id=3,
+        templates=[
+            {
+                "name": "华为交换机CSS端口异常",
+                "metric_name": "device_css_port_state",
+                "metric_id": 101,
+                "algorithm": "last_over_time",
+                "dimensions": [{"name": "descr"}],
+            }
+        ],
+        assets=[{"instance_id": "('switch-a',)", "organizations": [7]}],
+        config={},
+    )
+
+    assert payloads[0]["group_by"] == ["instance_id", "descr"]

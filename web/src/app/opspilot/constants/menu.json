@@ -78,6 +78,13 @@
           "withParentPermission": true
         },
         {
+          "title": "历史",
+          "url": "/opspilot/skill/detail/history",
+          "icon": "talk-line",
+          "name": "skill_history",
+          "withParentPermission": true
+        },
+        {
           "title": "Web对话",
           "url": "/opspilot/skill/chat",
           "name": "skill_chat",
@@ -125,6 +132,13 @@
           "url": "/opspilot/memory/detail/memories",
           "icon": "shiyongwendang",
           "name": "memory_detail_memories",
+          "isNotMenuItem": true
+        },
+        {
+          "title": "记忆正文",
+          "url": "/opspilot/memory/document",
+          "icon": "shiyongwendang",
+          "name": "memory_detail_document",
           "isNotMenuItem": true
         }
       ]
@@ -225,6 +239,13 @@
           "withParentPermission": true
         },
         {
+          "title": "History",
+          "url": "/opspilot/skill/detail/history",
+          "icon": "talk-line",
+          "name": "skill_history",
+          "withParentPermission": true
+        },
+        {
           "title": "Web Chat",
           "url": "/opspilot/skill/chat",
           "name": "skill_chat",
@@ -272,6 +293,13 @@
           "url": "/opspilot/memory/detail/memories",
           "icon": "shiyongwendang",
           "name": "memory_detail_memories",
+          "isNotMenuItem": true
+        },
+        {
+          "title": "Memory document",
+          "url": "/opspilot/memory/document",
+          "icon": "shiyongwendang",
+          "name": "memory_detail_document",
           "isNotMenuItem": true
         }
       ]

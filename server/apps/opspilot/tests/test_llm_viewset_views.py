@@ -55,6 +55,15 @@ def test_skill_packages_are_serialized_and_updatable():
     assert "skill_packages" in LLMViewSet.UPDATABLE_SKILL_FIELDS
 
 
+def test_memory_fields_are_serialized_and_updatable():
+    assert "memory_space" in LLMSerializer.Meta.fields
+    assert "memory_write_rounds" in LLMSerializer.Meta.fields
+    assert "memory_space" not in set(LLMSerializer.Meta.read_only_fields)
+    assert "memory_write_rounds" not in set(LLMSerializer.Meta.read_only_fields)
+    assert "memory_space_id" in LLMViewSet.UPDATABLE_SKILL_FIELDS
+    assert "memory_write_rounds" in LLMViewSet.UPDATABLE_SKILL_FIELDS
+
+
 def test_apply_skill_packages_records_visible_match_summary(mocker):
     """执行智能体时要把命中的技能包注入提示词，并保留可观测的命中摘要。"""
     mocker.patch("apps.opspilot.viewsets.llm_view.hydrate_skill_packages", side_effect=lambda packages: packages)
@@ -222,6 +231,46 @@ def test_skill_execution_overwrites_forged_caller_identity(action_name, downstre
 
 
 @pytest.mark.parametrize(
+    ("action_name", "downstream_name"),
+    [
+        ("execute", "stream_chat"),
+        ("execute_agui", "stream_agui_chat"),
+    ],
+)
+def test_skill_execution_disables_legacy_suggest_and_rewrite_flags(action_name, downstream_name, mocker):
+    viewset = LLMViewSet()
+    viewset.loader = None
+    request = _execution_request(current_team="7", group_list=[{"id": 7}])
+    request.data["enable_suggest"] = True
+    request.data["enable_query_rewrite"] = True
+    request.data["show_think"] = True
+    request.data["temperature"] = 0.2
+    skill = _execution_skill()
+    skill.enable_suggest = True
+    skill.enable_query_rewrite = True
+    skill.show_think = True
+    mocker.patch.object(LLMViewSet, "get_has_permission", return_value=True)
+    mocker.patch.object(LLMViewSet, "_apply_skill_packages_to_params")
+    mocker.patch("apps.opspilot.viewsets.llm_view.merge_skill_params", return_value=[])
+    mocker.patch("apps.opspilot.viewsets.llm_view.LLMSkill.objects.get", return_value=skill)
+    sentinel = object()
+    downstream = mocker.patch(
+        f"apps.opspilot.viewsets.llm_view.{downstream_name}",
+        return_value=sentinel,
+    )
+
+    response = getattr(LLMViewSet, action_name).__wrapped__(viewset, request)
+
+    assert response is sentinel
+    forwarded_params = downstream.call_args.args[0]
+    assert forwarded_params["enable_suggest"] is False
+    assert forwarded_params["enable_query_rewrite"] is False
+    assert forwarded_params["show_think"] is False
+    assert forwarded_params["temperature"] == 1.0
+    assert "internal_sampling_temperature" not in forwarded_params
+
+
+@pytest.mark.parametrize(
     ("current_team", "group_list", "is_superuser", "message_part"),
     [
         (None, [7], False, "current team"),
@@ -285,6 +334,7 @@ class _FakeSkill:
         self.name = "old-name"
         self.skill_prompt = "old-prompt"
         self.team = [1]
+        self.usage_team = [1]
         self.skill_params = []
         self.skill_packages = []
         self.knowledge_base = SimpleNamespace(set=lambda *a, **k: None, clear=lambda: None)

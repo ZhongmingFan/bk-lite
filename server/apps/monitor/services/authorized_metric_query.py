@@ -4,12 +4,19 @@ from dataclasses import dataclass
 from apps.core.utils.permission_utils import get_permission_rules, permission_filter
 from apps.monitor.constants.permission import PermissionConstants
 from apps.monitor.models import Metric, MonitorInstance, MonitorObject
-from apps.monitor.services.metric_query_contract import AuthorizedMetricQueryError, build_instance_matchers, escape_metric_label_value
+from apps.monitor.services.metric_query_contract import (
+    AuthorizedMetricQueryError,
+    build_instance_matcher_groups,
+    escape_metric_label_value,
+    join_label_queries,
+)
 from apps.monitor.services.metrics import Metrics
-from apps.monitor.utils.dimension import parse_instance_id
+from apps.monitor.utils.dimension import normalize_instance_identity, parse_instance_id
 
 ALLOWED_AGGREGATIONS = {
-    "AVG": None,
+    # AVG 按实例 + 已声明维度聚合，丢掉 collection_task_id / 采集器 host 等未声明标签。
+    # 否则 Host Remote 每轮采集都是短命序列：折线合成一条，断点却按序列并集把整窗涂红。
+    "AVG": "avg",
     "SUM": "sum",
     "MAX": "max",
     "MIN": "min",
@@ -31,6 +38,13 @@ class AuthorizedMetricQuery:
     card_budget: bool
 
 
+def _storage_instance_id(value) -> str:
+    try:
+        return normalize_instance_identity(value)["storage_instance_key"]
+    except ValueError:
+        return str(value)
+
+
 def _metric_instance_id_keys(metric: Metric) -> list[str]:
     keys = metric.instance_id_keys or getattr(metric.monitor_object, "instance_id_keys", None) or []
     normalized = [str(key).strip() for key in keys if key is not None and str(key).strip()]
@@ -42,16 +56,30 @@ def _metric_instance_id_keys(metric: Metric) -> list[str]:
     return normalized
 
 
-def _allowed_dimensions(metric: Metric) -> set[str]:
-    allowed = set()
+def _metric_dimension_names(metric: Metric) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
     for item in metric.dimensions or []:
-        if isinstance(item, dict):
-            name = item.get("name")
-        else:
-            name = item
-        if name is not None and str(name).strip():
-            allowed.add(str(name).strip())
-    return allowed
+        raw = item.get("name") if isinstance(item, dict) else item
+        name = str(raw).strip() if raw is not None else ""
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _allowed_dimensions(metric: Metric) -> set[str]:
+    return set(_metric_dimension_names(metric))
+
+
+def _aggregation_grouping_labels(metric: Metric, aggregation_name: str) -> list[str]:
+    grouping = list(_metric_instance_id_keys(metric))
+    if aggregation_name == "AVG":
+        for name in _metric_dimension_names(metric):
+            if name not in grouping:
+                grouping.append(name)
+    return grouping
 
 
 def _filter_matchers(metric: Metric, filters) -> list[str]:
@@ -78,7 +106,7 @@ def _filter_matchers(metric: Metric, filters) -> list[str]:
     return matchers
 
 
-def _render_metric_query(metric: Metric, matchers: list[str], aggregation) -> str:
+def _render_metric_query(metric: Metric, matcher_groups: list[list[str]], aggregation) -> str:
     template = metric.query or ""
     if "__$labels__" not in template:
         raise AuthorizedMetricQueryError(
@@ -86,23 +114,23 @@ def _render_metric_query(metric: Metric, matchers: list[str], aggregation) -> st
             code="metric_template_not_scoped",
         )
 
-    query = template.replace("__$labels__", ", ".join(matchers))
+    query = join_label_queries(template, matcher_groups)
 
     aggregation_name = str(aggregation or "AVG").upper()
     if aggregation_name not in ALLOWED_AGGREGATIONS:
         raise AuthorizedMetricQueryError("汇聚方式不受支持", code="aggregation_invalid")
     aggregation_func = ALLOWED_AGGREGATIONS[aggregation_name]
     if aggregation_func:
-        instance_keys = _metric_instance_id_keys(metric)
-        query = f'{aggregation_func}({query}) by ({", ".join(instance_keys)})'
+        grouping = _aggregation_grouping_labels(metric, aggregation_name)
+        query = f'{aggregation_func}({query}) by ({", ".join(grouping)})'
     return query
 
 
 def _build_query(metric: Metric, instance_ids: tuple[str, ...], filters, aggregation) -> str:
     instance_keys = _metric_instance_id_keys(metric)
-    matchers = build_instance_matchers(instance_ids, instance_keys)
-    matchers.extend(_filter_matchers(metric, filters))
-    return _render_metric_query(metric, matchers, aggregation)
+    extra_matchers = _filter_matchers(metric, filters)
+    matcher_groups = [list(group) + extra_matchers for group in build_instance_matcher_groups(instance_ids, instance_keys)]
+    return _render_metric_query(metric, matcher_groups, aggregation)
 
 
 def _normalize_bool(value, *, field: str) -> bool:
@@ -130,7 +158,7 @@ class AuthorizedMetricQueryService:
                 code="instance_ids_required",
             )
 
-        instance_ids = tuple(dict.fromkeys(str(value) for value in raw_instance_ids if value not in (None, "")))
+        instance_ids = tuple(dict.fromkeys(_storage_instance_id(value) for value in raw_instance_ids if value not in (None, "")))
         if not instance_ids:
             raise AuthorizedMetricQueryError(
                 "instance_ids 不能为空",
@@ -311,7 +339,7 @@ class AuthorizedMetricQueryService:
             if scope_matchers is not None:
                 if payload.get("filters") not in (None, [], ""):
                     raise AuthorizedMetricQueryError("进程查询不接受额外筛选", code="query_scope_invalid")
-                query = _render_metric_query(metric, scope_matchers, payload.get("aggregation"))
+                query = _render_metric_query(metric, [scope_matchers], payload.get("aggregation"))
             else:
                 query = _build_query(
                     metric,

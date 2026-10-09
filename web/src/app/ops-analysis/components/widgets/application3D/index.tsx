@@ -2,7 +2,8 @@
 
 import './application3DChrome.css';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Button, Empty, Select, Spin } from 'antd';
+import { Alert, Button, Select, Spin } from 'antd';
+import CompactEmptyState from '@/components/compact-empty-state';
 import { ReloadOutlined } from '@ant-design/icons';
 import { useParams } from 'next/navigation';
 import { useTranslation } from '@/utils/i18n';
@@ -15,11 +16,19 @@ import type {
   Application3DWallData,
   Application3DWallItem,
 } from '@/app/ops-analysis/types/sceneWidget';
-import type { ScreenRenderContext } from '@/app/ops-analysis/types/dashBoard';
+import type { ScreenRenderContext, ValueConfig } from '@/app/ops-analysis/types/dashBoard';
 import type { OpsAnalysisWidgetSurface } from '@/app/ops-analysis/utils/chartTypeSurface';
 import { isSceneWidgetAllowedOnSurface } from '@/app/ops-analysis/types/sceneWidgetCapability';
 import type { Application3DSceneController } from './application3DScene';
 import Application3DDetail from './application3DDetail';
+import { bindApplication3DTranslate } from './application3DLayout';
+import { application3DPageEffectLeadMs } from './application3DMotion';
+import {
+  planApplication3DWallPages,
+  resolveApplication3DWallPageAfterRefresh,
+  type Application3DWallSectionPlace,
+} from './application3DWallPaging';
+import { resolveApplication3DWallConfig } from '@/app/ops-analysis/utils/application3DWallConfig';
 import {
   formatArchitectureHostAlarmCount,
   formatArchitectureHostIp,
@@ -30,6 +39,7 @@ import {
 } from './application3DArchitectureOverlay';
 
 interface Application3DProps {
+  config?: ValueConfig;
   refreshKey?: string | number;
   editMode?: boolean;
   screenRenderContext?: ScreenRenderContext;
@@ -38,6 +48,7 @@ interface Application3DProps {
   onError?: (message: string) => void;
   runtimeActive?: boolean;
   onRawData?: (data: unknown) => void;
+  instUuid?: string;
 }
 
 const getErrorCode = (error: unknown): string | undefined => {
@@ -55,6 +66,7 @@ const getErrorCode = (error: unknown): string | undefined => {
 };
 
 export default function Application3D({
+  config,
   refreshKey,
   editMode = false,
   screenRenderContext,
@@ -63,6 +75,7 @@ export default function Application3D({
   onError,
   runtimeActive = true,
   onRawData,
+  instUuid,
 }: Application3DProps) {
   const { t } = useTranslation();
   const translateRef = useRef(t);
@@ -109,11 +122,20 @@ export default function Application3D({
   const [architectureLoading, setArchitectureLoading] = useState(false);
   const [architectureError, setArchitectureError] = useState('');
   const [architectureHost, setArchitectureHost] = useState<ArchitectureHostSelection | null>(null);
+  const [wallPage, setWallPage] = useState(1);
+  const wallConfig = useMemo(
+    () => resolveApplication3DWallConfig(config?.application3DWall),
+    [config?.application3DWall],
+  );
+  const sectionRestorePendingRef = useRef(false);
+  const sectionPlaceRef = useRef<Application3DWallSectionPlace | null>(null);
+  const rearmDwellRef = useRef<(leadMs: number) => void>(() => undefined);
   const architectureOpenRef = useRef(false);
   const allowedOnSurface =
+    Boolean(instUuid) ||
     isSceneWidgetAllowedOnSurface('application3D', surface) ||
     screenRenderContext?.enabled === true;
-  const wallMotionRef = useRef<'intro' | 'filter' | 'none'>('intro');
+  const wallMotionRef = useRef<'intro' | 'filter' | 'page-next' | 'page-prev' | 'none'>('intro');
   const wallRef = useRef(wall);
   const selectedRef = useRef(selected);
   const detailOpenRef = useRef(detailOpen);
@@ -121,6 +143,32 @@ export default function Application3D({
   selectedRef.current = selected;
   detailOpenRef.current = detailOpen;
   architectureOpenRef.current = architectureOpen;
+  const pagedWall = useMemo(() => {
+    const items = wall?.items ?? [];
+    const page = editMode
+      ? 1
+      : sectionRestorePendingRef.current
+        ? resolveApplication3DWallPageAfterRefresh(items, sectionPlaceRef.current, wallConfig)
+        : wallPage;
+    return planApplication3DWallPages(items, page, wallConfig);
+  }, [editMode, wall, wallConfig, wallPage]);
+  const pagedWallRef = useRef(pagedWall);
+  pagedWallRef.current = pagedWall;
+  const wallPageRef = useRef(pagedWall.page);
+  const totalPagesRef = useRef(pagedWall.totalPages);
+  wallPageRef.current = pagedWall.page;
+  totalPagesRef.current = pagedWall.totalPages;
+
+  useEffect(() => {
+    sectionRestorePendingRef.current = false;
+    if (pagedWall.page !== wallPage) setWallPage(pagedWall.page);
+    if (pagedWall.section) {
+      sectionPlaceRef.current = {
+        section: pagedWall.section,
+        sectionPage: pagedWall.sectionPage,
+      };
+    }
+  }, [pagedWall, wallPage]);
 
   const onRawDataRef = useRef(onRawData);
   onRawDataRef.current = onRawData;
@@ -151,7 +199,7 @@ export default function Application3D({
       const controller = createApplication3DScene(mountNode, {
         interactive: !editMode,
         active: runtimeActive,
-        translate: (id, defaultMessage) => translateRef.current(id, defaultMessage),
+        translate: bindApplication3DTranslate(translateRef),
         onSelect: (item) => {
           if (editMode) return;
           if (detailOpenRef.current) return;
@@ -176,11 +224,17 @@ export default function Application3D({
       resizeSceneRef.current = () => controller.resize();
       if (wallRef.current) {
         const motion = wallMotionRef.current;
-        controller.reconcile(wallRef.current.items, {
+        const page = pagedWallRef.current;
+        const pageDirection =
+          motion === 'page-next' ? 'next' : motion === 'page-prev' ? 'prev' : undefined;
+        controller.reconcile(page.pageItems, {
           playIntro: motion === 'intro',
           playFilter: motion === 'filter',
+          pageDirection,
+          pageEffect: wallConfig.pageEffect,
+          layoutCount: page.layoutCount,
         });
-        if (wallRef.current.items.length > 0 && motion !== 'none') {
+        if (page.pageItems.length > 0 && motion !== 'none') {
           wallMotionRef.current = 'none';
         }
       }
@@ -216,20 +270,29 @@ export default function Application3D({
     const controller = controllerRef.current;
     if (!controller) return;
     const motion = wallMotionRef.current;
-    controller.reconcile(wall?.items ?? [], {
+    const pageDirection =
+      motion === 'page-next' ? 'next' : motion === 'page-prev' ? 'prev' : undefined;
+    controller.reconcile(pagedWall.pageItems, {
       playIntro: motion === 'intro',
       playFilter: motion === 'filter',
+      pageDirection,
+      pageEffect: wallConfig.pageEffect,
+      layoutCount: pagedWall.layoutCount,
     });
-    if ((wall?.items.length ?? 0) > 0 && motion !== 'none') {
+    if (pagedWall.pageItems.length > 0 && motion !== 'none') {
       wallMotionRef.current = 'none';
     }
-  }, [wall]);
+  }, [pagedWall, wall]);
 
   useEffect(() => {
     const controller = controllerRef.current;
-    const items = wallRef.current?.items;
-    if (!controller || !items?.length) return;
-    controller.reconcile(items, { forceRepaint: true });
+    const page = pagedWallRef.current;
+    if (!controller || !page.pageItems.length) return;
+    controller.reconcile(page.pageItems, {
+      forceRepaint: true,
+      pageEffect: wallConfig.pageEffect,
+      layoutCount: page.layoutCount,
+    });
   }, [t]);
 
   // Screen fitScale is a CSS transform; ResizeObserver content-box does not change.
@@ -275,9 +338,11 @@ export default function Application3D({
     setError('');
     setRefreshWarning('');
     try {
-      const result = await getWall(filters, abortController.signal);
+      const result = await getWall(filters, abortController.signal, instUuid);
       if (!mountedRef.current || generation !== wallGenerationRef.current) return;
+      sectionRestorePendingRef.current = Boolean(silent && currentWall);
       setWall(result);
+      if (!silent) setWallPage(1);
       setAppliedFilters(result.appliedFilters || filters);
       if (
         selectedRef.current &&
@@ -318,12 +383,12 @@ export default function Application3D({
         setRefreshing(false);
       }
     }
-  }, [clearSelection, getWall, onError, onReady, t]);
+  }, [clearSelection, getWall, instUuid, onError, onReady, t]);
 
   useEffect(() => {
     if (!allowedOnSurface || !runtimeActive) return;
     void fetchWall(appliedFilters, Boolean(wall));
-  }, [refreshKey, runtimeActive]);
+  }, [refreshKey, runtimeActive, instUuid]);
 
   useEffect(() => {
     if (wall && !loading) setToolbarEntered(true);
@@ -335,8 +400,55 @@ export default function Application3D({
     setAppliedFilters(next);
     clearSelection();
     wallMotionRef.current = 'filter';
+    rearmDwellRef.current(0);
     void fetchWall(next);
   };
+
+  const goToWallPage = (nextPage: number) => {
+    if (nextPage === wallPage || nextPage < 1 || nextPage > pagedWall.totalPages) return;
+    clearSelection();
+    wallMotionRef.current = nextPage > wallPage ? 'page-next' : 'page-prev';
+    setWallPage(nextPage);
+    rearmDwellRef.current(application3DPageEffectLeadMs(wallConfig.pageEffect));
+  };
+
+  const autoPageEligible = wallConfig.autoPageEnabled
+    && !editMode
+    && runtimeActive
+    && !selected
+    && !detailOpen
+    && !architectureOpen
+    && pagedWall.totalPages > 1
+    && !loading;
+
+  useEffect(() => {
+    if (!autoPageEligible) {
+      rearmDwellRef.current = () => undefined;
+      return undefined;
+    }
+    let timer = 0;
+    let cancelled = false;
+    const schedule = (leadMs: number) => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        if (cancelled) return;
+        const total = totalPagesRef.current;
+        const current = wallPageRef.current;
+        if (total <= 1) return;
+        const next = current >= total ? 1 : current + 1;
+        wallMotionRef.current = 'page-next';
+        setWallPage(next);
+        schedule(application3DPageEffectLeadMs(wallConfig.pageEffect));
+      }, leadMs + wallConfig.dwellSeconds * 1000);
+    };
+    rearmDwellRef.current = schedule;
+    schedule(0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      rearmDwellRef.current = () => undefined;
+    };
+  }, [autoPageEligible, wallConfig.dwellSeconds, wallConfig.pageEffect]);
 
   const loadDetail = useCallback(async (item: Application3DWallItem) => {
     const generation = ++detailGenerationRef.current;
@@ -580,6 +692,11 @@ export default function Application3D({
     [appliedFilters, filterDefinitions],
   );
 
+  const showWallPageChrome = pagedWall.totalPages > 1;
+  const wallPageInteractive = !editMode && !selected && !detailOpen && !architectureOpen;
+  const showWallPageWings = showWallPageChrome && wallPageInteractive;
+  const showWallPageLabel = showWallPageChrome && (editMode || wallPageInteractive);
+
   return (
     <div className="relative h-full min-h-48 w-full overflow-hidden bg-[var(--screen-canvas-bg,#0c2138)] text-[var(--color-application3d-text)]">
       <div
@@ -613,12 +730,14 @@ export default function Application3D({
       )}
       {!loading && !error && wall?.items.length === 0 && (
         <div className="pointer-events-none absolute inset-0 z-[5] flex items-center justify-center">
-          <Empty description={t('dashboard.application3DEmpty')} />
+          <CompactEmptyState description={t('dashboard.application3DEmpty')} />
         </div>
       )}
       {!editMode && (
         <div className={`pointer-events-none absolute left-3 right-3 top-3 z-20 flex items-start justify-between gap-3${toolbarEntered ? ' app3d-toolbar-in' : ''}`}>
-          <div className="pointer-events-auto flex flex-wrap gap-2">{filterControls}</div>
+          <div className="pointer-events-auto flex flex-wrap gap-2">
+            {instUuid ? null : filterControls}
+          </div>
           <Button
             size="small"
             className="pointer-events-auto border-[var(--color-application3d-refresh-border)] bg-[var(--color-application3d-refresh-bg)] text-[var(--color-application3d-text)]"
@@ -652,6 +771,59 @@ export default function Application3D({
             </Button>
           )}
         />
+      )}
+      {showWallPageWings && pagedWall.hasPrev && (
+        <button
+          type="button"
+          className="app3d-wall-page-wing app3d-wall-page-wing--prev"
+          aria-label={t('dashboard.application3DWallPrevPage', '上一页')}
+          onClick={() => goToWallPage(pagedWall.page - 1)}
+        >
+          <svg
+            className="app3d-wall-page-wing__icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <polyline points="15 18 9 12 15 6" />
+          </svg>
+        </button>
+      )}
+      {showWallPageWings && pagedWall.hasNext && (
+        <button
+          type="button"
+          className="app3d-wall-page-wing app3d-wall-page-wing--next"
+          aria-label={t('dashboard.application3DWallNextPage', '下一页')}
+          onClick={() => goToWallPage(pagedWall.page + 1)}
+        >
+          <svg
+            className="app3d-wall-page-wing__icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <polyline points="9 18 15 12 9 6" />
+          </svg>
+        </button>
+      )}
+      {showWallPageLabel && (
+        <div className="app3d-wall-page-indicator" aria-live="polite">
+          <span className="app3d-wall-page-indicator-dot" aria-hidden="true" />
+          <span>
+            {t('dashboard.application3DWallPage', '{page} / {total} 页', {
+              page: pagedWall.page,
+              total: pagedWall.totalPages,
+            })}
+          </span>
+        </div>
       )}
       {!editMode && selected && !detailOpen && (
         <div className="app3d-focus-actions pointer-events-none absolute bottom-6 left-0 right-0 z-20 flex justify-center">
@@ -693,8 +865,11 @@ export default function Application3D({
         const badgeModifier = state === 'alarming' ? 'alarming' : state === 'normal' ? 'normal' : 'unknown';
         const isAlarming = state === 'alarming';
         const isNormal = state === 'normal';
-        const alarmCount = formatArchitectureHostAlarmCount(architectureHost.node.health?.activeAlarmCount);
-        const severityLabel = formatArchitectureHostSeverity(architectureHost.node.health?.highestSeverity?.label);
+        const alarmCount = formatArchitectureHostAlarmCount(
+          isAlarming ? architectureHost.node.health?.activeAlarmCount : isNormal ? 0 : null,
+        );
+        const highestSeverity = architectureHost.node.health?.highestSeverity;
+        const severityLabel = formatArchitectureHostSeverity(highestSeverity?.label, highestSeverity?.id, t);
         const dismissHostOverlay = (event: { stopPropagation: () => void }) => {
           event.stopPropagation();
           setArchitectureHost(null);
@@ -741,7 +916,7 @@ export default function Application3D({
             <div className="app3d-arch-host-chip__body">
               <div className="app3d-arch-host-chip__metric">
                 <div className={`app3d-arch-host-chip__metric-val app3d-arch-host-chip__metric-val--${badgeModifier}`}>
-                  {isAlarming ? alarmCount : isNormal ? '0' : '-'}
+                  {alarmCount}
                 </div>
                 <div className="app3d-arch-host-chip__metric-lbl">
                   {t('dashboard.application3DHostAlarmCount', '条数')}
@@ -779,11 +954,11 @@ export default function Application3D({
                   >
                     {isAlarming
                       ? severityLabel
-                      : formatArchitectureHostState(state, t)}
+                      : formatArchitectureHostState(state, t, architectureHost.node.health?.reason)}
                   </span>
                   {isAlarming && (
                     <span className="sr-only">
-                      {t('dashboard.application3DHostStatus', '状态')}: {formatArchitectureHostState(state, t)}
+                      {t('dashboard.application3DHostStatus', '状态')}: {formatArchitectureHostState(state, t, architectureHost.node.health?.reason)}
                     </span>
                   )}
                   {!isAlarming && (

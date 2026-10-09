@@ -29,8 +29,10 @@ import { INIT_VIEW_MODAL_FORM } from '@/app/monitor/constants/view';
 const Alert: React.FC<ViewModalProps> = ({
   monitorObject,
   metrics,
-  objects,
-  form = INIT_VIEW_MODAL_FORM
+  objects = [],
+  form = INIT_VIEW_MODAL_FORM,
+  readOnly = false,
+  fillContainer = false,
 }) => {
   const { isLoading } = useApiClient();
   const { getMonitorAlert, patchMonitorAlert } = useMonitorApi();
@@ -118,23 +120,25 @@ const Alert: React.FC<ViewModalProps> = ({
           >
             {t('common.detail')}
           </Button>
-          <Permission
-            requiredPermissions={['Detail']}
-            instPermissions={record.permission}
-          >
-            <Popconfirm
-              title={t('monitor.events.closeTitle')}
-              description={t('monitor.events.closeContent')}
-              okText={t('common.confirm')}
-              cancelText={t('common.cancel')}
-              okButtonProps={{ loading: confirmLoading }}
-              onConfirm={() => handleCloseConfirm(record)}
+          {!readOnly && (
+            <Permission
+              requiredPermissions={['Detail']}
+              instPermissions={record.permission}
             >
-              <Button type="link" disabled={record.status !== 'new'}>
-                {t('common.close')}
-              </Button>
-            </Popconfirm>
-          </Permission>
+              <Popconfirm
+                title={t('monitor.events.closeTitle')}
+                description={t('monitor.events.closeContent')}
+                okText={t('common.confirm')}
+                cancelText={t('common.cancel')}
+                okButtonProps={{ loading: confirmLoading }}
+                onConfirm={() => handleCloseConfirm(record)}
+              >
+                <Button type="link" disabled={record.status !== 'new'}>
+                  {t('common.close')}
+                </Button>
+              </Popconfirm>
+            </Permission>
+          )}
         </>
       )
     }
@@ -292,7 +296,7 @@ const Alert: React.FC<ViewModalProps> = ({
   };
 
   return (
-    <div className="w-full">
+    <div className={fillContainer ? 'flex h-full min-h-0 w-full flex-col' : 'w-full'}>
       <Segmented
         className="mb-[16px]"
         value={activeTab}
@@ -325,15 +329,17 @@ const Alert: React.FC<ViewModalProps> = ({
           onRefresh={onRefresh}
         />
       </div>
-      <CustomTable
-        scroll={{ y: 'calc(100vh - 420px)', x: 890 }}
-        columns={columns}
-        dataSource={tableData}
-        pagination={pagination}
-        loading={tableLoading}
-        rowKey="id"
-        onChange={handleTableChange}
-      />
+      <div className={fillContainer ? 'min-h-0 flex-1' : ''}>
+        <CustomTable
+          scroll={fillContainer ? { x: 890 } : { y: 'calc(100vh - 420px)', x: 890 }}
+          columns={columns}
+          dataSource={tableData}
+          pagination={pagination}
+          loading={tableLoading}
+          rowKey="id"
+          onChange={handleTableChange}
+        />
+      </div>
       <AlertDetail
         ref={detailRef}
         metrics={metrics}

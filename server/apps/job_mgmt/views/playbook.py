@@ -22,6 +22,7 @@ from apps.job_mgmt.serializers.playbook import (
     extract_file_from_archive,
 )
 from apps.job_mgmt.services.error_response import exception_to_response
+from apps.job_mgmt.utils.i18n import job_message
 from apps.job_mgmt.views.mixins import BatchDeleteMixin
 from apps.system_mgmt.utils.operation_log_utils import log_operation
 
@@ -153,7 +154,10 @@ class PlaybookViewSet(BatchDeleteMixin, AuthViewSet):
         instance = self.get_object()
 
         if not instance.file:
-            return Response({"detail": "文件不存在"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"detail": job_message(request, "error.file_not_found", "File not found")},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         file_handle = instance.file.open("rb")
         response = FileResponse(file_handle, as_attachment=True, filename=instance.file_name)
@@ -178,12 +182,20 @@ class PlaybookViewSet(BatchDeleteMixin, AuthViewSet):
                 "- `playbook.yml`：Playbook 入口文件（`hosts: all`，由系统自动注入目标主机）\n"
                 "- `README.md`：Playbook 说明文档\n"
                 "- `roles/example/tasks/main.yml`：任务示例\n"
-                "- `roles/example/vars/main.yml`：变量示例\n\n"
+                "- `roles/example/vars/main.yml`：变量与参数说明（行尾注释）\n\n"
+                "## 参数说明（供平台展示）\n\n"
+                "执行参数从 `roles/*/vars/main.yml` 解析。\n\n"
+                "请在参数**同一行行尾**用 `#` 写说明，平台会用于快速执行的参数提示；"
+                "不支持上一行或多行注释。\n\n"
+                "示例：\n\n"
+                "```yaml\n"
+                'message: "Hello from playbook template"  # 发送给目标的问候语\n'
+                "```\n\n"
                 "## 执行说明\n\n"
                 "上传后在「快速执行」中选择目标主机即可运行，系统会自动生成 inventory。\n\n"
                 "## 自定义建议\n\n"
                 "1. 按业务需要修改 `roles/example/tasks/main.yml`\n"
-                "2. 在 `vars/main.yml` 中补充变量\n"
+                "2. 在 `vars/main.yml` 中补充变量，并在行尾用 `#` 写上参数说明\n"
                 "3. 如果需要多角色，可以在 `roles/` 下继续增加目录\n",
             )
             zip_file.writestr(
@@ -192,7 +204,7 @@ class PlaybookViewSet(BatchDeleteMixin, AuthViewSet):
             )
             zip_file.writestr(
                 "playbook-template/roles/example/vars/main.yml",
-                '---\nmessage: "Hello from playbook template"\n',
+                '---\nmessage: "Hello from playbook template"  # 发送给目标的问候语\n',
             )
             zip_file.writestr("playbook-template/roles/example/templates/.gitkeep", "")
 
@@ -227,11 +239,17 @@ class PlaybookViewSet(BatchDeleteMixin, AuthViewSet):
         # 获取 file_path 参数
         file_path = request.query_params.get("file_path")
         if not file_path:
-            return Response({"detail": "缺少 file_path 参数"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": job_message(request, "error.file_path_required", "file_path is required")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         # 检查文件是否存在
         if not instance.file:
-            return Response({"detail": "Playbook 文件不存在"}, status=status.HTTP_404_NOT_FOUND)
+            return Response(
+                {"detail": job_message(request, "error.playbook_file_not_found", "Playbook file not found")},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         try:
             result = extract_file_from_archive(instance.file, file_path)
@@ -250,4 +268,10 @@ class PlaybookViewSet(BatchDeleteMixin, AuthViewSet):
             else:
                 return Response({"detail": error_msg}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
-            return exception_to_response(e, context="[playbook.preview]", default_message="预览失败", body_key="detail")
+            return exception_to_response(
+                e,
+                context="[playbook.preview]",
+                default_message=job_message(request, "error.preview_failed", "Preview failed"),
+                body_key="detail",
+                request=request,
+            )

@@ -15,6 +15,17 @@ MON_C = "mon-c"
 _PERMISSION_FAIL_TEMPLATE = "active alert summary permission context failed monitor_id_count=%s " "failed_stage=permission_context error_type=%s"
 
 
+def _patch_actor_scope(monkeypatch):
+    monkeypatch.setattr(
+        "apps.monitor.nats.monitor._get_nats_actor_scope",
+        lambda user_info: (None, 1, False, [1], True, None),
+    )
+    monkeypatch.setattr(
+        "apps.monitor.services.active_alert_summaries.filter_alerts_by_organizations",
+        lambda queryset, organization_ids, field_name="organizations": queryset,
+    )
+
+
 def test_normalize_monitor_ids_dedupes_and_rejects_non_list():
     assert normalize_monitor_ids(["a", "a", "", None, "b"]) == ["a", "b"]
     with pytest.raises(ValueError):
@@ -35,6 +46,7 @@ def test_summarize_empty_ids_returns_empty_items():
 
 
 def test_summarize_excludes_info_and_picks_highest_severity(monkeypatch):
+    _patch_actor_scope(monkeypatch)
     policy_qs = SimpleNamespace(values_list=lambda *args, **kwargs: [1, 2])
 
     class _InstanceQS:
@@ -53,8 +65,9 @@ def test_summarize_excludes_info_and_picks_highest_severity(monkeypatch):
     captured = {}
 
     class _AlertQS:
-        def filter(self, **kwargs):
-            captured["filter"] = kwargs
+        def filter(self, *args, **kwargs):
+            if "status" in kwargs:
+                captured["filter"] = kwargs
             return self
 
         def values(self, *args):
@@ -87,6 +100,7 @@ def test_summarize_excludes_info_and_picks_highest_severity(monkeypatch):
 
 
 def test_summarize_batches_above_100_keeps_all_authorized_results(monkeypatch):
+    _patch_actor_scope(monkeypatch)
     total = ACTIVE_ALERT_SUMMARY_BATCH_SIZE + 3
     ordered_ids = [f"mon-{index:03d}" for index in range(total)]
     policy_qs = SimpleNamespace(values_list=lambda *args, **kwargs: [1])
@@ -104,7 +118,9 @@ def test_summarize_batches_above_100_keeps_all_authorized_results(monkeypatch):
         def __init__(self):
             self._batch: list[str] = []
 
-        def filter(self, **kwargs):
+        def filter(self, *args, **kwargs):
+            if "monitor_instance_id__in" not in kwargs:
+                return self
             batch = list(kwargs["monitor_instance_id__in"])
             batches.append(batch)
             self._batch = batch
@@ -152,6 +168,7 @@ def test_summarize_batches_above_100_keeps_all_authorized_results(monkeypatch):
 
 
 def test_summarize_returns_zero_for_authorized_without_alerts(monkeypatch):
+    _patch_actor_scope(monkeypatch)
     policy_qs = SimpleNamespace(values_list=lambda *args, **kwargs: [1])
 
     class _InstanceQS:
@@ -162,7 +179,7 @@ def test_summarize_returns_zero_for_authorized_without_alerts(monkeypatch):
             return [MON_A]
 
     class _AlertQS:
-        def filter(self, **kwargs):
+        def filter(self, *args, **kwargs):
             return self
 
         def values(self, *args):
@@ -226,3 +243,86 @@ def test_summarize_permission_loader_exception_owns_traceback(caplog):
     assert record.exc_info[0] is RuntimeError
     assert boom_message not in record.msg
     assert boom_message not in str(record.args)
+
+
+def test_summarize_default_instance_loader_scopes_requested_ids(monkeypatch):
+    _patch_actor_scope(monkeypatch)
+    captured = {}
+
+    class _PolicyQS:
+        def values_list(self, *args, **kwargs):
+            captured["policy_values_list"] = {"args": args, "kwargs": kwargs, "returned": self}
+            return self
+
+    class _InstanceQS:
+        def filter(self, **kwargs):
+            captured["instance_filter"] = kwargs
+            return self
+
+        def values_list(self, *args, **kwargs):
+            return [MON_A]
+
+    def fake_instance_loader(user_info, instance_ids=None):
+        captured["instance_ids"] = list(instance_ids or [])
+        return _InstanceQS(), None
+
+    monkeypatch.setattr(
+        "apps.monitor.nats.monitor._get_nats_accessible_instance_queryset",
+        fake_instance_loader,
+    )
+    monkeypatch.setattr(
+        "apps.monitor.nats.monitor._get_nats_accessible_policy_queryset",
+        lambda user_info: (_PolicyQS(), None),
+    )
+
+    class _AlertQS:
+        def filter(self, *args, **kwargs):
+            captured.setdefault("alert_filters", []).append({"args": args, "kwargs": kwargs})
+            return self
+
+        def values(self, *args):
+            return self
+
+        def annotate(self, **kwargs):
+            return []
+
+    monkeypatch.setattr(
+        "apps.monitor.services.active_alert_summaries.MonitorAlert.objects",
+        _AlertQS(),
+    )
+
+    result = summarize_active_alerts_by_monitor_ids(
+        [MON_A, MON_B],
+        user_info={"user": "u"},
+    )
+
+    assert captured["instance_ids"] == [MON_A, MON_B]
+
+    def _policy_in(node):
+        from django.db.models import Q
+
+        if isinstance(node, Q):
+            for child in node.children:
+                found = _policy_in(child)
+                if found is not None:
+                    return found
+            return None
+        if isinstance(node, tuple) and node and node[0] == "policy_id__in":
+            return node[1]
+        return None
+
+    policy_in = None
+    for item in captured.get("alert_filters", []):
+        if "policy_id__in" in item["kwargs"]:
+            policy_in = item["kwargs"]["policy_id__in"]
+            break
+        for arg in item["args"]:
+            policy_in = _policy_in(arg)
+            if policy_in is not None:
+                break
+        if policy_in is not None:
+            break
+    assert policy_in is captured["policy_values_list"]["returned"]
+    assert not isinstance(policy_in, list)
+    assert result["result"] is True
+    assert [item["monitor_id"] for item in result["data"]["items"]] == [MON_A]

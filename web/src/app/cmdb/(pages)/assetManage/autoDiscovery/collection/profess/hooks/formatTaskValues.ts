@@ -1,6 +1,7 @@
 import { ENTER_TYPE, PASSWORD_PLACEHOLDER } from '@/app/cmdb/constants/professCollection';
 import { CredentialPoolItem, TreeNode, ModelItem } from '@/app/cmdb/types/autoDiscovery';
 import { BaseTaskRef } from '../components/baseTask';
+import { isVaultAuthField } from '../utils/vaultAuthFields';
 
 interface FormatTaskValuesOptions {
   values: any;
@@ -103,6 +104,25 @@ export const normalizeCredentialPool = (
   return [{ ...rawCredential }];
 };
 
+/** 表单字段映射后仍保留任务来源、仓库 ID 和类型选择。 */
+export const withTaskCredentialSource = (
+  raw: CredentialPoolItem,
+  built: CredentialPoolItem,
+): CredentialPoolItem => {
+  const result = { ...(raw.credential_id ? { credential_id: raw.credential_id } : {}), ...built, credential_source: raw.credential_source || 'inline' };
+  if (result.credential_source === 'vault') {
+    Object.keys(result).forEach((field) => {
+      if (isVaultAuthField(field, raw)) delete result[field];
+    });
+    result.vault_credential_id = raw.vault_credential_id;
+    result.vault_type_key = raw.vault_type_key;
+    for (const field of ['source', 'user_type', 'login_type', 'loginType', 'encrypt', 'api_url', 'scheme', 'project_id', 'subscription_id', 'api_version']) {
+      if (result[field] === undefined && raw[field] !== undefined) result[field] = raw[field];
+    }
+  }
+  return result;
+};
+
 export const buildCredentialPool = (
   rawItems: CredentialPoolItem[] = [],
   normalizeItem: (item: CredentialPoolItem, index: number) => CredentialPoolItem
@@ -110,7 +130,18 @@ export const buildCredentialPool = (
   return rawItems
     .filter((item) => item && typeof item === 'object')
     .map((item, index) => {
-      const normalized = { ...normalizeItem(item, index) };
+      const normalized: CredentialPoolItem = { ...(item.credential_id ? { credential_id: item.credential_id } : {}), ...normalizeItem(item, index) };
+      const source = item.credential_source || 'inline';
+      normalized.credential_source = source;
+      if (source === 'vault') {
+        normalized.vault_credential_id = item.vault_credential_id;
+        normalized.vault_type_key = item.vault_type_key;
+        delete normalized.vault_actor_context;
+        // 表单仅提交动态连接参数；用户名和秘密在下发时由后端查询。
+        Object.keys(normalized).forEach((key) => {
+          if (isVaultAuthField(key, item)) delete normalized[key];
+        });
+      }
       Object.keys(normalized).forEach((key) => {
         if (key.startsWith('_')) {
           delete normalized[key];

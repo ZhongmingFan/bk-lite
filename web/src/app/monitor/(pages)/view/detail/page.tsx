@@ -1,5 +1,6 @@
 'use client';
 
+import './register-detail-pilot';
 import React, { useState } from 'react';
 import { Breadcrumb, Button, Segmented } from 'antd';
 import { useTranslation } from '@/utils/i18n';
@@ -9,6 +10,10 @@ import { ArrowLeftOutlined } from '@ant-design/icons';
 import Overview from './overview';
 import Metric from '@/app/monitor/components/metric-views';
 import { getDashboardReturnNavigation } from '@/app/monitor/dashboards/shared/utils';
+import {
+  localizeDashboardReturnLabel,
+  tDashboardText
+} from '@/app/monitor/dashboards/shared/utils/content-i18n';
 import { resolveDashboardInstanceIdentity } from '@/app/monitor/dashboards/shared/utils/instance';
 import EllipsisWithTooltip from '@/components/ellipsis-with-tooltip';
 
@@ -28,6 +33,11 @@ const ViewDetail = () => {
     searchParams,
     detailTitle
   );
+  const backLabel = localizeDashboardReturnLabel(t, searchParams);
+  const breadcrumbItems = returnNavigation.breadcrumbItems.map((item) => ({
+    ...item,
+    title: typeof item.title === 'string' ? tDashboardText(t, item.title) : item.title
+  }));
   // 列表入口已用 JSON 编码 instance_id_values；不可再 split(',')，否则所有进程身份都会被拆坏。
   const { instanceId, idValues } = resolveDashboardInstanceIdentity(searchParams);
   const [activeMenu, setActiveMenu] = useState<string>('metrics');
@@ -68,35 +78,21 @@ const ViewDetail = () => {
           </span>
         </div>
         <div className={detailStyle.menu}>
-          <div className={detailStyle.menuBody}>
-            <Segmented
-              vertical
-              value={activeMenu}
-              className="custom-tabs"
-              options={[
-                { value: 'metrics', label: t('monitor.views.metrics') }
-                //   { value: 'overview', label: t('monitor.views.overview') },
-              ]}
-              onChange={onTabChange}
-            />
-          </div>
-          <button
-            type="button"
-            className={detailStyle.backLink}
-            onClick={onBackButtonClick}
-            title={returnNavigation.label}
-          >
-            <ArrowLeftOutlined className="mr-2 shrink-0" />
-            <EllipsisWithTooltip
-              className="min-w-0 truncate"
-              text={returnNavigation.label}
-            />
-          </button>
+          <Segmented
+            vertical
+            value={activeMenu}
+            className="custom-tabs"
+            options={[
+              { value: 'metrics', label: t('monitor.views.metrics') }
+              //   { value: 'overview', label: t('monitor.views.overview') },
+            ]}
+            onChange={onTabChange}
+          />
         </div>
       </div>
       <div className={detailStyle.rightSide}>
         <div className={detailStyle.rightHeader}>
-          <Breadcrumb items={returnNavigation.breadcrumbItems} />
+          <Breadcrumb items={breadcrumbItems} />
           <Button
             className="inline-flex max-w-[260px] items-center"
             icon={<ArrowLeftOutlined />}
@@ -104,7 +100,7 @@ const ViewDetail = () => {
           >
             <EllipsisWithTooltip
               className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap"
-              text={returnNavigation.label}
+              text={backLabel}
             />
           </Button>
         </div>
@@ -113,6 +109,7 @@ const ViewDetail = () => {
             idValues={idValues}
             monitorObjectId={monitorObjectId}
             monitorObjectName={monitorObjectName}
+            monitorObjectDisplayName={monitorObjDisplayName}
             instanceId={instanceId}
             instanceName={instanceName}
           />
@@ -121,6 +118,7 @@ const ViewDetail = () => {
             idValues={idValues}
             monitorObjectId={monitorObjectId}
             monitorObjectName={monitorObjectName}
+            monitorObjectDisplayName={monitorObjDisplayName}
             instanceId={instanceId}
             instanceName={instanceName}
           />

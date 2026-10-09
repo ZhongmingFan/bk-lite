@@ -17,13 +17,27 @@ _cache_lock = threading.Lock()
 _plugin_translation_cache: Dict[Tuple[str, str, str], dict] = {}
 _plugin_cache_lock = threading.Lock()
 
+# 只归一化扫描点名的别名；未知 locale 保持原值，避免把 zh-TW 等并进简体包。
+_LANGUAGE_ALIASES = {
+    "zh": "zh-Hans",
+    "zh-cn": "zh-Hans",
+    "zh-hans": "zh-Hans",
+    "en": "en",
+    "en-us": "en",
+}
+
+
+def normalize_language(lang: Optional[str]) -> str:
+    raw = (lang or "en").strip() or "en"
+    return _LANGUAGE_ALIASES.get(raw.replace("_", "-").lower(), raw)
+
 
 class LanguageLoader:
     def __init__(self, app: str, default_lang: str = "en"):
         self.app = app
         self.base_dir = f"apps/{app}/language"
-        self.default_lang = default_lang
-        self.translations = self._get_cached_translations(default_lang)
+        self.default_lang = normalize_language(default_lang)
+        self.translations = self._get_cached_translations(self.default_lang)
 
     def _get_cached_translations(self, lang: str) -> dict:
         """
@@ -75,7 +89,7 @@ class LanguageLoader:
                 #   以及无语言后缀的子目录文件(如中文遗留文件 core/monitor_object.yaml)
                 # 规则: name 包含目标语言后缀 OR (无任何语言后缀 AND lang in (en, zh-Hans))
                 has_lang_suffix = name.startswith(f"{lang}.") or name.endswith(f"_{lang}.yaml") or name == f"{lang}.yaml"
-                has_any_lang_suffix = any(name.endswith(f"_{l}.yaml") or name == f"{l}.yaml" for l in ("en", "zh-Hans"))
+                has_any_lang_suffix = any(name.endswith(f"_{suffix}.yaml") or name == f"{suffix}.yaml" for suffix in ("en", "zh-Hans"))
                 if not has_lang_suffix and has_any_lang_suffix:
                     continue
                 path = os.path.join(root, name)
@@ -180,14 +194,8 @@ class LanguageLoader:
                 if not name.endswith(".yaml"):
                     continue
                 # 与 _load_language_dir 相同过滤:跳过其他语言后缀的 yaml
-                has_lang_suffix = (
-                    name.startswith(f"{lang}.")
-                    or name.endswith(f"_{lang}.yaml")
-                    or name == f"{lang}.yaml"
-                )
-                has_any_lang_suffix = any(
-                    name.endswith(f"_{l}.yaml") or name == f"{l}.yaml" for l in ("en", "zh-Hans")
-                )
+                has_lang_suffix = name.startswith(f"{lang}.") or name.endswith(f"_{lang}.yaml") or name == f"{lang}.yaml"
+                has_any_lang_suffix = any(name.endswith(f"_{suffix}.yaml") or name == f"{suffix}.yaml" for suffix in ("en", "zh-Hans"))
                 if not has_lang_suffix and has_any_lang_suffix:
                     continue
                 path = os.path.join(root, name)
@@ -229,7 +237,8 @@ class LanguageLoader:
 
     def load_language(self, lang: str):
         """加载指定语言的yaml文件 (兼容旧接口)"""
-        self.translations = self._get_cached_translations(lang)
+        self.default_lang = normalize_language(lang)
+        self.translations = self._get_cached_translations(self.default_lang)
 
     def get(self, key: str, default: Optional[str] = None) -> Optional[Any]:
         """
@@ -290,7 +299,7 @@ def clear_language_cache(app: Optional[str] = None, lang: Optional[str] = None) 
 SUPPORTED_LANGUAGES = ["en", "zh-Hans"]
 
 # 需要预热的应用列表
-PRELOAD_APPS = ["opspilot", "core", "cmdb", "monitor", "node_mgmt", "system_mgmt"]
+PRELOAD_APPS = ["opspilot", "core", "cmdb", "monitor", "node_mgmt", "system_mgmt", "operation_analysis"]
 
 
 def preload_language_cache(apps: Optional[List[str]] = None, languages: Optional[List[str]] = None) -> dict:

@@ -4,7 +4,8 @@ import SubLayout from '@/components/sub-layout';
 import { useTranslation } from '@/utils/i18n';
 import { usePathname } from 'next/navigation';
 import Icon from '@/components/icon/index';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 
 const Collectorintro = () => {
   const searchParams = useSearchParams();
@@ -26,7 +27,7 @@ const CollectorLayout = ({
 }: Readonly<{
   children: React.ReactNode;
 }>) => {
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const { t } = useTranslation();
   const customMenuItems = useMemo(() => {
     const menuItems = [
@@ -78,7 +79,7 @@ const CollectorLayout = ({
     return (
       <div className="flex flex-col h-[90px] p-4 overflow-hidden">
         <h1 className="text-lg">{title}</h1>
-        <p className="text-sm overflow-hidden w-full min-w-[1000px] mt-[8px]">
+        <p className="mt-[8px] w-full min-w-0 overflow-hidden text-sm text-ellipsis">
           {description}
         </p>
       </div>
@@ -86,7 +87,7 @@ const CollectorLayout = ({
   };
 
   return (
-    <div className="w-full">
+    <div className="flex h-full min-h-0 w-full flex-col">
       <SubLayout
         topSection={<Topsection></Topsection>}
         showBackButton={true}

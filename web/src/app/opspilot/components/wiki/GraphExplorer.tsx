@@ -27,7 +27,7 @@ import GraphCanvas, {
   GraphCanvasHandle,
   communityColor,
 } from "@/app/opspilot/components/wiki/GraphCanvas";
-import { pageTypeLabelKey } from "./wikiFormat";
+import { formatPageTypeLabel, formatWikiDirectoryLabel } from "./wikiFormat";
 
 interface GraphExplorerProps {
   graph: WikiGraph;
@@ -171,7 +171,7 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
           community: c,
           label: hub?.title || `${t("wiki.communities")} ${c + 1}`,
           breadcrumb: (hub?.directory_breadcrumb || [])
-            .map((item) => item.name)
+            .map((item) => formatWikiDirectoryLabel(t, item))
             .join(" / "),
           count: list.length,
         };
@@ -401,8 +401,7 @@ const GraphExplorer: React.FC<GraphExplorerProps> = ({
           </div>
           <div className="grid grid-cols-2 gap-x-2 gap-y-1">
             {typeCounts.map(({ type, count }) => {
-              const labelKey = pageTypeLabelKey(type);
-              const label = labelKey ? t(labelKey) : type;
+              const label = formatPageTypeLabel(t, type);
               return (
                 <Checkbox
                   key={type}

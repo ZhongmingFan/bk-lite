@@ -45,6 +45,8 @@
     "settings": "Settings",
     "addNew": "Add New",
     "new": "New",
+    "owner": "Owner",
+    "team": "Team",
     "justNow": "Just now",
     "secondsAgo": "{count}s ago",
     "minutesAgo": "{count}m ago",
@@ -67,6 +69,12 @@
     "fetchFailed": "Failed to fetch list",
     "updateSuccess": "Updated successfully",
     "updateFailed": "Failed to update",
+    "addFailed": "Failed to add",
+    "deleteFailed": "Failed to delete",
+    "deleteSuccess": "Deleted successfully",
+    "all": "All",
+    "action": "Actions",
+    "required": "This field is required",
     "addSuccess": "Added successfully",
     "saveSuccess": "save successfully",
     "publishSuccess": "publish successfully",
@@ -105,6 +113,21 @@
     "trainFailed": "Failed to train",
     "noResult": "No Results",
     "noData": "No Data",
+    "loading": "Loading...",
+    "unassigned": "Unassigned",
+    "instance": "instances",
+    "formatError": "Invalid format",
+    "currentOrganization": "Current org",
+    "catalogScope": "Catalog scope",
+    "adjustOrganization": "Assign organization",
+    "unassignedGovernanceMode": "Unassigned",
+    "unassignedExitGovernance": "Back to current org",
+    "unassignedActionTip": "Select items and assign an organization from Actions",
+    "unassignedDetectedCountNotice": "{count} unassigned {resource}; members cannot see them",
+    "unassignedDetectedNotice": "Unassigned {resource} exist; members cannot see them",
+    "unassignedViewingCountNotice": "Viewing unassigned {resource} ({count})",
+    "unassignedViewingNotice": "Viewing unassigned {resource}",
+    "unassignedViewAction": "View",
     "more": "More",
     "inputRequired": "Please Input, it is required",
     "invalidURL": "Please enter a valid URL",
@@ -208,7 +231,18 @@
     "sessionExpiredDescription": "Please verify your identity again to continue on this page.",
     "reloginSuccess": "Signed in again. Please resubmit any operation that previously failed.",
     "portalSlogan": "AI-Native Lightweight O&M Platform",
-    "day": "Day(s)"
+    "minute": "minute",
+    "second": "second",
+    "hour": "hour",
+    "day": "Day(s)",
+    "saved": "Status updated",
+    "copied": "Copied",
+    "other": "Other",
+    "category": "Category",
+    "source": "Source",
+    "enabledStatus": "Status",
+    "disabled": "Disabled",
+    "enabled": "Enabled"
   },
   "userInfo": {
     "basicInfo": "Basic Information",
@@ -336,6 +370,11 @@
       "loading": "Loading QR code...",
       "unableToDisplay": "Unable to display QR code"
     },
+    "legacyThirdLogin": {
+      "title": "Signed in",
+      "returning": "Returning to the original page...",
+      "continue": "Continue"
+    },
     "loginAuth": {
       "methodsTitle": "Switch login method",
       "bindingPassword": {
@@ -445,7 +484,8 @@
     "mlops": "MLOps",
     "patch": "Patch Management",
     "apm": "APM",
-    "playground": "Playground"
+    "playground": "Playground",
+    "workflow-orchestration": "Workflow Orchestration"
   },
   "app": {
     "ops-analysis": "Integrate operation and maintenance data, analyze potential risks and optimization space from multiple dimensions through dashboards and canvases, provide data support for decision-making, and help improve operation and maintenance quality and business continuity",
@@ -461,7 +501,8 @@
     "ops-console": "Unified operations console for managing and monitoring all operational activities",
     "job": "Quickly create and execute jobs, unified management of script execution, file distribution and scheduled tasks",
     "patch": "Centrally manage system patches with scanning, installation, and patch library maintenance to continuously reduce security risks.",
-    "apm": "Application performance and tracing platform that provides service metrics, trace exploration, and alert policies to help quickly locate latency and errors and keep services stable"
+    "apm": "Application performance and tracing platform that provides service metrics, trace exploration, and alert policies to help quickly locate latency and errors and keep services stable",
+    "workflow-orchestration": "Design visual workflows, automate execution, manage human approvals, and track cross-system operations in one place."
   },
   "tag": {
     "user_management": "User Management",
@@ -503,11 +544,28 @@
     "file_distribution": "File Distribution",
     "scheduled_task": "Scheduled Task",
     "patch_scan": "Patch Scanning",
+    "workflow_design": "Workflow Design",
+    "workflow_execution": "Workflow Execution",
+    "automation": "Automation",
+    "approval": "Human Approval",
     "patch_install": "Patch Installation",
     "patch_library": "Patch Library",
     "apm_integration": "App Integration",
     "service_red": "Service Metrics",
     "trace_explore": "Traces",
-    "alert_center": "Alert Policies"
+    "alert_center": "Alert Policies",
+    "rum_experience": "Experience",
+    "rum_quality": "Quality",
+    "rum_alerting": "Events",
+    "rum_integration": "Integration",
+    "rum_governance": "Data Governance"
+  },
+  "webchat": {
+    "inputPlaceholder": "Type a message..."
+  },
+  "provider": {
+    "vendorAliyun": "Alibaba Cloud",
+    "vendorZhipu": "Zhipu",
+    "vendorBaidu": "Baidu"
   }
 }

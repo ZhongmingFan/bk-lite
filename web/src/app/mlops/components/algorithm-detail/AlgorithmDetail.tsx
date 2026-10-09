@@ -89,7 +89,7 @@ const AlgorithmDetail = ({ datasetType }: AlgorithmDetailProps) => {
       },
     },
     {
-      title: t('common.action'),
+      title: t('common.actions'),
       key: 'action',
       dataIndex: 'action',
       width: 200,
@@ -183,7 +183,7 @@ const AlgorithmDetail = ({ datasetType }: AlgorithmDetailProps) => {
     }
     catch (e) { console.error(e) }
     finally { setLoading(false) }
-  }, [t, searchParams]);
+  }, [datasetType, datasetId, pagination.current, pagination.pageSize, getTrainDataByDataset]);
 
   const onUpload = () => {
     const data = {

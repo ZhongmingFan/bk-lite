@@ -3,6 +3,7 @@ import type { ValueConfig, FilterBindings, UnifiedFilterDefinition, FilterValue 
 import type { DatasourceItem, ParamItem } from '@/app/ops-analysis/types/dataSource';
 import { buildWidgetRequestParams } from '@/app/ops-analysis/utils/widgetDataTransform';
 import { getValueByPath } from '@/app/ops-analysis/utils/objectPath';
+import { coerceTopNNumericValue } from '@/app/ops-analysis/utils/topNData';
 import type { DateRangeResolutionContext } from '@/app/ops-analysis/utils/dateRange';
 import type { SourceDataResult } from '@/app/ops-analysis/utils/sourceDataResponse';
 
@@ -25,6 +26,7 @@ interface BuildRequestParamsInput {
   filterBindings?: FilterBindings;
   filterDefinitions?: UnifiedFilterDefinition[];
   resolutionContext?: DateRangeResolutionContext;
+  t?: (id: string, defaultMessage?: string) => string;
 }
 
 interface FetchCompareDataInput extends BuildRequestParamsInput {
@@ -110,6 +112,7 @@ export const buildCompareRequestParams = ({
   filterBindings,
   filterDefinitions,
   resolutionContext,
+  t,
 }: BuildRequestParamsInput): { currentParams: RequestParams; baselineParams: RequestParams | null } => {
   const currentParams = buildWidgetRequestParams({
     config,
@@ -119,6 +122,7 @@ export const buildCompareRequestParams = ({
     filterBindings,
     filterDefinitions,
     resolutionContext,
+    t,
   });
 
   if (!config?.compare) {
@@ -219,14 +223,59 @@ export const extractComparableValue = (
   return null;
 };
 
-export const toComparableNumber = (value: number | string | null): number | null => {
-  if (value === null) {
-    return null;
+export const toComparableNumber = (value: number | string | null): number | null =>
+  coerceTopNNumericValue(value);
+
+export const validateGaugeData = (
+  data: unknown,
+  config?: ValueConfig,
+): { isValid: boolean; message?: string } => {
+  if (!data || (Array.isArray(data) && data.length === 0)) {
+    return { isValid: true };
   }
-  const numericValue = typeof value === 'string' ? parseFloat(value) : value;
-  return typeof numericValue === 'number' && !Number.isNaN(numericValue)
-    ? numericValue
-    : null;
+
+  if (config?.selectedFields?.[0]) {
+    return { isValid: true };
+  }
+
+  const failMessage = 'dashboard.gaugeStructureMismatch';
+
+  const hasNumericValue = (value: unknown) => {
+    if (typeof value === 'number') return Number.isFinite(value);
+    if (typeof value === 'string') {
+      const parsed = Number(value);
+      return Number.isFinite(parsed);
+    }
+    return false;
+  };
+
+  if (Array.isArray(data)) {
+    const firstItem = data[0];
+
+    if (hasNumericValue(firstItem)) {
+      return { isValid: true };
+    }
+
+    if (firstItem && typeof firstItem === 'object') {
+      const values = Object.values(firstItem as Record<string, unknown>);
+      return values.some((item) => hasNumericValue(item))
+        ? { isValid: true }
+        : { isValid: false, message: failMessage };
+    }
+
+    return { isValid: false, message: failMessage };
+  }
+
+  if (typeof data === 'object') {
+    const values = Object.values(data as Record<string, unknown>);
+    return values.some((item) => hasNumericValue(item))
+      ? { isValid: true }
+      : { isValid: false, message: failMessage };
+  }
+
+  return hasNumericValue(data)
+    ? { isValid: true }
+    : { isValid: false, message: failMessage };
 };
 
 export const getChangePercent = (

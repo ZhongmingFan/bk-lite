@@ -77,6 +77,18 @@ export class DataMapper {
           const match = processedValue.match(new RegExp(to_form.regex));
           processedValue = match ? match[1] || match[0] : processedValue;
         }
+        // 逗号串拆成数组（腾讯云地域多选回显）
+        if (to_form.split) {
+          const sep = typeof to_form.split === 'string' ? to_form.split : ',';
+          if (typeof processedValue === 'string') {
+            processedValue = processedValue
+              .split(sep)
+              .map((item: string) => item.trim())
+              .filter(Boolean);
+          } else if (processedValue == null || processedValue === '') {
+            processedValue = [];
+          }
+        }
         // 数组用分隔符拼成字符串（SNMP ifDescr 黑白名单回显）
         if (to_form.array_join) {
           const sep = typeof to_form.array_join === 'string' ? to_form.array_join : ',';
@@ -111,13 +123,28 @@ export class DataMapper {
                   : '';
               break;
             case 'key_value_list':
-              processedValue =
-                processedValue && typeof processedValue === 'object'
-                  ? Object.entries(processedValue).map(([key, itemValue]) => ({
-                    key,
-                    value: String(itemValue ?? '')
-                  }))
-                  : [];
+              if (Array.isArray(processedValue)) {
+                processedValue = processedValue.map((item) => {
+                  if (typeof item === 'string') {
+                    const eqIdx = item.indexOf('=');
+                    if (eqIdx !== -1) {
+                      return {
+                        key: item.slice(0, eqIdx),
+                        value: item.slice(eqIdx + 1)
+                      };
+                    }
+                    return { key: item, value: '' };
+                  }
+                  return item;
+                });
+              } else if (processedValue && typeof processedValue === 'object') {
+                processedValue = Object.entries(processedValue).map(([key, itemValue]) => ({
+                  key,
+                  value: String(itemValue ?? '')
+                }));
+              } else {
+                processedValue = [];
+              }
               break;
           }
         }
@@ -183,6 +210,13 @@ export class DataMapper {
               )
               : {};
             break;
+          case 'key_value_env_array':
+            processedValue = Array.isArray(processedValue)
+              ? processedValue
+                .filter((item: any) => String(item?.key || '').trim())
+                .map((item: any) => `${String(item.key).trim()}=${String(item.value ?? '')}`)
+              : [];
+            break;
         }
       }
       // 添加前缀
@@ -200,6 +234,18 @@ export class DataMapper {
         processedValue !== null
       ) {
         processedValue = String(processedValue) + to_api.suffix;
+      }
+      // 多选数组拼成逗号串（腾讯云地域提交）
+      if (to_api.join) {
+        const sep = typeof to_api.join === 'string' ? to_api.join : ',';
+        if (Array.isArray(processedValue)) {
+          processedValue = processedValue
+            .map((item) => String(item).trim())
+            .filter(Boolean)
+            .join(sep);
+        } else if (processedValue == null) {
+          processedValue = '';
+        }
       }
       // 字符串按分隔符拆成数组（SNMP ifDescr 黑白名单提交）
       if (to_api.split) {
@@ -225,6 +271,57 @@ export class DataMapper {
       }
     }
     return processedValue;
+  }
+
+  /**
+   * encrypted 字段默认仍 URL 编码：host 族 `credential_encoding=url` 与
+   * postgres/mongodb DSN 会把口令嵌进 URL，Stargazer/Telegraf 依赖编码值。
+   * SNMPv3 与 HTTP 头/专用 password 字段是明文消费者（Sidecar 只 AES 解密），
+   * 编码后 Telegraf 会拿到 `%40` 而非 `@`。
+   * 自定义 PULL（UI collect_type=bkpull, config_type=custom_pull）的 ENV_PASSWORD
+   * 写入 Telegraf prometheus `password`，同样是明文消费者。
+   */
+  static shouldUrlEncodeEncryptedSecret(
+    fieldName: string,
+    context: { collect_type?: string; config_type?: string | string[] }
+  ): boolean {
+    const name = String(fieldName || '');
+    if (name === 'ENV_AUTH_PASSWORD' || name === 'ENV_PRIV_PASSWORD') {
+      return false;
+    }
+    if (name === 'ENV_BEARER_TOKEN') {
+      return false;
+    }
+    if (name === 'ENV_PASSWORD') {
+      if (
+        ['web', 'bkpull', 'custom_pull'].includes(
+          String(context.collect_type || '')
+        )
+      ) {
+        return false;
+      }
+      const pluginTypes = Array.isArray(context.config_type)
+        ? context.config_type
+        : context.config_type
+          ? [context.config_type]
+          : [];
+      if (
+        pluginTypes.some((type) =>
+          [
+            'qcloud',
+            'windows_wmi',
+            'cisco_meraki',
+            'aliyun',
+            'cnware',
+            'custom_pull',
+            'bkpull',
+          ].includes(String(type))
+        )
+      ) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -269,8 +366,11 @@ export class DataMapper {
       context.formFields.forEach((field: any) => {
         const { name, transform_on_create, encrypted } = field;
         let fieldValue = formData[name];
-        // 如果字段标记为加密，使用 URL 编码
-        if (encrypted && fieldValue) {
+        if (
+          encrypted &&
+          fieldValue &&
+          this.shouldUrlEncodeEncryptedSecret(name, context)
+        ) {
           fieldValue = encodeURIComponent(String(fieldValue));
         }
         // 如果有 transform_on_create.mapping 配置，应用映射转换（auto 模式专用）
@@ -300,7 +400,28 @@ export class DataMapper {
             case 'string':
               fieldValue = String(fieldValue);
               break;
+            case 'key_value_env_array':
+              fieldValue = Array.isArray(fieldValue)
+                ? fieldValue
+                  .filter((item: any) => String(item?.key || '').trim())
+                  .map((item: any) => `${String(item.key).trim()}=${String(item.value ?? '')}`)
+                : [];
+              break;
           }
+        }
+        if (
+          fieldValue !== undefined &&
+          typeof fieldValue === 'string' &&
+          transform_on_create?.split
+        ) {
+          const sep =
+            typeof transform_on_create.split === 'string'
+              ? transform_on_create.split
+              : ',';
+          fieldValue = fieldValue
+            .split(sep)
+            .map((s: string) => s.trim())
+            .filter(Boolean);
         }
         if (
           fieldValue !== undefined &&
@@ -383,11 +504,17 @@ export class DataMapper {
       // 普通模板继续使用既有哈希编码。
       let instance_id = row.instance_id;
       if (!instance_id && context.instance_id) {
+        // form_fields（如 qcloud 的 username/region）在顶层表单，不在表格行；
+        // 生成 instance_id 时需合并，否则 {{username}}/{{region}} 无法替换。
         instance_id =
           context.instance_id === '{{uuid}}'
             ? String(row.key).replaceAll('-', '').toLowerCase()
             : this.hashInstanceId(
-              this.applyTemplate(context.instance_id, row, context)
+              this.applyTemplate(
+                context.instance_id,
+                { ...processedFormData, ...row },
+                context
+              )
             );
       }
       // 过滤掉 key 字段和所有 _error 字段，并处理加密字段
@@ -400,11 +527,14 @@ export class DataMapper {
         )
         .reduce((acc, fieldKey) => {
           let fieldValue = row[fieldKey];
-          // 检查该字段是否需要加密（从 tableColumns 中查找配置）
           const fieldConfig = context.tableColumns?.find(
             (f: any) => f.name === fieldKey
           );
-          if (fieldConfig?.encrypted && fieldValue) {
+          if (
+            fieldConfig?.encrypted &&
+            fieldValue &&
+            this.shouldUrlEncodeEncryptedSecret(fieldKey, context)
+          ) {
             fieldValue = encodeURIComponent(String(fieldValue));
           }
           acc[fieldKey] = fieldValue;

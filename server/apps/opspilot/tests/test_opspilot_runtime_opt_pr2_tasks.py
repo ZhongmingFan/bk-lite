@@ -27,6 +27,8 @@ EXPECTED_TASK_NAMES = {
     "process_memory_write_cache": "apps.opspilot.tasks.process_memory_write_cache",
     "flush_memory_write_cache_for_node": "apps.opspilot.tasks.flush_memory_write_cache_for_node",
     "flush_all_pending_memory_write_cache": "apps.opspilot.tasks.flush_all_pending_memory_write_cache",
+    "flush_idle_skill_conversation_memory": "apps.opspilot.tasks.flush_idle_skill_conversation_memory",
+    "write_skill_conversation_memory": "apps.opspilot.tasks.write_skill_conversation_memory",
     "process_memory_write": "apps.opspilot.tasks.process_memory_write",
     "cleanup_expired_workflow_attachments_task": "apps.opspilot.tasks.cleanup_expired_workflow_attachments_task",
     "wiki_ingest_material_task": "apps.opspilot.tasks.wiki_ingest_material_task",
@@ -36,6 +38,8 @@ EXPECTED_TASK_NAMES = {
     "wiki_process_kb_material_builds_task": "apps.opspilot.tasks.wiki_process_kb_material_builds_task",
     "wiki_batch_ingest_materials_task": "apps.opspilot.tasks.wiki_batch_ingest_materials_task",
     "wiki_retry_markdown_import_task": "apps.opspilot.tasks.wiki_retry_markdown_import_task",
+    "wiki_execute_markdown_import_task": "apps.opspilot.tasks.wiki_execute_markdown_import_task",
+    "wiki_enrich_markdown_import_search_task": "apps.opspilot.tasks.wiki_enrich_markdown_import_search_task",
     "wiki_refresh_web_materials_task": "apps.opspilot.tasks.wiki_refresh_web_materials_task",
 }
 
@@ -56,6 +60,8 @@ EXPECTED_QUEUES = {
     "process_memory_write_cache": "opspilot_maintenance",
     "flush_memory_write_cache_for_node": "opspilot_maintenance",
     "flush_all_pending_memory_write_cache": "opspilot_maintenance",
+    "flush_idle_skill_conversation_memory": "opspilot_maintenance",
+    "write_skill_conversation_memory": "opspilot_maintenance",
     "process_memory_write": "opspilot_maintenance",
     "cleanup_expired_workflow_attachments_task": "opspilot_maintenance",
     "wiki_ingest_material_task": "opspilot_wiki",
@@ -65,6 +71,8 @@ EXPECTED_QUEUES = {
     "wiki_process_kb_material_builds_task": "opspilot_wiki",
     "wiki_batch_ingest_materials_task": "opspilot_wiki",
     "wiki_retry_markdown_import_task": "opspilot_wiki",
+    "wiki_execute_markdown_import_task": "opspilot_wiki",
+    "wiki_enrich_markdown_import_search_task": "opspilot_wiki",
     "wiki_refresh_web_materials_task": "opspilot_maintenance",
 }
 

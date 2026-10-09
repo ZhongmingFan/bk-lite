@@ -22,6 +22,10 @@ error:
   user_id_empty: user_id cannot be empty
   username_empty: Username cannot be empty
   otp_empty: Username or OTP code cannot be empty
+  api_token_update_not_supported: API tokens cannot be fully replaced
+  invalid_current_team: Invalid current_team cookie
+  no_permission_access_team: No permission to access this team
+  code_empty: code is required
 
 # Built-in application display names
 app_name:
@@ -39,6 +43,7 @@ app_name:
   patch: Patch Management
   apm: APM
   playground: Playground
+  workflow-orchestration: Workflow Orchestration
 
 # App descriptions (for built-in apps)
 app:
@@ -55,6 +60,7 @@ app:
   ops-console: Unified operations console for managing and monitoring all operational activities
   job: Quickly create and execute jobs, unified management of script execution, file distribution and scheduled tasks
   patch: Centrally manage system patches with scanning, installation, and patch library maintenance to continuously reduce security risks.
+  workflow-orchestration: Design visual workflows, automate execution, manage human approvals, and track cross-system operations in one place.
 
 # Tag translations (for built-in app tags)
 tag:
@@ -110,3 +116,8 @@ tag:
   patch_scan: Patch Scanning
   patch_install: Patch Installation
   patch_library: Patch Library
+  # workflow-orchestration
+  workflow_design: Workflow Design
+  workflow_execution: Workflow Execution
+  automation: Automation
+  approval: Human Approval

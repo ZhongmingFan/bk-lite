@@ -1,7 +1,6 @@
 Switch H3C SNMP:
   name: H3C (Telegraf)
-  desc: SNMP monitoring template for H3C switch. It reports CPU utilization, memory
-    utilization, per-port inbound traffic rate, and other key metrics
+  desc: "SNMP monitoring template for H3C switch. It reports uptime, CPU utilization, memory utilization, temperature, fan, power supply status, optical modules, interface traffic, voltage, and power, for S-series Comware (enterprise PEN 25506)."
 monitor_object:
   Switch: Switch
 monitor_object_type:
@@ -12,6 +11,10 @@ monitor_object_metric:
       name: Input Voltage
       desc: Device input voltage reading in volts. Values outside the rated range
         may indicate unstable power and hardware risk.
+    device_power_watts:
+      name: Power Consumption
+      desc: Current power consumption reading in watts from the vendor power table.
+        This is a consumption value, not power-supply health.
     device_optical_rx_power:
       name: SFP RX Power
       desc: Optical receive power reading of the SFP/SFP+ module. Abnormally low Rx
@@ -20,6 +23,21 @@ monitor_object_metric:
       name: SFP TX Power
       desc: Optical transmit power reading of the SFP/SFP+ module. Abnormal Tx power
         may indicate an aging or failing optical module.
+    device_optical_temperature:
+      name: Optical Module Temperature
+      desc: Temperature of each optical module, in degrees Celsius. The 2147483647
+        unsupported sentinel is dropped. High module temperature accelerates laser
+        aging and can precede optical power failure.
+    device_optical_voltage:
+      name: Optical Module Voltage
+      desc: Supply voltage of each optical module in volts (0.01 V units scaled by
+        1/100). The 2147483647 unsupported sentinel is dropped. Out-of-range voltage
+        can cause unstable optics.
+    device_optical_bias:
+      name: Optical Module Bias
+      desc: Laser bias current of each optical module in milliamperes (0.01 mA units
+        scaled by 1/100). The 2147483647 unsupported sentinel is dropped. Rising bias
+        at constant TX power is a common aging signal for the laser.
     snmp_uptime:
       name: System Uptime
       desc: This metric indicates the uptime of the device since the last restart.
@@ -119,6 +137,14 @@ monitor_object_metric:
         control-plane overload, routing instability, or attack traffic, and may lead
         to slow management response or packet processing delays. Sourced from vendor-specific
         SNMP OIDs and normalized to a 0-100 percentage.
+    device_cpu_usage_1min:
+      name: CPU Utilization (1 min)
+      desc: One-minute control-plane CPU utilization as a percentage, taken from the
+        vendor 1-minute CPU object where available.
+    device_cpu_usage_5min:
+      name: CPU Utilization (5 min)
+      desc: Five-minute control-plane CPU utilization as a percentage, taken from the
+        vendor 5-minute CPU object where available.
     device_memory_usage:
       name: Memory Utilization
       desc: This metric reports overall memory utilization of the device, computed

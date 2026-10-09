@@ -14,6 +14,7 @@ import { clearAuthToken } from '@/utils/crossDomainAuth';
 import Cookies from 'js-cookie';
 import type { Group } from '@/types/index';
 import UserInformation from './userInformation'
+import { clearUserTeamPreference } from '@/utils/userTeamPreference';
 
 // 将 Group 转换为 Tree DataNode
 const convertGroupsToTreeData = (groups: Group[], selectedGroupId: string | undefined): DataNode[] => {
@@ -149,6 +150,7 @@ const UserInfo: React.FC = () => {
 
   const federatedLogout = useCallback(async () => {
     setIsLoading(true);
+    clearUserTeamPreference();
     try {
       // Call logout API for server-side cleanup
       await fetch('/api/auth/federated-logout', {
@@ -165,7 +167,7 @@ const UserInfo: React.FC = () => {
       await signOut({ redirect: false });
 
       // Build login page URL with current page as callback URL after successful login
-      const currentPageUrl = `${window.location.origin}${pathname}`;
+      const currentPageUrl = `${window.location.origin}${pathname || ''}${window.location.search}`;
       const loginUrl = `/auth/signin?callbackUrl=${encodeURIComponent(currentPageUrl)}`;
 
       // Redirect to login page
@@ -178,7 +180,7 @@ const UserInfo: React.FC = () => {
       clearAuthToken();
       await signOut({ redirect: false });
 
-      const currentPageUrl = `${window.location.origin}${pathname}`;
+      const currentPageUrl = `${window.location.origin}${pathname || ''}${window.location.search}`;
       const loginUrl = `/auth/signin?callbackUrl=${encodeURIComponent(currentPageUrl)}`;
       window.location.href = loginUrl;
     } finally {

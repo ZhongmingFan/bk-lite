@@ -60,8 +60,14 @@ class BaseCollect(object):
                 organization = [organization]
 
         instances = self.task.instances
-        if not instances or not isinstance(instances, list):
-            return self.task.model_id, None, organization, None, not self.task.is_host
+        if (self.task.params or {}).get("target_source") == "host" or not instances or not isinstance(instances, list):
+            return (
+                self.task.model_id,
+                None,
+                organization,
+                None,
+                self._should_filter_collect_task(self.task.model_id),
+            )
 
         # 插件始终按任务族 model_id 查找；实例上的 switch 等只是 CI 类型。
         if len(instances) == 1:
@@ -71,10 +77,27 @@ class BaseCollect(object):
             if inst_org is not None and not isinstance(inst_org, list):
                 inst_org = [inst_org]
             inst_id = instance.get("_id")
-            return self.task.model_id, inst_name, inst_org, inst_id, not self.task.is_host
+            return (
+                self.task.model_id,
+                inst_name,
+                inst_org,
+                inst_id,
+                self._should_filter_collect_task(self.task.model_id),
+            )
 
         # 多实例没有单一图节点 _id / inst_name。执行层按 instances 对账，不能收成第一台。
-        return self.task.model_id, None, organization, None, not self.task.is_host
+        return (
+            self.task.model_id,
+            None,
+            organization,
+            None,
+            self._should_filter_collect_task(self.task.model_id),
+        )
+
+    def _should_filter_collect_task(self, model_id):
+        # 物理服务器以 IP 作为模型唯一实例名，并由首个成功创建它的任务持续更新。
+        # 因此 SSH/host 也必须像 IPMI/Redfish protocol 一样按 collect_task 对账。
+        return model_id == "physcial_server" or not self.task.is_host
 
     @property
     def task_id(self):
@@ -101,6 +124,8 @@ class BaseCollect(object):
             filter_collect_task=self.filter_collect_task,
             data_cleanup_strategy=self.task.data_cleanup_strategy,
             plugin_kwargs=self.plugin_kwargs,
+            reconcile_task_assets=True,
+            task=self.task,
         )
         result = metrics_cannula.collect_controller()
         format_data = self.format_collect_data(result)
@@ -117,6 +142,9 @@ class BaseCollect(object):
         if result.get("all", False) or result.get("all", False) == 0:
             all_count = result.pop("all")
         format_data = {"add": [], "update": [], "delete": [], "association": []}
+        blocked_reason = result.pop("__sync_blocked_reason__", None)
+        if blocked_reason:
+            format_data["__sync_blocked_reason__"] = blocked_reason
         for value in result.values():
             for operator, datas in value.items():
                 for status, data in datas.items():
@@ -129,7 +157,7 @@ class BaseCollect(object):
                         _data = {"_status": status}
                         if status == "failed":
                             update_data = i.get("instance_info")
-                            update_data["_error"] = i.get("error", "")
+                            update_data["_error"] = str(i.get("error", ""))
                         else:
                             update_data = i.get("inst_info")
                         if not update_data:

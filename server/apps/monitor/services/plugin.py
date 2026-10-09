@@ -60,7 +60,7 @@ class MonitorPluginService:
     def get_ui_template_by_params(collector, collect_type, monitor_object_id, monitor_plugin_id=None):
         """获取插件的 UI 模板。
 
-        Telegraf/http 下 Host AIX Remote、Host Remote、Windows WMI 共享
+        Telegraf/http 下 Host AIX Remote、Host FreeBSD Remote、Host HP-UX Remote、Host Solaris Remote、Host Remote、Windows WMI 共享
         collector+collect_type+对象，必须按 plugin id 取值；多个匹配且未指定
         plugin 时不返回，避免把 WMI 用户名帮助套到 SSH 表单。
         """
@@ -135,7 +135,7 @@ class MonitorPluginService:
     @staticmethod
     def import_basic_monitor_object(data: dict):
         """导入基础监控对象"""
-        metrics = data.pop("metrics")
+        metrics = data.pop("metrics", [])
         display_fields_block = data.pop("display_fields", None)
         instance_summary_columns = data.pop("instance_summary_columns", None)
         instance_fact_bindings = InstanceFactResolver.validate_bindings(data.pop("instance_fact_bindings", []))
@@ -345,7 +345,7 @@ class MonitorPluginService:
             object_info.update(
                 plugin=data["plugin"],
                 plugin_desc=data["plugin_desc"],
-                status_query=data["status_query"],
+                status_query=data.get("status_query", ""),
                 collector=collector,
                 collect_type=collect_type,
                 support_collect_detect=support_collect_detect,
@@ -384,6 +384,7 @@ class MonitorPluginService:
         data = {
             "plugin": plugin_obj.name,
             "plugin_desc": plugin_obj.description,
+            "status_query": plugin_obj.status_query or "",
             "collector": plugin_obj.collector,
             "collect_type": plugin_obj.collect_type,
             "support_collect_detect": plugin_obj.support_collect_detect,
@@ -392,6 +393,7 @@ class MonitorPluginService:
             "instance_summary_columns": monitor_obj.instance_summary_columns or [],
             "name": monitor_obj.name,
             "type": monitor_obj.type_id if monitor_obj.type else None,  # 导出type的id值
+            "level": monitor_obj.level,
             "description": monitor_obj.description,
             "metrics": [
                 {
@@ -416,8 +418,9 @@ class MonitorPluginService:
         data = {
             "plugin": plugin_obj.name,
             "plugin_desc": plugin_obj.description,
+            "status_query": plugin_obj.status_query or "",
             "collector": plugin_obj.collector,
-            "collect_type": plugin_obj.collector,
+            "collect_type": plugin_obj.collect_type,
             "support_collect_detect": plugin_obj.support_collect_detect,
             "node_selector": plugin_obj.node_selector or {},
             "instance_fact_bindings": plugin_obj.instance_fact_bindings or [],
@@ -430,5 +433,6 @@ class MonitorPluginService:
             object_data.pop("plugin_desc")
             object_data.pop("collector")
             object_data.pop("collect_type")
+            object_data.pop("status_query", None)
             data["objects"].append(object_data)
         return data

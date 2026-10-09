@@ -10,10 +10,11 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from django.db.models import Count
+from django.db.models import Count, Q
 
 from apps.core.logger import monitor_logger as logger
 from apps.monitor.models import MonitorAlert
+from apps.monitor.services.alert_access import filter_alerts_by_organizations, orphaned_monitor_policy_q
 
 ACTIVE_ALERT_SUMMARY_BATCH_SIZE = 100
 ACTIVE_ALERT_SEVERITY_LEVELS = frozenset({"critical", "error", "warning"})
@@ -94,7 +95,11 @@ def summarize_active_alerts_by_monitor_ids(
         from apps.monitor.nats import monitor as monitor_nats
 
         policy_loader = policy_loader or monitor_nats._get_nats_accessible_policy_queryset
-        instance_loader = instance_loader or monitor_nats._get_nats_accessible_instance_queryset
+        if instance_loader is None:
+            requested_ids = ordered_ids
+
+            def instance_loader(user_info, *, _instance_ids=requested_ids):
+                return monitor_nats._get_nats_accessible_instance_queryset(user_info, instance_ids=_instance_ids)
 
     try:
         policy_qs, policy_error = policy_loader(user_info)
@@ -116,8 +121,12 @@ def summarize_active_alerts_by_monitor_ids(
         }
 
     try:
-        policy_ids = list(policy_qs.values_list("id", flat=True))
+        from apps.monitor.nats import monitor as monitor_nats
+
         authorized_ids = set(instance_qs.filter(id__in=ordered_ids).values_list("id", flat=True))
+        _, _, _, scope_ids, _, scope_error = monitor_nats._get_nats_actor_scope(user_info)
+        if scope_error:
+            return scope_error
     except Exception as exc:
         logger.exception(
             "active alert summary authorization query failed monitor_id_count=%s " "failed_stage=authorize error_type=%s",
@@ -134,20 +143,18 @@ def summarize_active_alerts_by_monitor_ids(
     counts: dict[str, int] = defaultdict(int)
     levels: dict[str, set[str]] = defaultdict(set)
 
-    if authorized_ordered and policy_ids:
+    if authorized_ordered:
         try:
             for offset in range(0, len(authorized_ordered), ACTIVE_ALERT_SUMMARY_BATCH_SIZE):
                 batch = authorized_ordered[offset : offset + ACTIVE_ALERT_SUMMARY_BATCH_SIZE]
-                rows = (
-                    MonitorAlert.objects.filter(
-                        status="new",
-                        monitor_instance_id__in=batch,
-                        policy_id__in=policy_ids,
-                        level__in=ACTIVE_ALERT_SEVERITY_LEVELS,
-                    )
-                    .values("monitor_instance_id", "level")
-                    .annotate(count=Count("id"))
+                queryset = MonitorAlert.objects.filter(
+                    status="new",
+                    monitor_instance_id__in=batch,
+                    level__in=ACTIVE_ALERT_SEVERITY_LEVELS,
                 )
+                queryset = filter_alerts_by_organizations(queryset, scope_ids)
+                queryset = queryset.filter(Q(policy_id__in=policy_qs.values_list("id", flat=True)) | orphaned_monitor_policy_q())
+                rows = queryset.values("monitor_instance_id", "level").annotate(count=Count("id"))
                 for row in rows:
                     monitor_id = str(row["monitor_instance_id"])
                     level = str(row["level"]).strip().lower()

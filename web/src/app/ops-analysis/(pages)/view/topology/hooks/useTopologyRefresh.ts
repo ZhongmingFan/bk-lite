@@ -13,6 +13,10 @@ import {
   buildFiltersFromNodes,
   syncFilterValuesWithDefinitions,
 } from '../utils/namespaceUtils';
+import {
+  buildFilterConfigConfirmSnapshot,
+  fillMissingOrganizationFilterValues,
+} from '@/app/ops-analysis/utils/unifiedFilterState';
 
 type RefreshScope =
   | 'filter-search'
@@ -75,6 +79,7 @@ interface UseTopologyRefreshControllerParams {
     options?: { silent?: boolean },
   ) => void;
   updateDefinitions: (definitions: UnifiedFilterDefinition[]) => void;
+  organizationId?: string | number | null;
 }
 
 export const useTopologyRefresh = ({
@@ -97,6 +102,7 @@ export const useTopologyRefresh = ({
   refreshAllSingleValueNodes,
   refreshAllChartNodes,
   updateDefinitions,
+  organizationId,
 }: UseTopologyRefreshControllerParams) => {
   const refreshTopologyNodes = useCallback(
     (
@@ -220,12 +226,17 @@ export const useTopologyRefresh = ({
   const handleFilterSearch = useCallback(
     (values: Record<string, FilterValue>) => {
       const namespaceChanged = namespaceDraftId !== appliedNamespaceId;
-      setFilterValues(values);
-      setAppliedFilterValues(values);
+      const nextValues = fillMissingOrganizationFilterValues(
+        definitions,
+        values,
+        organizationId,
+      );
+      setFilterValues(nextValues);
+      setAppliedFilterValues(nextValues);
       setAppliedNamespaceId(namespaceDraftId);
       refreshTopologyNodes(
         namespaceChanged ? 'combined-search' : 'filter-search',
-        values,
+        nextValues,
         definitions,
         namespaceDraftId,
       );
@@ -234,6 +245,7 @@ export const useTopologyRefresh = ({
       appliedNamespaceId,
       definitions,
       namespaceDraftId,
+      organizationId,
       refreshTopologyNodes,
       setAppliedFilterValues,
       setAppliedNamespaceId,
@@ -243,15 +255,24 @@ export const useTopologyRefresh = ({
 
   const handleFilterConfigConfirm = useCallback(
     (newDefinitions: UnifiedFilterDefinition[]) => {
-      updateDefinitions(newDefinitions);
-      setFilterValues(
-        syncFilterValuesWithDefinitions(newDefinitions, filterValues),
+      const snapshot = buildFilterConfigConfirmSnapshot(
+        newDefinitions,
+        filterValues,
+        appliedFilterValues,
+        definitions,
       );
-      setAppliedFilterValues((prev) =>
-        syncFilterValuesWithDefinitions(newDefinitions, prev),
-      );
+      updateDefinitions(snapshot.definitions);
+      setFilterValues(snapshot.filterValues);
+      setAppliedFilterValues(snapshot.appliedFilterValues);
     },
-    [filterValues, setAppliedFilterValues, setFilterValues, updateDefinitions],
+    [
+      appliedFilterValues,
+      definitions,
+      filterValues,
+      setAppliedFilterValues,
+      setFilterValues,
+      updateDefinitions,
+    ],
   );
 
   const resolveTopologyNamespaceId = useCallback(

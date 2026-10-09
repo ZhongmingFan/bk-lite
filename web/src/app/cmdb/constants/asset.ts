@@ -42,6 +42,8 @@ export const BUILD_IN_MODEL: Array<{
   { key: 'memory', icon: 'cc-memory' },
   { key: 'nic', icon: 'cc-nic' },
   { key: 'gpu', icon: 'cc-gpu' },
+  { key: 'storage_controller', icon: 'cc-storage' },
+  { key: 'psu', icon: 'cc-equipment' },
   // 云厂商资源（复用云/对应技术图标）
   { key: 'aws_cf', icon: 'cc-cloud' },
   { key: 'aws_docdb', icon: 'cc-mongodb' },
@@ -685,19 +687,6 @@ export const BUILD_IN_MODEL: Array<{
     key: 'xsky',
     icon: 'cc-xsky',
   },
-  // 网络硬件
-  {
-    key: 'brocade_fc',
-    icon: 'cc-brocade_fc',
-  },
-  {
-    key: 'cisco_fc',
-    icon: 'cc-cisco_fc',
-  },
-  {
-    key: 'f5',
-    icon: 'cc-f5',
-  },
   // 操作系统
   {
     key: 'aix',
@@ -1081,8 +1070,24 @@ export const CREDENTIAL_LIST: CredentialListItem[] = [
                     id: 0,
                   },
                   {
-                    name: 'SHA',
+                    name: 'SHA-1',
                     id: 1,
+                  },
+                  {
+                    name: 'SHA-224',
+                    id: 2,
+                  },
+                  {
+                    name: 'SHA-256',
+                    id: 3,
+                  },
+                  {
+                    name: 'SHA-384',
+                    id: 4,
+                  },
+                  {
+                    name: 'SHA-512',
+                    id: 5,
                   },
                 ],
                 editable: true,
@@ -1113,12 +1118,16 @@ export const CREDENTIAL_LIST: CredentialListItem[] = [
                     attr_type: 'enum',
                     option: [
                       {
-                        name: 'AES',
+                        name: 'AES-128',
                         id: 0,
                       },
                       {
-                        name: 'DES',
+                        name: 'AES-256',
                         id: 1,
+                      },
+                      {
+                        name: 'DES',
+                        id: 2,
                       },
                     ],
                     editable: true,

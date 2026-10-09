@@ -2,17 +2,19 @@
 
 import React, { useState } from 'react';
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useSearchParams } from 'next/navigation';
 import { MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons';
 import Icon from '@/components/icon';
 import {
   APP_TOP_SIDE_RAIL_COLLAPSED_WIDTH_PX,
   APP_TOP_SIDE_RAIL_WIDTH_PX,
   buildAppTopSideNavGroups,
+  isScreenModeEnabled,
   resolveMenuNavHref,
   useConsoleLayout,
+  withScreenQuery,
 } from '@/console-layout';
-import { isMenuPathMatch, resolveMenuIcon } from '@/utils/menuHelpers';
+import { findMatchedMenuPath, resolveMenuIcon } from '@/utils/menuHelpers';
 import { useTranslation } from '@/utils/i18n';
 import type { MenuItem } from '@/types/index';
 
@@ -32,9 +34,17 @@ const itemClassName = (active: boolean, showLabels: boolean) => (
 const AppTopSideNav = ({ menus, pathname }: AppTopSideNavProps) => {
   const { t } = useTranslation();
   const currentPath = usePathname() ?? pathname;
+  const searchParams = useSearchParams();
+  const screenMode = isScreenModeEnabled(searchParams);
   const { sideNav, setSideNav } = useConsoleLayout();
   const [peeking, setPeeking] = useState(false);
   const groups = buildAppTopSideNavGroups(menus, currentPath);
+  // Prefer tree match over parent-url prefix: sibling leaves like
+  // /rum/monitors under a group whose url is /rum/alert-events must still
+  // light up the first-layer item (same rule as classic TopMenu).
+  const matchedFirstLayerUrl = currentPath
+    ? findMatchedMenuPath(menus, currentPath)?.[0]?.url
+    : undefined;
 
   if (groups.length === 0) {
     return null;
@@ -96,10 +106,10 @@ const AppTopSideNav = ({ menus, pathname }: AppTopSideNavProps) => {
           <ul className="flex flex-col gap-1.5">
             {groups.map((group) => {
               const active = Boolean(
-                currentPath && group.item.url && isMenuPathMatch(group.item.url, currentPath),
+                matchedFirstLayerUrl && group.item.url === matchedFirstLayerUrl,
               );
               const iconType = resolveMenuIcon(group.item);
-              const href = resolveMenuNavHref(group.item);
+              const href = withScreenQuery(resolveMenuNavHref(group.item), screenMode);
 
               return (
                 <li key={group.item.url}>

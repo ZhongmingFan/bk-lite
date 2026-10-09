@@ -8,10 +8,19 @@ import types
 import pytest
 from rest_framework.exceptions import ValidationError
 
-from apps.operation_analysis.common.get_nats_source_data import GetNatsData
+from apps.operation_analysis.common.get_nats_source_data import (
+    NATS_SOURCE_DATASOURCE_NOT_SELECTED,
+    NATS_SOURCE_DATASOURCE_UNLINKED,
+    NATS_SOURCE_INVALID_NAMESPACE_PARAM,
+    NATS_SOURCE_MODULE_NOT_FOUND,
+    NATS_SOURCE_NAMESPACE_SERVER_MISSING,
+    NATS_SOURCE_NAMESPACE_UNAVAILABLE,
+    GetNatsData,
+    NatsSourceError,
+)
 
 
-def _make_request(current_team_cookie=None, api_team=None, username="testuser", locale="en"):
+def _make_request(current_team_cookie=None, api_team=None, username="testuser", locale="en", group_tree=None):
     """Build a minimal fake request object."""
     user = types.SimpleNamespace(
         username=username,
@@ -19,7 +28,7 @@ def _make_request(current_team_cookie=None, api_team=None, username="testuser", 
         locale=locale,
         timezone="Asia/Shanghai",
         permission={},
-        group_tree=[],
+        group_tree=list(group_tree or []),
         is_superuser=False,
     )
     cookies = {}
@@ -41,6 +50,7 @@ def _make_get_nats_data(request):
     obj = GetNatsData.__new__(GetNatsData)
     obj.request = request
     obj.params = {}
+    obj.param_specs = []
     return obj
 
 
@@ -95,6 +105,7 @@ class TestNamespaceCredentials:
         assert captured["init"]["server"] == "nats://nats.example.com:4222"
         assert captured["call"]["_nats_user"] == "nats-user"
         assert captured["call"]["_nats_password"] == "plain-secret"
+        assert "organization_param" not in captured["call"]
 
 
 class TestUpdateRequestParamsGuard:
@@ -151,6 +162,145 @@ class TestUpdateRequestParamsGuard:
 
         with pytest.raises(ValidationError):
             obj.update_request_params()
+
+    def test_organization_param_overrides_cookie_team(self):
+        request = _make_request(
+            current_team_cookie="7",
+            group_tree=[{"id": 7, "subGroups": [{"id": 12, "subGroups": []}]}],
+        )
+        obj = _make_get_nats_data(request)
+        obj.params = {"organization": "12", "organization_param": "organization"}
+        obj.update_request_params()
+        assert obj.params["user_info"]["team"] == 12
+        assert obj.params["organization"] == "12"
+        assert "organization_param" not in obj.params
+
+    def test_renamed_organization_marker_overrides_cookie_team(self):
+        request = _make_request(
+            current_team_cookie="7",
+            group_tree=[{"id": 7, "subGroups": [{"id": 12, "subGroups": []}]}],
+        )
+        obj = _make_get_nats_data(request)
+        obj.params = {"org_id": "12", "organization_param": "org_id"}
+        obj.update_request_params()
+        assert obj.params["user_info"]["team"] == 12
+
+    def test_organization_name_without_marker_or_spec_keeps_cookie_team(self):
+        request = _make_request(
+            current_team_cookie="7",
+            group_tree=[{"id": 7, "subGroups": [{"id": 12, "subGroups": []}]}],
+        )
+        obj = _make_get_nats_data(request)
+        obj.params = {"organization": "12"}
+        obj.update_request_params()
+        assert obj.params["user_info"]["team"] == 7
+
+    def test_select_named_organization_does_not_override(self):
+        request = _make_request(
+            current_team_cookie="7",
+            group_tree=[{"id": 7, "subGroups": [{"id": 12, "subGroups": []}]}],
+        )
+        obj = _make_get_nats_data(request)
+        obj.param_specs = [
+            {
+                "name": "organization",
+                "inputConfig": {"control": "select", "optionsSource": {"type": "static", "staticItems": []}},
+            }
+        ]
+        obj.params = {"organization": "12"}
+        obj.update_request_params()
+        assert obj.params["user_info"]["team"] == 7
+
+    def test_datasource_spec_control_overrides_without_marker(self):
+        request = _make_request(
+            current_team_cookie="7",
+            group_tree=[{"id": 7, "subGroups": [{"id": 12, "subGroups": []}]}],
+        )
+        obj = _make_get_nats_data(request)
+        obj.param_specs = [{"name": "org_id", "inputConfig": {"control": "organization"}}]
+        obj.params = {"org_id": "12"}
+        obj.update_request_params()
+        assert obj.params["user_info"]["team"] == 12
+
+    def test_legacy_input_mode_spec_overrides_without_marker(self):
+        request = _make_request(
+            current_team_cookie="7",
+            group_tree=[{"id": 7, "subGroups": [{"id": 12, "subGroups": []}]}],
+        )
+        obj = _make_get_nats_data(request)
+        obj.param_specs = [{"name": "organization", "inputMode": "organization"}]
+        obj.params = {"organization": "12"}
+        obj.update_request_params()
+        assert obj.params["user_info"]["team"] == 12
+
+    def test_marker_wins_without_requiring_datasource_control(self):
+        request = _make_request(
+            current_team_cookie="7",
+            group_tree=[{"id": 7, "subGroups": [{"id": 12, "subGroups": []}]}],
+        )
+        obj = _make_get_nats_data(request)
+        obj.param_specs = [
+            {
+                "name": "organization",
+                "inputConfig": {"control": "select", "optionsSource": {"type": "static", "staticItems": []}},
+            }
+        ]
+        obj.params = {"team_scope": "12", "organization_param": "team_scope"}
+        obj.update_request_params()
+        assert obj.params["user_info"]["team"] == 12
+
+    def test_multiple_organization_specs_raise_validation_error(self):
+        request = _make_request(current_team_cookie="7")
+        obj = _make_get_nats_data(request)
+        obj.param_specs = [
+            {"name": "org_a", "inputConfig": {"control": "organization"}},
+            {"name": "org_b", "inputMode": "organization"},
+        ]
+        obj.params = {"org_a": "12", "org_b": "7"}
+        with pytest.raises(ValidationError, match="多个组织控件"):
+            obj.update_request_params()
+
+    def test_marker_with_multiple_organization_specs_raises_validation_error(self):
+        request = _make_request(current_team_cookie="7")
+        obj = _make_get_nats_data(request)
+        obj.param_specs = [
+            {"name": "org_a", "inputConfig": {"control": "organization"}},
+            {"name": "org_b", "inputMode": "organization"},
+        ]
+        obj.params = {"org_a": "12", "organization_param": "org_a"}
+        with pytest.raises(ValidationError, match="多个组织控件"):
+            obj.update_request_params()
+
+    def test_forged_organization_param_clears_team(self):
+        request = _make_request(
+            current_team_cookie="7",
+            group_tree=[{"id": 7, "subGroups": []}],
+        )
+        obj = _make_get_nats_data(request)
+        obj.params = {"organization": "12", "organization_param": "organization"}
+        obj.update_request_params()
+        assert obj.params["user_info"]["team"] is None
+
+    def test_organization_matching_cookie_is_allowed_without_group_tree(self):
+        request = _make_request(current_team_cookie="7", group_tree=[])
+        obj = _make_get_nats_data(request)
+        obj.params = {"organization": "7", "organization_param": "organization"}
+        obj.update_request_params()
+        assert obj.params["user_info"]["team"] == 7
+
+    def test_empty_organization_param_keeps_cookie_team(self):
+        request = _make_request(current_team_cookie="7")
+        obj = _make_get_nats_data(request)
+        obj.params = {"organization": "", "organization_param": "organization"}
+        obj.update_request_params()
+        assert obj.params["user_info"]["team"] == 7
+
+    def test_invalid_organization_param_keeps_cookie_team(self):
+        request = _make_request(current_team_cookie="7")
+        obj = _make_get_nats_data(request)
+        obj.params = {"organization": "not-a-team", "organization_param": "organization"}
+        obj.update_request_params()
+        assert obj.params["user_info"]["team"] == 7
 
     def test_valid_team_user_info_structure(self, monkeypatch):
         """Sanity check: user_info dict is correctly populated on success."""
@@ -233,6 +383,7 @@ class TestLocalRpcOverlayHandlers:
         assert captured["path"] == module
         assert captured["method"] == path
         assert "user_info" in captured["kwargs"]
+        assert "organization_param" not in captured["kwargs"]
 
     def test_unrelated_api_still_uses_nats_when_is_local_rpc(self, monkeypatch):
         monkeypatch.setenv("IS_LOCAL_RPC", "1")
@@ -261,3 +412,75 @@ class TestLocalRpcOverlayHandlers:
         )
         assert obj.get_data() == {"ok": True}
         assert "init" in captured
+
+
+def _bare_client(namespace_list, params=None, path="query", namespace="monitor"):
+    obj = GetNatsData.__new__(GetNatsData)
+    obj.path = path
+    obj.params = {} if params is None else dict(params)
+    obj.namespace = namespace
+    obj.namespace_list = namespace_list
+    obj.namespace_server_map = {item.id: f"nats://{item.domain}:4222" for item in namespace_list if ":" not in item.domain}
+    return obj
+
+
+class TestNatsSourceErrorCodes:
+    def test_invalid_namespace_param(self):
+        obj = _bare_client([_Namespace()], params={"namespace_id": "bad"})
+        with pytest.raises(NatsSourceError) as error:
+            obj._get_target_namespace()
+        assert error.value.code == NATS_SOURCE_INVALID_NAMESPACE_PARAM
+        assert "命名空间" not in str(error.value)
+
+    def test_datasource_unlinked_and_not_selected(self):
+        empty = _bare_client([], params={"namespace_id": 3})
+        with pytest.raises(NatsSourceError) as error:
+            empty._get_target_namespace()
+        assert error.value.code == NATS_SOURCE_DATASOURCE_UNLINKED
+
+        other = _bare_client([_Namespace()], params={"namespace_id": 3})
+        with pytest.raises(NatsSourceError) as error:
+            other._get_target_namespace()
+        assert error.value.code == NATS_SOURCE_DATASOURCE_NOT_SELECTED
+
+    def test_namespace_unavailable(self):
+        obj = _bare_client([])
+        with pytest.raises(NatsSourceError) as error:
+            obj.get_data()
+        assert error.value.code == NATS_SOURCE_NAMESPACE_UNAVAILABLE
+
+    def test_namespace_server_missing_keeps_name_off_match_key(self, caplog):
+        namespace = _Namespace()
+        obj = _bare_client([namespace])
+        obj.namespace_server_map = {}
+        with caplog.at_level("WARNING", logger="operation_analysis"):
+            with pytest.raises(NatsSourceError) as error:
+                obj.get_data()
+        assert error.value.code == NATS_SOURCE_NAMESPACE_SERVER_MISSING
+        assert error.value.details["namespace_name"] == "custom"
+        assert "未配置服务器连接" not in str(error.value)
+        assert any("namespace=custom" in message and "namespace_id=1" in message for message in caplog.messages)
+
+    def test_module_not_found_keeps_path_on_details(self):
+        namespace = _Namespace()
+
+        class ClientWithoutFunc:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class MissingFunc(GetNatsData):
+            @property
+            def default_nats_client(self):
+                return ClientWithoutFunc
+
+        obj = MissingFunc.__new__(MissingFunc)
+        obj.path = "missing_func"
+        obj.params = {}
+        obj.namespace = "monitor"
+        obj.namespace_list = [namespace]
+        obj.namespace_server_map = {1: "nats://nats.example.com:4222"}
+        with pytest.raises(NatsSourceError) as error:
+            obj.get_data()
+        assert error.value.code == NATS_SOURCE_MODULE_NOT_FOUND
+        assert error.value.details["path"] == "missing_func"
+        assert "Module not found func" not in str(error.value)

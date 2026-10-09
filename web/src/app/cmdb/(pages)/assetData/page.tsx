@@ -1,7 +1,11 @@
 'use client';
 
+import TransferDrawer from '@/app/cmdb/components/transfer/TransferDrawer';
+import { useTransferTasks } from '@/app/cmdb/hooks/useTransferTasks';
+import type { TransferTask } from '@/app/cmdb/types/transfer';
+
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { KeepAlive, useActivate } from 'react-activation';
+import { KeepAlive, useActivate, useUnactivate } from 'react-activation';
 import {
   Button,
   Space,
@@ -12,7 +16,6 @@ import {
   TablePaginationConfig,
   Tree,
   Input,
-  Empty,
   Tag,
   Tooltip,
 } from 'antd';
@@ -26,7 +29,8 @@ import {
   StarOutlined,
   UnorderedListOutlined,
 } from '@ant-design/icons';
-import { useSearchParams, usePathname, useRouter } from 'next/navigation';
+import { useSearchParams, usePathname } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import CustomTable from '@/components/custom-table';
 import GroupTreeSelector from '@/components/group-tree-select';
 import PermissionWrapper from '@/components/permission';
@@ -34,11 +38,23 @@ import EllipsisWithTooltip from '@/components/ellipsis-with-tooltip';
 import RefreshIconButton from '@/components/refresh-icon-button';
 import { useTranslation } from '@/utils/i18n';
 import { useUserInfoContext } from '@/context/userInfo';
+import { useClientData } from '@/context/client';
 import { deepClone, getAssetColumns } from '@/app/cmdb/utils/common';
+import {
+  canSyncMonitor,
+  isMonitorSold,
+  pickBatchPushCounts,
+  resolveBatchPushSummaryLevel,
+  isSystemLinkAttr,
+  resolveListDisplayFieldKeys,
+  buildExternalIdLines,
+  displayExternalIdValue,
+  EXTERNAL_ID_COLUMN_KEY,
+} from '@/app/cmdb/utils/systemLinkage';
 import {
   ensureCollectTaskMap,
 } from '@/app/cmdb/utils/collectTask';
-import { useCommon } from '@/app/cmdb/context/common';
+import { useCommon, useCmdbUserList } from '@/app/cmdb/context/common';
 import { resolveCmdbInstUuid } from '@/app/cmdb/utils/instUuid';
 import { useAssetDataStore, type FilterItem } from '@/app/cmdb/store';
 import { useModelApi, useClassificationApi, useInstanceApi, useCollectApi } from '@/app/cmdb/api';
@@ -79,6 +95,12 @@ import {
   writeCollapsedClassificationIds,
 } from './treeExpansionPreference';
 import { resetListPaginationToFirstPage } from './listPagination';
+import {
+  planFirstVisitTreeScroll,
+  queryAssetModelTreeNode,
+  scrollElementIntoContainer,
+  shouldFinishFirstVisitTreeScroll,
+} from './treeSelectedNodeScroll';
 
 const { confirm } = Modal;
 
@@ -200,6 +222,7 @@ interface ImportRef {
 const AssetDataContent = () => {
   const { t } = useTranslation();
   const { selectedGroup, userId } = useUserInfoContext();
+  const { clientData } = useClientData();
   const { getModelAssociationTypes, getModelAttrList, getModelAttrGroupsFullInfo } = useModelApi();
   const { getClassificationList } = useClassificationApi();
   const {
@@ -210,9 +233,10 @@ const AssetDataContent = () => {
     setInstanceShowFieldSettings,
     deleteInstance,
     batchDeleteInstances,
+    batchPushToMonitor,
   } = useInstanceApi();
   const { getCollectTaskNames } = useCollectApi();
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const assetModelId: string = searchParams.get('modelId') || '';
@@ -220,13 +244,14 @@ const AssetDataContent = () => {
     searchParams.get('classificationId') || '';
   const urlQueryList: string = searchParams.get('query_list') || '';
   const commonContext = useCommon();
-  const users = useRef(commonContext?.userList || []);
-  const userList: UserItem[] = users.current;
+  const userList: UserItem[] = useCmdbUserList();
   const modelListFromContext = commonContext?.modelList || [];
   const fieldRef = useRef<FieldRef>(null);
   const importRef = useRef<ImportRef>(null);
   const instanceRef = useRef<RelationInstanceRef>(null);
   const exportRef = useRef<ExportModalRef>(null);
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [transferPageActive, setTransferPageActive] = useState(true);
   const topRowRef = useRef<HTMLDivElement | null>(null);
   const leftActionsRef = useRef<HTMLDivElement | null>(null);
   const actionSizerRef = useRef<HTMLDivElement | null>(null);
@@ -284,8 +309,12 @@ const AssetDataContent = () => {
   const [isActionsCollapsed, setIsActionsCollapsed] = useState(false);
   const urlQueryInitialized = useRef(false);
   const initialDataLoaded = useRef(false);
+  const treeWrapperRef = useRef<HTMLDivElement | null>(null);
+  const firstVisitTreeScrollAttemptedRef = useRef(false);
 
+  useUnactivate(() => { setTransferPageActive(false); setTransferOpen(false); });
   useActivate(() => {
+    setTransferPageActive(true);
     const { needRefresh, setNeedRefresh } = useAssetDataStore.getState();
     if (needRefresh && modelId) {
       fetchData();
@@ -380,8 +409,8 @@ const AssetDataContent = () => {
     exportRef.current?.showModal({
       title,
       modelId,
-      columns,
-      displayFieldKeys,
+      columns: columns.filter((col) => col.key !== EXTERNAL_ID_COLUMN_KEY),
+      displayFieldKeys: displayFieldKeys.filter((key) => key !== EXTERNAL_ID_COLUMN_KEY),
       selectedKeys,
       exportType,
       tableData,
@@ -634,7 +663,7 @@ const AssetDataContent = () => {
       getInstanceShowFieldDetail(id),
     ])
       .then(([attrList, instData, displayFields]) => {
-        const fieldKeys = displayFields?.show_fields || attrList.map((item: AttrFieldType) => item.attr_id);
+        const fieldKeys = resolveListDisplayFieldKeys(displayFields?.show_fields, attrList);
         setDisplayFieldKeys(fieldKeys);
         setPropertyList(attrList);
         setTableData(instData.insts);
@@ -697,6 +726,34 @@ const AssetDataContent = () => {
 
   const batchDeleteConfirm = () => {
     handleDeleteWithConfirm(() => batchDeleteInstances(selectedRowKeys.map((k) => String(k))));
+  };
+
+  const batchSyncMonitorConfirm = () => {
+    const instUuids = selectedRowKeys.map((k) => String(k));
+    if (!instUuids.length) return;
+    confirm({
+      title: t('Model.systemLinkageBatchConfirm', '', { count: instUuids.length }),
+      okText: t('common.confirm'),
+      cancelText: t('common.cancel'),
+      centered: true,
+      async onOk() {
+        try {
+          const summary = await batchPushToMonitor(instUuids);
+          const counts = pickBatchPushCounts(summary);
+          const level = resolveBatchPushSummaryLevel(counts);
+          const text = t('Model.systemLinkageBatchSummary', '', counts);
+          if (level === 'success') {
+            message.success(text);
+          } else if (level === 'warning') {
+            message.warning(text);
+          } else {
+            message.error(text);
+          }
+        } catch {
+          message.error(t('Model.systemLinkageSyncFailed'));
+        }
+      },
+    });
   };
 
   // 导出菜单项
@@ -886,7 +943,7 @@ const AssetDataContent = () => {
 
   const renderModelTitle = useCallback(
     (modelName: string, modelId: string) => (
-      <div className="flex items-center">
+      <div className="flex items-center" data-asset-model-id={modelId}>
         <EllipsisWithTooltip text={modelName} className={assetDataStyle.treeLabel} />
         <span className="ml-1 text-gray-400">({modelInstCount[modelId] || 0})</span>
       </div>
@@ -978,6 +1035,39 @@ const AssetDataContent = () => {
     setFilteredTreeData(buildTreeData(modelGroup, renderModelTitle));
   }, [modelGroup, renderModelTitle]);
 
+  useEffect(() => {
+    const plan = planFirstVisitTreeScroll({
+      alreadyAttempted: firstVisitTreeScrollAttemptedRef.current,
+      selectedModelId: modelId,
+      treeLoaded: filteredTreeData.length > 0,
+      modelGroup,
+      expandedKeys: expandedTreeKeys,
+    });
+    if (plan.action === 'wait') return;
+    if (plan.action === 'skip') {
+      firstVisitTreeScrollAttemptedRef.current = true;
+      return;
+    }
+    if (plan.action === 'expand') {
+      setExpandedTreeKeys((prev) =>
+        prev.includes(plan.groupKey) ? prev : [...prev, plan.groupKey]
+      );
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      if (firstVisitTreeScrollAttemptedRef.current) return;
+      const didScroll = scrollElementIntoContainer(
+        treeWrapperRef.current,
+        queryAssetModelTreeNode(treeWrapperRef.current, plan.modelId)
+      );
+      if (shouldFinishFirstVisitTreeScroll({ didScroll, loading })) {
+        firstVisitTreeScrollAttemptedRef.current = true;
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [expandedTreeKeys, filteredTreeData, loading, modelGroup, modelId]);
+
   const onSelectUnified = (selectedKeys: React.Key[]) => {
     useAssetDataStore.getState().clear();
     useAssetDataStore.setState((state) => ({ ...state, searchAttr: '' }));
@@ -1008,7 +1098,11 @@ const AssetDataContent = () => {
   useEffect(() => {
     if (!propertyList.length) return;
 
-    const attrList = getAssetColumns({ attrList: propertyList, userList, t });
+    const attrList = getAssetColumns({
+      attrList: propertyList.filter((item) => !isSystemLinkAttr(item)),
+      userList,
+      t,
+    });
     const columnsWithFollow = attrList.map((column) => {
       if (column.key !== 'inst_name') return column;
 
@@ -1042,6 +1136,50 @@ const AssetDataContent = () => {
         },
       };
     });
+    const externalIdColumn: ColumnItem | null = canSyncMonitor(modelId)
+      ? {
+        title: t('Model.systemLinkageExternalId'),
+        key: EXTERNAL_ID_COLUMN_KEY,
+        dataIndex: EXTERNAL_ID_COLUMN_KEY,
+        width: 100,
+        ellipsis: { showTitle: false },
+        onHeaderCell: () => ({ className: 'w-[100px] max-w-[100px]' }),
+        onCell: () => ({ className: 'w-[100px] max-w-[100px] overflow-hidden' }),
+        render: (_: unknown, record: any) => {
+          const lines = buildExternalIdLines(modelId, record);
+          const lineLabel = (key: string) =>
+            key === 'node_id'
+              ? t('Model.systemLinkageNodeId')
+              : t('Model.systemLinkageMonitorId');
+          return (
+            <Tooltip
+              title={
+                <div className="text-xs leading-5">
+                  {lines.map((line) => (
+                    <div key={line.key}>
+                      {lineLabel(line.key)}: {displayExternalIdValue(line.value)}
+                    </div>
+                  ))}
+                </div>
+              }
+            >
+              <div className="block w-[100px] max-w-[100px] overflow-hidden cursor-default">
+                {lines.map((line, index) => (
+                  <div
+                    key={line.key}
+                    className={`overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[12px] leading-[18px] ${
+                      index > 0 ? 'text-[var(--color-text-3)]' : ''
+                    }`}
+                  >
+                    {displayExternalIdValue(line.value)}
+                  </div>
+                ))}
+              </div>
+            </Tooltip>
+          );
+        },
+      }
+      : null;
     const actionColumn: ColumnItem = {
       title: t('common.actions'),
       key: 'action',
@@ -1076,16 +1214,26 @@ const AssetDataContent = () => {
         </>
       ),
     };
-    const tableColumns = [...columnsWithFollow, actionColumn];
+    const tableColumns = [...columnsWithFollow, ...(externalIdColumn ? [externalIdColumn] : []), actionColumn];
     setColumns(tableColumns);
 
     const orderedColumns = tableColumns
       .filter((col) => displayFieldKeys.includes(col.key as string))
       .sort((a, b) => displayFieldKeys.indexOf(a.key as string) - displayFieldKeys.indexOf(b.key as string));
     setCurrentColumns([...orderedColumns, actionColumn]);
-  }, [propertyList, displayFieldKeys, propertyListGroups, modelId, followPendingKey, handleFollowToggle, isFollowed, t]);
+  }, [propertyList, displayFieldKeys, propertyListGroups, modelId, followPendingKey, handleFollowToggle, isFollowed, t, userList]);
 
   const showSubscribeAction = selectedRowKeys.length > 0 || storeQueryList.length > 0;
+  const showBatchSyncMonitor = canSyncMonitor(modelId) && isMonitorSold(clientData);
+  const batchSyncMonitorItem: NonNullable<MenuProps['items']>[number] = {
+    key: 'batchSyncMonitor',
+    label: (
+      <PermissionWrapper requiredPermissions={['Edit']}>
+        <a onClick={batchSyncMonitorConfirm}>{t('Model.systemLinkageBatchSync')}</a>
+      </PermissionWrapper>
+    ),
+    disabled: !selectedRowKeys.length,
+  };
 
   const batchOperateItems: MenuProps['items'] = [
     {
@@ -1112,6 +1260,7 @@ const AssetDataContent = () => {
       ),
       disabled: !selectedRowKeys.length || !propertyListGroups.length,
     },
+    ...(showBatchSyncMonitor ? [batchSyncMonitorItem] : []),
     {
       key: 'batchDelete',
       label: (
@@ -1139,6 +1288,15 @@ const AssetDataContent = () => {
       };
     }
   );
+
+  const transfers = useTransferTasks(transferOpen, (task) => {
+    if (task.model_id === modelId) void updateFieldList();
+  }, transferPageActive);
+  const pendingTransfers = transfers.tasks.filter(task => ['queued', 'running'].includes(task.status)).length;
+  const onTransferSubmitted = (task: TransferTask) => {
+    transfers.submitted(task);
+    setTransferOpen(true);
+  };
 
   const buildPrefixedItems = (items: MenuProps['items'], prefix: string) =>
     items.map((item, index) => {
@@ -1196,7 +1354,7 @@ const AssetDataContent = () => {
               </Tooltip>
             </div>
           </div>
-          <div className={assetDataStyle.treeWrapper}>
+          <div ref={treeWrapperRef} className={assetDataStyle.treeWrapper}>
             {filteredTreeData.length > 0 ? (
               <Tree
                 showLine
@@ -1298,6 +1456,9 @@ const AssetDataContent = () => {
                   </Space>
                 </Button>
               </Dropdown>
+              <Button onClick={() => setTransferOpen(true)}>{t('Transfer.title')}
+                {pendingTransfers ? ` (${pendingTransfers})` : ''}
+              </Button>
               <Button icon={<UnorderedListOutlined aria-hidden="true" />} onClick={() => openSubscription('drawer')}>
                 {t('subscription.dataSubscription')}
               </Button>
@@ -1322,6 +1483,9 @@ const AssetDataContent = () => {
                   {t('more')}
                   <DownOutlined aria-hidden="true" />
                 </Space>
+              </Button>
+              <Button>{t('Transfer.title')}
+                {pendingTransfers ? ` (${pendingTransfers})` : ''}
               </Button>
               <Button icon={<UnorderedListOutlined aria-hidden="true" />}>
                 {t('subscription.dataSubscription')}
@@ -1349,7 +1513,7 @@ const AssetDataContent = () => {
             pagination={pagination}
             loading={tableLoading}
             scroll={{
-              x: 'calc(100vw - 400px)',
+              x: 'max-content',
               y: storeQueryList.length > 0
                 ? 'calc(100vh - 320px)'
                 : 'calc(100vh - 300px)'
@@ -1368,7 +1532,9 @@ const AssetDataContent = () => {
             userList={userList}
             onSuccess={updateFieldList}
           />
-          <ImportInst ref={importRef} onSuccess={updateFieldList} />
+          <ImportInst ref={importRef} onSubmitted={onTransferSubmitted} canSubmit={transfers.canSubmit} />
+          <TransferDrawer open={transferOpen} onClose={() => setTransferOpen(false)} tasks={transfers.tasks}
+            error={transfers.error} loading={transfers.loading} onRefresh={transfers.refresh} />
           <SelectInstance
             ref={instanceRef}
             userList={userList}
@@ -1378,6 +1544,9 @@ const AssetDataContent = () => {
           />
           <ExportModal
             ref={exportRef}
+            onSubmitStart={() => setTransferOpen(true)}
+            onSubmitted={onTransferSubmitted}
+            canSubmit={transfers.canSubmit}
             userList={userList}
             models={originModels}
             assoTypes={assoTypes}

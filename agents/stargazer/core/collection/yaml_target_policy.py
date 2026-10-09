@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Mapping
 
-from core.collection.runtime import CollectionRequest
+from core.collection.constants import CLOUD_TYPES
+from core.collection.runtime import CollectionRequest, _run_log_identity
 from core.logger import logger, safe_log_value
 from core.plugin.yaml_reader import PluginYamlReader, yaml_reader
 
@@ -32,13 +33,11 @@ def apply_yaml_target_policy(
 
     一次 run 调用一次即可；yaml 解析有缓存。
     yaml 有声明时覆盖 request_builder 兜底猜测；无声明则保留原 params。
-    监控采集若已显式设置 preflight_kind（或 plugin_family=monitor），
+    监控采集若已显式设置 preflight_kind，或非云 SDK 的 plugin_family=monitor，
     不得用同名 CMDB plugin.yml 的 tls/443 覆盖，否则 SNMP 存储会被 HTTPS
-    预检挡死。
+    预检挡死。腾讯云/阿里云等 SDK 监控仍需套用 cloud_endpoint 受信域名。
     """
-    if str(request.params.get("plugin_family") or "") == "monitor":
-        return request
-    if str(request.params.get("preflight_kind") or "").strip() and request.params.get("preflight_kind_explicit"):
+    if _skip_yaml_target_policy(request):
         return request
     plugin_name = _plugin_name(request)
     executor_type = str(request.params.get("executor_type") or "").strip()
@@ -54,8 +53,8 @@ def apply_yaml_target_policy(
         )
     except Exception as exc:  # noqa: BLE001 - 保留 request_builder 兜底
         logger.warning(
-            "event=yaml_target_policy_unavailable task_id=%s plugin=%s " "executor=%s failed_stage=run_preparation error_type=%s",
-            safe_log_value(request.task_id),
+            "event=yaml_target_policy_unavailable %s plugin=%s executor=%s failed_stage=run_preparation error_type=%s",
+            _run_log_identity(request),
             safe_log_value(plugin_name),
             safe_log_value(executor_type),
             type(exc).__name__,
@@ -76,9 +75,7 @@ async def apply_yaml_target_policy_async(
     reader: PluginYamlReader | None = None,
 ) -> CollectionRequest:
     """异步 Run 入口；通过 reader 自身的锁避免并行首次读取同一 YAML。"""
-    if str(request.params.get("plugin_family") or "") == "monitor":
-        return request
-    if str(request.params.get("preflight_kind") or "").strip() and request.params.get("preflight_kind_explicit"):
+    if _skip_yaml_target_policy(request):
         return request
     selected_reader = reader or yaml_reader
     plugin_name = _plugin_name(request)
@@ -99,8 +96,8 @@ async def apply_yaml_target_policy_async(
         )
     except Exception as exc:  # noqa: BLE001 - 保留 request_builder 兜底
         logger.warning(
-            "event=yaml_target_policy_unavailable task_id=%s plugin=%s " "executor=%s failed_stage=run_preparation error_type=%s",
-            safe_log_value(request.task_id),
+            "event=yaml_target_policy_unavailable %s plugin=%s executor=%s failed_stage=run_preparation error_type=%s",
+            _run_log_identity(request),
             safe_log_value(plugin_name),
             safe_log_value(executor_type),
             type(exc).__name__,
@@ -124,9 +121,7 @@ def apply_executor_target_policy(
 ) -> CollectionRequest:
     """使用 fallback 后的最终执行器配置覆盖目标策略。"""
 
-    if str(request.params.get("plugin_family") or "") == "monitor":
-        return request
-    if str(request.params.get("preflight_kind") or "").strip() and request.params.get("preflight_kind_explicit"):
+    if _skip_yaml_target_policy(request):
         return request
     plugin_name = plugin_name or _plugin_name(request)
     executor_type = executor_type or str(request.params.get("executor_type") or "").strip()
@@ -138,8 +133,8 @@ def apply_executor_target_policy(
     kind = _MODE_TO_KIND.get(mode)
     if not kind:
         logger.warning(
-            "event=yaml_target_policy_unknown_mode task_id=%s mode=%s " "failed_stage=run_preparation error_type=UnsupportedTargetPolicyMode",
-            safe_log_value(request.task_id),
+            "event=yaml_target_policy_unknown_mode %s mode=%s failed_stage=run_preparation error_type=UnsupportedTargetPolicyMode",
+            _run_log_identity(request),
             safe_log_value(mode),
         )
         return request
@@ -148,7 +143,7 @@ def apply_executor_target_policy(
     params["preflight_kind"] = kind
     params["target_policy_mode"] = mode
     params["_yaml_target_policy_verified"] = True
-    if "port" in policy and policy.get("port") not in (None, ""):
+    if params.get("port") in (None, "") and "port" in policy and policy.get("port") not in (None, ""):
         params["port"] = int(policy["port"])
     if "tls" in policy:
         params.setdefault("ssl", policy["tls"])
@@ -167,6 +162,7 @@ def apply_executor_target_policy(
         targets=request.targets,
         credentials=request.credentials,
         params=params,
+        workload_class=request.workload_class,
     )
 
 
@@ -184,6 +180,19 @@ def _refine_pc_preflight(params: dict[str, Any], plugin_name: str) -> None:
     params["preflight_kind"] = "remote"
     if params.get("port") in (None, ""):
         params["port"] = 22
+
+
+def _skip_yaml_target_policy(request: CollectionRequest) -> bool:
+    """监控路径默认不套用 CMDB yaml 的 tls/443，避免 SNMP 存储被 HTTPS 预检挡死。
+
+    云 SDK 采集例外：必须带上 plugin.yml 的 cloud_endpoint 受信域名，
+    否则逻辑 instance_id 会被出站策略当成主机名拒绝。
+    """
+    if str(request.params.get("preflight_kind") or "").strip() and request.params.get("preflight_kind_explicit"):
+        return True
+    if str(request.params.get("plugin_family") or "") != "monitor":
+        return False
+    return _plugin_name(request) not in CLOUD_TYPES
 
 
 def _plugin_name(request: CollectionRequest) -> str:

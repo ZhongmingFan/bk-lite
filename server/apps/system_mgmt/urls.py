@@ -3,6 +3,8 @@ from rest_framework import routers
 from apps.system_mgmt.viewset import (
     AppViewSet,
     ChannelViewSet,
+    CredentialTypeViewSet,
+    CredentialViewSet,
     CustomMenuGroupViewSet,
     ErrorLogViewSet,
     GroupDataRuleViewSet,
@@ -11,8 +13,11 @@ from apps.system_mgmt.viewset import (
     IntegrationInstanceViewSet,
     LoginAuthBindingViewSet,
     NetworkWhiteListViewSet,
+    OpenAPICallLogViewSet,
+    OpenAPIDocsViewSet,
     OperationLogViewSet,
     RoleViewSet,
+    SystemAPITokenViewSet,
     SystemSettingsViewSet,
     UserLoginLogViewSet,
     UserSyncSourceViewSet,
@@ -26,6 +31,8 @@ router.register(r"role", RoleViewSet, basename="role_mgmt")
 router.register(r"integration_instance", IntegrationInstanceViewSet)
 router.register(r"im_notification_channel", IMNotificationChannelViewSet)
 router.register(r"login_auth_binding", LoginAuthBindingViewSet)
+router.register(r"credential_type", CredentialTypeViewSet)
+router.register(r"credential", CredentialViewSet)
 router.register(r"user_sync_source", UserSyncSourceViewSet)
 router.register(r"channel", ChannelViewSet)
 router.register(r"group_data_rule", GroupDataRuleViewSet)
@@ -34,8 +41,11 @@ router.register(r"app", AppViewSet)
 router.register(r"custom_menu_group", CustomMenuGroupViewSet)
 router.register(r"user_login_log", UserLoginLogViewSet)
 router.register(r"operation_log", OperationLogViewSet)
+router.register(r"openapi_call_log", OpenAPICallLogViewSet)
 router.register(r"error_log", ErrorLogViewSet)
 router.register(r"network_white_list", NetworkWhiteListViewSet)
+router.register(r"openapi_docs", OpenAPIDocsViewSet, basename="openapi_docs")
+router.register(r"system_api_token", SystemAPITokenViewSet)
 urlpatterns = router.urls
 
 try:

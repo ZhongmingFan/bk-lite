@@ -102,6 +102,31 @@ def test_set_component_inst_name_existing(runner):
 
 
 @pytest.mark.parametrize(
+    "model_id,identity_field,identity_value,expected",
+    [
+        ("disk", "disk_name", "sdb", "sdb-server-b"),
+        ("memory", "mem_locator", "DIMM-B1", "DIMM-B1-server-b"),
+        ("gpu", "gpu_name", "GPU-B", "GPU-B-server-b"),
+    ],
+)
+def test_set_component_inst_name_prefers_row_parent_over_first_selected_instance(
+    runner,
+    model_id,
+    identity_field,
+    identity_value,
+    expected,
+):
+    """多资产任务必须按当前指标的 self_device 组合子资源实例名。"""
+    data = {
+        "model_id": model_id,
+        identity_field: identity_value,
+        "self_device": "server-b",
+    }
+
+    assert runner.set_component_inst_name(data) == expected
+
+
+@pytest.mark.parametrize(
     "model_id,extra,expected",
     [
         ("nic", {"nic_pci_addr": "0000:01", "self_device": "h1"}, "0000:01-h1"),
@@ -163,6 +188,8 @@ def test_format_mac_invalid_returned_lowercased_colon():
 def test_set_os_type(runner):
     assert runner.set_os_type({"os_type": "Linux 5.10"}) == "1"
     assert runner.set_os_type({"os_type": "Windows Server"}) == "2"
+    assert runner.set_os_type({"os_type": "AIX 7.2"}) == "3"
+    assert runner.set_os_type({"os_type": "HP-UX 11i"}) == "4"
     assert runner.set_os_type({"os_type": ""}) == "other"
     assert runner.set_os_type({"os_type": "Plan9"}) == "other"
 
@@ -208,15 +235,21 @@ def test_add_host_proc_no_key_noop(runner):
 
 
 def test_set_cloud_from_matched_instance(monkeypatch, runner):
-    task = _fake_task(instances=[{"ip_addr": "1.2.3.4", "cloud": "aliyun"}])
+    task = _fake_task(instances=[{"ip_addr": "1.2.3.4", "cloud": "1"}])
     monkeypatch.setattr(runner, "get_collect_inst", lambda: task)
-    assert runner.set_cloud({"host": "1.2.3.4"}) == "aliyun"
+    assert runner.set_cloud({"host": "1.2.3.4"}) == 1
 
 
 def test_set_cloud_from_cloud_id(monkeypatch, runner):
-    task = _fake_task(instances=[{"ip_addr": "1.2.3.4", "cloud_id": "cid-9"}])
+    task = _fake_task(instances=[{"ip_addr": "1.2.3.4", "cloud_id": "9"}])
     monkeypatch.setattr(runner, "get_collect_inst", lambda: task)
-    assert runner.set_cloud({"host": "1.2.3.4"}) == "cid-9"
+    assert runner.set_cloud({"host": "1.2.3.4"}) == 9
+
+
+def test_set_cloud_ignores_non_numeric(monkeypatch, runner):
+    task = _fake_task(instances=[{"ip_addr": "1.2.3.4", "cloud": "aliyun"}])
+    monkeypatch.setattr(runner, "get_collect_inst", lambda: task)
+    assert runner.set_cloud({"host": "1.2.3.4"}) == ""
 
 
 def test_set_cloud_empty_when_none(monkeypatch, runner):
@@ -282,5 +315,17 @@ def test_set_asso_instances(runner):
             "inst_name": "dev1",
             "asst_id": "contains",
             "model_asst_id": "host_contains_disk",
+        }
+    ]
+
+
+def test_set_nic_asso_instances_prefers_row_parent_over_first_selected_instance(runner):
+    """多资产任务的网卡必须关联当前指标所属服务器，而非任务首个实例。"""
+    assert runner.set_nic_asso_instances({"self_device": "server-b"}) == [
+        {
+            "model_id": "host",
+            "inst_name": "server-b",
+            "asst_id": "contains",
+            "model_asst_id": "host_contains_nic",
         }
     ]

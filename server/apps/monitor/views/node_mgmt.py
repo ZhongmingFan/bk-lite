@@ -116,8 +116,30 @@ class NodeMgmtView(ViewSet):
         result = InstanceConfigService.get_config_content(request.data["ids"], actor_context)
         return WebUtils.response_success(result)
 
+    @action(methods=["post"], detail=False, url_path="get_plugin_child_config")
+    def get_plugin_child_config(self, request):
+        actor_context = _build_actor_context(request)
+        result = InstanceConfigService.get_plugin_child_config_content(
+            request.data.get("monitor_plugin_id"),
+            actor_context,
+        )
+        return WebUtils.response_success(result)
+
     @action(methods=["post"], detail=False, url_path="update_instance_collect_config")
     def update_instance_collect_config(self, request):
         actor_context = _build_actor_context(request)
         InstanceConfigService.update_instance_config(request.data.get("child"), request.data.get("base"), actor_context)
         return WebUtils.response_success()
+
+    @action(methods=["post"], detail=False, url_path="update_collect_template_configs")
+    def update_collect_template_configs(self, request):
+        actor_context = _build_actor_context(request)
+        from apps.monitor.services.collect_config_update import CollectConfigUpdateService
+
+        result = CollectConfigUpdateService.update_instances(
+            request.data.get("instance_ids"),
+            request.data.get("monitor_plugin_id"),
+            actor_context,
+            discard_hand_edited=request.data.get("discard_hand_edited") in (True, 1, "1", "true", "True"),
+        )
+        return WebUtils.response_success(result)

@@ -54,6 +54,7 @@ INSTANCE_ASSOCIATION = "instance_association"
 TOPO_THEME_NETWORK = "network"
 TOPO_THEME_IPAM = "ipam"
 TOPO_THEME_APP_OVERVIEW = "app_overview"
+TOPO_THEME_SERVICE_TREE = "service_tree"
 # 网络设备判定：存在 interface --belong--> <model> 的模型关联即视为网络设备
 NETWORK_INTERFACE_MODEL = "interface"
 NETWORK_INTERFACE_BELONG_ASST = "belong"
@@ -384,8 +385,8 @@ COLLECT_OBJ_TREE = [
                 "name": "网络设备配置文件",
                 "task_type": CollectPluginTypes.CONFIG_FILE,
                 "type": CollectDriverTypes.PROTOCOL,
-                "tag": ["Netmiko", "Network"],
-                "desc": "通过 Netmiko 采集网络设备配置命令输出并归档为配置文件版本",
+                "tag": ["Scrapli", "SSH", "Telnet"],
+                "desc": "通过 Scrapli（SSH 或 Telnet）采集网络设备配置命令输出并归档为配置文件版本",
                 "icon": "config_file",
                 "encrypted_fields": ["password", "enable_password"],
             },
@@ -654,8 +655,24 @@ COLLECT_OBJ_TREE = [
                 "name": "【BETA】物理服务器 IPMI",
                 "task_type": CollectPluginTypes.PROTOCOL,
                 "type": CollectDriverTypes.PROTOCOL,
+                "credential_protocol": "ipmi",
+                "credential_kind": "bmc_account",
+                "credential_default_port": 623,
                 "tag": ["IPMI", "BMC"],
                 "desc": "通过 IPMI 管理口采集物理服务器基础身份信息",
+                "encrypted_fields": ["password"],
+            },
+            {
+                "id": "physcial_server_redfish",
+                "model_id": "physcial_server",
+                "name": "【BETA】物理服务器 Redfish",
+                "task_type": CollectPluginTypes.PROTOCOL,
+                "type": CollectDriverTypes.PROTOCOL,
+                "credential_protocol": "redfish",
+                "credential_kind": "bmc_account",
+                "credential_default_port": 443,
+                "tag": ["REDFISH", "HTTPS", "BMC"],
+                "desc": "通过 Redfish HTTPS API 采集物理服务器基础身份信息",
                 "encrypted_fields": ["password"],
             },
         ],
@@ -855,6 +872,22 @@ COLLECT_OBJ_TREE = [
                 "desc": "发现与采集Spark基础配置信息",
                 "encrypted_fields": ["password"],
             },
+        ],
+    },
+    {
+        "id": "certificate",
+        "name": "证书许可",
+        "children": [
+            {
+                "id": "ssl_cer",
+                "model_id": "ssl_cer",
+                "name": "SSL证书",
+                "task_type": CollectPluginTypes.PROTOCOL,
+                "type": CollectDriverTypes.PROTOCOL,
+                "tag": ["Agentless", "TLS"],
+                "desc": "对已录入 SSL 证书实例的域名做 TLS 握手，采集颁发者与有效期",
+                "encrypted_fields": [],
+            }
         ],
     },
 ]

@@ -30,7 +30,8 @@ from apps.alerts.constants import (
 from apps.alerts.constants.constants import EventStatus, LevelType
 from apps.alerts.models.alert_operator import AlarmStrategy
 from apps.alerts.models.models import Alert, Event, Level
-from apps.alerts.serializers.strategy import ALLOWED_DIMENSIONS, DIMENSION_NAME_PATTERN
+from apps.alerts.serializers.strategy import DIMENSION_NAME_PATTERN, is_allowed_dimension
+from apps.alerts.utils.enrichment import is_enrichment_path
 from apps.alerts.utils.util import parse_aggregation_window_size, str_to_md5
 from apps.core.logger import alert_logger as logger
 
@@ -56,10 +57,10 @@ class AggregationProcessor:
                 logger.warning("[AlertAggregation] 策略 %s: 维度名非字符串，已跳过: %s", strategy_name, dim)
                 continue
             dim = dim.strip()
-            if not DIMENSION_NAME_PATTERN.match(dim):
+            if not (DIMENSION_NAME_PATTERN.fullmatch(dim) or is_enrichment_path(dim)):
                 logger.warning("[AlertAggregation] 策略 %s: 维度名格式非法，已跳过: %s", strategy_name, dim)
                 continue
-            if dim not in ALLOWED_DIMENSIONS:
+            if not is_allowed_dimension(dim):
                 logger.warning("[AlertAggregation] 策略 %s: 不支持的维度名，已跳过: %s", strategy_name, dim)
                 continue
             validated.append(dim)
@@ -503,11 +504,14 @@ class AggregationProcessor:
         Alert.stamp_closed_at(active_alert, now)
         active_alert.save(update_fields=["status", "last_event_time", "updated_at", "closed_at"])
 
+        from apps.alerts.service.alert_lifecycle import dispatch_alert_lifecycle
         from apps.alerts.service.recovery_notify import notify_alert_recovered
         from apps.alerts.service.reminder_service import ReminderService
 
         ReminderService.stop_reminder_task(active_alert)
+        recovered_alert_id = active_alert.alert_id
         transaction.on_commit(lambda a=active_alert: notify_alert_recovered(a))
+        transaction.on_commit(lambda aid=recovered_alert_id: dispatch_alert_lifecycle([aid], "resolved"))
         logger.info(
             "自动恢复成功: strategy_id=%s, alert_id=%s",
             strategy.id,

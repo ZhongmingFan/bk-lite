@@ -8,7 +8,9 @@ from rest_framework.response import Response
 from rest_framework.test import APIRequestFactory, force_authenticate
 
 from apps.core.utils.open_base import login_exempt
+from apps.core.utils.user_group import normalize_user_group_ids
 from apps.operation_analysis.common.datasource_visibility import can_access_datasource_in_org
+from apps.operation_analysis.common.get_nats_source_data import is_organization_param_spec
 from apps.operation_analysis.constants.canvas_refresh import normalize_canvas_refresh_interval
 from apps.operation_analysis.models.datasource_models import DataSourceAPIModel
 from apps.operation_analysis.serializers.share_serializers import (
@@ -53,10 +55,13 @@ from apps.operation_analysis.services.share_throttle import (
     DashboardShareInvalidTokenThrottle,
     DashboardSharePrepareThrottle,
 )
+from apps.operation_analysis.services.user_messages import oa_message
 from apps.operation_analysis.views.datasource_view import DataSourceAPIModelViewSet
 from apps.system_mgmt.nats.auth import build_user_authorization_context
 
-INVALID_SHARE_RESPONSE = {"detail": "分享链接无效或已失效"}
+
+def invalid_share_response():
+    return {"detail": oa_message("messages.share_invalid", "分享链接无效或已失效")}
 
 
 def _walk_data_source_ids(value):
@@ -93,11 +98,70 @@ def _view_sets_has_scene_widget(value, scene_widget_type: str) -> bool:
     return False
 
 
-def _serialize_shared_resource(principal):
+def _collect_related_topology_inst_uuids(value) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        related = value.get("relatedTopology")
+        if isinstance(related, dict):
+            inst = str(related.get("instUuid") or related.get("inst_uuid") or "").strip()
+            if inst:
+                found.add(inst)
+        for child in value.values():
+            found.update(_collect_related_topology_inst_uuids(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.update(_collect_related_topology_inst_uuids(child))
+    return found
+
+
+def _resource_has_organization_filter(resource) -> bool:
+    """仅已启用的组织控件才下发树；关掉后定义仍在也不吐 group_tree。"""
+    return any(item.get("enabled") is True and is_organization_param_spec(item) for item in _resource_filter_definitions(resource))
+
+
+def _sanitize_share_group_tree(nodes):
+    """只保留筛条所需字段，避免把分享者 role_ids / permission 面交给访客。"""
+    cleaned = []
+    for node in nodes or []:
+        if not isinstance(node, dict):
+            continue
+        item = {
+            "id": node.get("id"),
+            "name": node.get("name"),
+            "hasAuth": bool(node.get("hasAuth")),
+            "subGroupCount": node.get("subGroupCount") or 0,
+            "subGroups": _sanitize_share_group_tree(node.get("subGroups") or []),
+        }
+        if "parentId" in node:
+            item["parentId"] = node["parentId"]
+        cleaned.append(item)
+    return cleaned
+
+
+def _attach_share_organization(payload, principal):
+    """Session GET 下发分享空间与分享者组织树，供筛条对齐委托 cookie；不含 permission/roles。"""
+    space_id = getattr(principal, "space_id", None)
+    if space_id is not None:
+        payload["space_id"] = int(space_id)
+    user = getattr(principal, "user", None)
+    if user is not None:
+        original_group_list = getattr(user, "group_list", None)
+        try:
+            user.group_list = normalize_user_group_ids(original_group_list)
+            context = build_user_authorization_context(user)
+        finally:
+            user.group_list = original_group_list
+        payload["group_tree"] = _sanitize_share_group_tree(context.get("group_tree") or [])
+    return payload
+
+
+def _serialize_shared_resource(principal, language=None):
     resource = principal.resource
+    from apps.operation_analysis.services.builtin_i18n import overlay_canvas_payload
+
     if principal.resource_type == "networkTopology":
         # Phase A：只返回脱敏配置；禁止 token / base_url / runtime cache 等 WeOps 凭证面。
-        return {
+        payload = {
             "resource_type": principal.resource_type,
             "id": resource.id,
             "name": resource.name,
@@ -107,6 +171,10 @@ def _serialize_shared_resource(principal):
             "refresh_interval": normalize_canvas_refresh_interval(getattr(resource, "refresh_interval", 0)),
             "status": getattr(resource, "status", "") or "",
         }
+        overlay_canvas_payload(payload, resource, language)
+        if _resource_has_organization_filter(resource):
+            return _attach_share_organization(payload, principal)
+        return payload
     payload = {
         "resource_type": principal.resource_type,
         "id": resource.id,
@@ -121,6 +189,9 @@ def _serialize_shared_resource(principal):
         payload["other"] = resource.other
     if hasattr(resource, "refresh_interval"):
         payload["refresh_interval"] = normalize_canvas_refresh_interval(resource.refresh_interval)
+    overlay_canvas_payload(payload, resource, language)
+    if _resource_has_organization_filter(resource):
+        return _attach_share_organization(payload, principal)
     return payload
 
 
@@ -181,8 +252,8 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
             log_share_access(request, action="prepare", result="reject", reason="invalid_token")
             invalid_throttle = DashboardShareInvalidTokenThrottle()
             if not invalid_throttle.allow_request(request, self):
-                return Response({"detail": "请求过于频繁"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-            return Response(INVALID_SHARE_RESPONSE, status=status.HTTP_404_NOT_FOUND)
+                return Response({"detail": oa_message("messages.rate_limited", "请求过于频繁")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response(invalid_share_response(), status=status.HTTP_404_NOT_FOUND)
         log_share_access(request, action="prepare", result="ok")
         response = Response({"state": state})
         response.set_cookie(
@@ -208,7 +279,7 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
             )
         except ShareRateLimited:
             log_share_access(request, action="exchange", result="reject", reason="rate_limited")
-            return Response({"detail": "请求过于频繁"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response({"detail": oa_message("messages.rate_limited", "请求过于频繁")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         except ShareLinkInvalid as exc:
             log_share_access(
                 request,
@@ -218,8 +289,8 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
             )
             invalid_throttle = DashboardShareInvalidTokenThrottle()
             if not invalid_throttle.allow_request(request, self):
-                return Response({"detail": "请求过于频繁"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-            return Response(INVALID_SHARE_RESPONSE, status=status.HTTP_404_NOT_FOUND)
+                return Response({"detail": oa_message("messages.rate_limited", "请求过于频繁")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response(invalid_share_response(), status=status.HTTP_404_NOT_FOUND)
 
         log_share_access(
             request,
@@ -243,13 +314,13 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
             principal = resolve_session(session_id=session_id, visitor=request.user)
         except ShareRateLimited:
             log_share_access(request, action="open", result="reject", reason="rate_limited")
-            return Response({"detail": "请求过于频繁"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response({"detail": oa_message("messages.rate_limited", "请求过于频繁")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         except ShareLinkInvalid:
             log_share_access(request, action="open", result="reject", reason="invalid")
-            return Response(INVALID_SHARE_RESPONSE, status=status.HTTP_404_NOT_FOUND)
+            return Response(invalid_share_response(), status=status.HTTP_404_NOT_FOUND)
 
         log_share_access(request, action="open", principal=principal, visitor=request.user, result="ok")
-        return Response(_serialize_shared_resource(principal))
+        return Response(_serialize_shared_resource(principal, language=getattr(request.user, "locale", None)))
 
     @action(
         detail=False,
@@ -261,10 +332,10 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
             principal = resolve_session(session_id=session_id, visitor=request.user)
         except ShareRateLimited:
             log_share_access(request, action="query", result="reject", reason="rate_limited")
-            return Response({"detail": "请求过于频繁"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response({"detail": oa_message("messages.rate_limited", "请求过于频繁")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         except ShareLinkInvalid:
             log_share_access(request, action="query", result="reject", reason="invalid")
-            return Response(INVALID_SHARE_RESPONSE, status=status.HTTP_404_NOT_FOUND)
+            return Response(invalid_share_response(), status=status.HTTP_404_NOT_FOUND)
 
         if principal.resource_type not in SHARE_DATASOURCE_RESOURCE_TYPES:
             log_share_access(
@@ -275,7 +346,7 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
                 result="reject",
                 reason="resource_type_not_queryable",
             )
-            return Response({"detail": "当前画布不支持数据源查询"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": oa_message("messages.share_query_unsupported", "当前画布不支持数据源查询")}, status=status.HTTP_403_FORBIDDEN)
 
         if int(data_source_id) not in _canvas_data_source_ids(principal.resource):
             log_share_access(
@@ -286,7 +357,7 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
                 result="reject",
                 reason="datasource_not_declared",
             )
-            return Response({"detail": "无权访问当前数据源"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": oa_message("messages.datasource_access_denied", "无权访问当前数据源")}, status=status.HTTP_403_FORBIDDEN)
 
         try:
             safe_params = filter_share_query_params(
@@ -303,7 +374,10 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
                 result="reject",
                 reason="undeclared_params",
             )
-            return Response({"detail": str(exc) or "存在未声明参数"}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": str(exc) or oa_message("messages.undeclared_params_fallback", "存在未声明参数")},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         factory = APIRequestFactory()
         delegated_request = factory.post("/", safe_params, format="json")
@@ -329,10 +403,10 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
         try:
             principal = resolve_session(session_id=session_id, visitor=request.user)
         except ShareRateLimited:
-            return Response({"detail": "请求过于频繁"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response({"detail": oa_message("messages.rate_limited", "请求过于频繁")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         except ShareLinkInvalid:
             log_share_access(request, action="data_sources", result="reject", reason="invalid")
-            return Response(INVALID_SHARE_RESPONSE, status=status.HTTP_404_NOT_FOUND)
+            return Response(invalid_share_response(), status=status.HTTP_404_NOT_FOUND)
 
         if principal.resource_type not in SHARE_DATASOURCE_RESOURCE_TYPES:
             return Response([])
@@ -368,19 +442,31 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
             ]
         )
 
-    def _application3d_operation(self, request, session_id, *, action_name: str, view_action: str):
+    def _delegated_scene_widget_operation(
+        self,
+        request,
+        session_id,
+        *,
+        action_name: str,
+        view_action: str,
+        widget_type: str,
+        allowed_resource_types: frozenset[str],
+        undeclared_reason: str,
+        undeclared_detail: str,
+        extra_reject: Callable | None = None,
+    ):
         try:
             principal = resolve_session(session_id=session_id, visitor=request.user)
         except ShareRateLimited:
             log_share_access(request, action=action_name, result="reject", reason="rate_limited")
-            return Response({"detail": "请求过于频繁"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return Response({"detail": oa_message("messages.rate_limited", "请求过于频繁")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         except ShareLinkInvalid:
             log_share_access(request, action=action_name, result="reject", reason="invalid")
-            return Response(INVALID_SHARE_RESPONSE, status=status.HTTP_404_NOT_FOUND)
+            return Response(invalid_share_response(), status=status.HTTP_404_NOT_FOUND)
 
-        if principal.resource_type != "screen" or not _view_sets_has_scene_widget(
+        if principal.resource_type not in allowed_resource_types or not _view_sets_has_scene_widget(
             getattr(principal.resource, "view_sets", None),
-            "application3D",
+            widget_type,
         ):
             log_share_access(
                 request,
@@ -388,9 +474,14 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
                 principal=principal,
                 visitor=request.user,
                 result="reject",
-                reason="application3d_not_declared",
+                reason=undeclared_reason,
             )
-            return Response({"detail": "分享大屏未声明 3D 应用组件"}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": undeclared_detail}, status=status.HTTP_403_FORBIDDEN)
+
+        if extra_reject is not None:
+            rejected = extra_reject(request, principal)
+            if rejected is not None:
+                return rejected
 
         factory = APIRequestFactory()
         delegated_request = factory.post("/", request.data or {}, format="json")
@@ -409,6 +500,37 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
             result="ok" if getattr(response, "status_code", 500) < 400 else "reject",
         )
         return response
+
+    def _application3d_operation(self, request, session_id, *, action_name: str, view_action: str):
+        return self._delegated_scene_widget_operation(
+            request,
+            session_id,
+            action_name=action_name,
+            view_action=view_action,
+            widget_type="application3D",
+            allowed_resource_types=frozenset({"screen"}),
+            undeclared_reason="application3d_not_declared",
+            undeclared_detail=oa_message("messages.share_app3d_undeclared", "分享大屏未声明 3D 应用组件"),
+        )
+
+    def _reject_undeclared_related_topology_inst(self, request, principal):
+        data = request.data if isinstance(request.data, dict) else {}
+        inst_uuid = str(data.get("inst_uuid") or data.get("instUuid") or "").strip()
+        allowed = _collect_related_topology_inst_uuids(getattr(principal.resource, "view_sets", None))
+        if inst_uuid in allowed:
+            return None
+        log_share_access(
+            request,
+            action="related_topology",
+            principal=principal,
+            visitor=request.user,
+            result="reject",
+            reason="related_topology_inst_not_declared",
+        )
+        return Response(
+            {"detail": oa_message("messages.share_topology_instance_undeclared", "分享画布未声明该关联拓扑实例")},
+            status=status.HTTP_403_FORBIDDEN,
+        )
 
     @action(
         detail=False,
@@ -475,15 +597,71 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
             view_action="application3d_metric",
         )
 
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path=r"session/(?P<session_id>[^/.]+)/related_topology",
+    )
+    def related_topology(self, request, session_id=None):
+        return self._delegated_scene_widget_operation(
+            request,
+            session_id,
+            action_name="related_topology",
+            view_action="related_topology",
+            widget_type="relatedTopology",
+            allowed_resource_types=frozenset({"dashboard", "screen"}),
+            undeclared_reason="related_topology_not_declared",
+            undeclared_detail=oa_message("messages.share_topology_widget_undeclared", "分享画布未声明关联拓扑组件"),
+            extra_reject=self._reject_undeclared_related_topology_inst,
+        )
+
+    def _room3d_operation(self, request, session_id, *, action_name: str, view_action: str):
+        return self._delegated_scene_widget_operation(
+            request,
+            session_id,
+            action_name=action_name,
+            view_action=view_action,
+            widget_type="room3D",
+            allowed_resource_types=frozenset({"screen"}),
+            undeclared_reason="room3d_not_declared",
+            undeclared_detail=oa_message("messages.share_room3d_undeclared", "分享大屏未声明 3D 机房组件"),
+        )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path=r"session/(?P<session_id>[^/.]+)/room3d/rooms",
+    )
+    def room3d_rooms(self, request, session_id=None):
+        return self._room3d_operation(
+            request,
+            session_id,
+            action_name="room3d_rooms",
+            view_action="room3d_rooms",
+        )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path=r"session/(?P<session_id>[^/.]+)/room3d/layout",
+    )
+    def room3d_layout(self, request, session_id=None):
+        return self._room3d_operation(
+            request,
+            session_id,
+            action_name="room3d_layout",
+            view_action="room3d_layout",
+        )
+
     def _resolve_network_topology_principal(self, request, session_id, *, action_name: str):
         try:
             principal = resolve_session(session_id=session_id, visitor=request.user)
         except ShareRateLimited:
             log_share_access(request, action=action_name, result="reject", reason="rate_limited")
-            return None, Response({"detail": "请求过于频繁"}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+            return None, Response({"detail": oa_message("messages.rate_limited", "请求过于频繁")}, status=status.HTTP_429_TOO_MANY_REQUESTS)
         except ShareLinkInvalid:
             log_share_access(request, action=action_name, result="reject", reason="invalid")
-            return None, Response(INVALID_SHARE_RESPONSE, status=status.HTTP_404_NOT_FOUND)
+            return None, Response(invalid_share_response(), status=status.HTTP_404_NOT_FOUND)
 
         if principal.resource_type != "networkTopology":
             log_share_access(
@@ -495,7 +673,7 @@ class DashboardShareAccessViewSet(viewsets.ViewSet):
                 reason="resource_type_mismatch",
             )
             return None, Response(
-                {"detail": "当前分享会话不是网络拓扑"},
+                {"detail": oa_message("messages.share_not_network_topology", "当前分享会话不是网络拓扑")},
                 status=status.HTTP_403_FORBIDDEN,
             )
         return principal, None

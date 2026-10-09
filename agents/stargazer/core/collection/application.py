@@ -28,7 +28,7 @@ from core.collection.preflight import AsyncProtocolPreflight
 from core.collection.redis_state import RedisCredentialStateStore, RedisRunStateStore
 from core.collection.result_publisher import BufferedResultPublisher, NatsResultPublisher
 from core.collection.round_metadata import RedisRoundMetadataStore
-from core.collection.runtime import CollectionRequest, CollectionRuntime, CollectionRuntimeSettings, RunLease, Submission
+from core.collection.runtime import CollectionRequest, CollectionRuntime, CollectionRuntimeSettings, RunLease, Submission, _run_log_identity
 from core.collection.scheduler import CollectionScheduler
 from core.collection.yaml_target_policy import apply_executor_target_policy, apply_yaml_target_policy_async
 from core.infra.event_loop_monitor import EventLoopLagMonitor
@@ -104,7 +104,7 @@ class CollectionApplicationSettings:
         if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in workload_limits):
             raise ValueError("workload target limits must be positive integers")
         # 三个值是活跃工作负载之间的软配额权重，不是三把独立信号量。
-        # 它们允许小于全局窗口（例如 100/20/20 + 全局 160），剩余槽位
+        # 它们允许小于全局窗口（例如 80/20/20 + 全局 120），剩余槽位
         # 由有积压的工作负载借用；也允许测试或临时缩容时按比例归一化。
         if self.target_task_window <= 0:
             raise ValueError("TARGET_TASK_WINDOW must be greater than zero")
@@ -296,8 +296,8 @@ class CollectionApplication:
     async def submit(self, request: CollectionRequest) -> Submission:
         if _request_requires_metrics_stream(request) and not await metrics_transport_ready():
             logger.error(
-                "event=metrics_transport_not_ready task_id=%s plugin_ref=%s " "failed_stage=run_admission error_type=MetricsTransportNotReady",
-                safe_log_value(request.task_id),
+                "event=metrics_transport_not_ready %s plugin_ref=%s failed_stage=run_admission error_type=MetricsTransportNotReady",
+                _run_log_identity(request),
                 safe_log_value(request.plugin_ref),
             )
             submission = Submission(
@@ -392,6 +392,9 @@ class CollectionApplication:
         """在即时容量快照上附加仅供周期日志使用的计数器增量。"""
         snapshot = self.capacity_snapshot()
         for total_key, delta_key in (
+            ("nats_js_deadline_expired_total", "nats_js_deadline_expired_delta"),
+            ("nats_js_credit_wait_timeout_total", "nats_js_credit_wait_timeout_delta"),
+            ("nats_js_publish_call_timeout_total", "nats_js_publish_call_timeout_delta"),
             ("nats_js_puback_timeout_total", "nats_js_puback_timeout_delta"),
             ("nats_js_publish_retry_total", "nats_js_publish_retry_delta"),
             ("nats_js_publish_rejected_total", "nats_js_publish_rejected_delta"),
@@ -411,9 +414,11 @@ class CollectionApplication:
             "目标任务[等待执行=%s 正在执行=%s 本轮已完成=%s 累计已完成=%s] | "
             "目标并发槽位[已用=%s/%s 可用=%s 使用率=%s 峰值=%s] | "
             "配置[最大目标并发=%s 任务窗口=%s] | "
-            "发布队列[深度=%s/%s 使用率=%s 最老批次=%s P99等待=%s] | "
+            "发布队列[深度=%s/%s 使用率=%s 最老活动发布单元=%s 首次投递前P99=%s] | "
             "Payload[未终态=%s/%s] | "
-            "JetStream[在途=%s 等待信贷=%s PubAck-P99=%s 超时=%s(+%s) 重试=%s(+%s) 拒绝=%s(+%s)] | "
+            "JetStream[在途=%s 等待信贷=%s PubAck-P99=%s "
+            "截止超时=%s(+%s) 信贷超时=%s(+%s) 调用超时=%s(+%s) "
+            "PubAck超时=%s(+%s) 重试=%s(+%s) 未确认=%s(+%s)] | "
             "发布终态[等待=%s] | "
             "SNMP池[活跃Engine=%s 总Engine=%s 安全上限=%s 排空=%s 目标条目=%s/%s] | "
             "事件循环[当前延迟=%s P99延迟=%s] | "
@@ -451,6 +456,12 @@ class CollectionApplication:
                 "ms",
                 missing_default=0,
             ),
+            snapshot.get("nats_js_deadline_expired_total", 0),
+            snapshot.get("nats_js_deadline_expired_delta", 0),
+            snapshot.get("nats_js_credit_wait_timeout_total", 0),
+            snapshot.get("nats_js_credit_wait_timeout_delta", 0),
+            snapshot.get("nats_js_publish_call_timeout_total", 0),
+            snapshot.get("nats_js_publish_call_timeout_delta", 0),
             snapshot.get("nats_js_puback_timeout_total", 0),
             snapshot.get("nats_js_puback_timeout_delta", 0),
             snapshot.get("nats_js_publish_retry_total", 0),
@@ -521,8 +532,8 @@ class CollectionApplication:
                     await close_plugin()
                 except Exception as exc:  # noqa: BLE001 - 清理失败不覆盖 Run 原始结果
                     logger.exception(
-                        "event=collection_plugin_close_failed task_id=%s plugin_ref=%s " "failed_stage=plugin_close error_type=PluginCloseFailure",
-                        safe_log_value(request.task_id),
+                        "event=collection_plugin_close_failed %s plugin_ref=%s failed_stage=plugin_close error_type=PluginCloseFailure",
+                        _run_log_identity(request),
                         safe_log_value(request.plugin_ref),
                         exc_info=safe_exception_info(exc),
                     )
@@ -623,13 +634,19 @@ def _capacity_status(snapshot: dict[str, float | int]) -> tuple[str, str]:
         issues.append("Payload容量使用率超过80%")
     publish_deadline_ms = float(snapshot.get("configured_publish_total_timeout_ms", 0) or 0)
     if publish_deadline_ms > 0 and float(snapshot.get("publish_batch_age_ms", 0) or 0) > publish_deadline_ms:
-        issues.append("发布批次超过总期限")
+        issues.append("发布活动单元驻留较久(含等待，非发送超时)")
     if snapshot.get("nats_js_publish_waiting_messages", 0) > 0:
         issues.append("JetStream等待信贷")
+    if snapshot.get("nats_js_deadline_expired_delta", 0) > 0:
+        issues.append("发布截止本周期发生超时")
+    if snapshot.get("nats_js_credit_wait_timeout_delta", 0) > 0:
+        issues.append("JetStream信贷等待本周期发生超时")
+    if snapshot.get("nats_js_publish_call_timeout_delta", 0) > 0:
+        issues.append("JetStream调用本周期发生超时")
     if snapshot.get("nats_js_puback_timeout_delta", 0) > 0:
         issues.append("PubAck本周期发生超时")
     if snapshot.get("nats_js_publish_rejected_delta", 0) > 0:
-        issues.append("JetStream本周期发生拒绝")
+        issues.append("JetStream本周期存在未确认消息")
     if issues:
         return "需关注", "、".join(issues)
     if snapshot.get("active_runs", 0) == 0 and snapshot.get("target_slots_used", 0) == 0:

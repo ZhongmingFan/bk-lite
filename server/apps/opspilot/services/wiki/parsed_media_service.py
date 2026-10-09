@@ -9,6 +9,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+from urllib.parse import parse_qs, unquote, urlparse
 
 from django.core.files.base import ContentFile
 from django_minio_backend.models import MinioBackend
@@ -25,7 +26,13 @@ _DATA_URI_IMAGE_RE = re.compile(
 
 # 稳定 locator（可带 ./ 或 / 前缀；不依赖 alt，避免长描述漏改写）
 _MEDIA_LOCATOR_RE = re.compile(
-    r"(?:\.?/)?wiki/media/\d+/\d+/[a-f0-9]{16,}\.[a-z0-9]+",
+    r"(?:\.?/)?wiki/media/\d+/(?:\d+|pages)/[a-f0-9]{16,}\.[a-z0-9]+",
+    re.IGNORECASE,
+)
+
+# 已入库的同源媒体代理（相对或绝对）。重签时整段替换，避免只改 query 里的 locator。
+_STORED_MEDIA_PROXY_URL_RE = re.compile(
+    r"(?:https?://[^/\s\"'<>]+)?/api/proxy/opspilot/wiki_mgmt/media/\?[^\s\"'<>)\]]+",
     re.IGNORECASE,
 )
 
@@ -58,21 +65,27 @@ def _extension_for_content_type(content_type: str) -> str:
     return _CONTENT_TYPE_EXT.get(normalized, ".bin")
 
 
+def media_prefix_for_pages(knowledge_base_id) -> str:
+    return f"wiki/media/{int(knowledge_base_id)}/pages/"
+
+
 def _is_safe_media_locator(locator: str, *, knowledge_base_id=None, material_id=None) -> bool:
     parts = (locator or "").strip().replace("\\", "/").split("/")
     if len(parts) != 5:
         return False
-    root, kind, kb, mid, filename = parts
+    root, kind, kb, owner, filename = parts
     if root != "wiki" or kind != "media":
         return False
-    if not (kb.isdigit() and mid.isdigit() and filename):
+    owner_ok = owner.isdigit() or owner == "pages"
+    if not (kb.isdigit() and owner_ok and filename):
         return False
     if ".." in filename or "/" in filename or "\\" in filename:
         return False
     if knowledge_base_id is not None and int(kb) != int(knowledge_base_id):
         return False
-    if material_id is not None and int(mid) != int(material_id):
-        return False
+    if material_id is not None:
+        if not owner.isdigit() or int(owner) != int(material_id):
+            return False
     name, _, ext = filename.rpartition(".")
     if not name or not ext:
         return False
@@ -89,6 +102,21 @@ def save_media_bytes(material, data: bytes, content_type: str) -> str:
     if not _MEDIA_STORAGE.exists(path):
         _MEDIA_STORAGE.save(path, ContentFile(data))
     return path
+
+
+def save_page_media_bytes(knowledge_base_id, data: bytes, content_type: str) -> tuple[str, bool]:
+    """写入知识页共享图片，返回 (locator, created)。同一内容幂等。"""
+    digest = hashlib.sha256(data).hexdigest()
+    ext = _extension_for_content_type(content_type)
+    path = f"{media_prefix_for_pages(knowledge_base_id)}{digest}{ext}"
+    created = not _MEDIA_STORAGE.exists(path)
+    if created:
+        _MEDIA_STORAGE.save(path, ContentFile(data))
+    return path, created
+
+
+def collect_page_media_locators(text) -> set[str]:
+    return {_normalize_media_locator(match.group(0)) for match in _MEDIA_LOCATOR_RE.finditer(text or "")}
 
 
 def persist_embedded_images(material, markdown: str) -> str:
@@ -167,17 +195,77 @@ def _media_proxy_secret() -> bytes:
 
 
 def build_media_proxy_url(locator: str, *, expires_in: int = 7 * 24 * 3600) -> str:
-    """同源代理 URL（经 /api/proxy，img 无需 Bearer）。"""
+    """同源代理 URL（经 /api/proxy，img 无需 Bearer）。
+
+    若配置 WEB_BASE_URL，返回绝对地址，便于嵌入式跨域与 IM 抓取。
+    """
     import hashlib
     import hmac
     import time
     from urllib.parse import quote
 
+    from django.conf import settings
+
     locator = _normalize_media_locator(locator)
     exp = int(time.time()) + int(expires_in)
     payload = f"{locator}:{exp}".encode("utf-8")
     sig = hmac.new(_media_proxy_secret(), payload, hashlib.sha256).hexdigest()
-    return "/api/proxy/opspilot/wiki_mgmt/media/" f"?locator={quote(locator, safe='')}" f"&exp={exp}&sig={sig}"
+    path = "/api/proxy/opspilot/wiki_mgmt/media/" f"?locator={quote(locator, safe='')}" f"&exp={exp}&sig={sig}"
+    base = (getattr(settings, "WEB_BASE_URL", "") or "").rstrip("/")
+    if base:
+        return f"{base}{path}"
+    return path
+
+
+def locator_from_stored_media_url(url: str) -> str | None:
+    """从已入库的媒体代理 URL 取出 locator。不校验 exp/sig，过期链接仍可重签。"""
+    value = (url or "").strip()
+    if not value:
+        return None
+    if value.startswith("/api/proxy/"):
+        value = "http://local.invalid" + value
+    elif "wiki_mgmt/media" in value and "://" not in value:
+        value = "http://local.invalid" + (value if value.startswith("/") else f"/{value}")
+    parsed = urlparse(value)
+    if "wiki_mgmt/media" not in (parsed.path or ""):
+        return None
+    raw = (parse_qs(parsed.query or "").get("locator") or [None])[0]
+    if not raw:
+        return None
+    locator = _normalize_media_locator(unquote(raw))
+    if not _is_safe_media_locator(locator):
+        return None
+    return locator
+
+
+def history_media_proxy_url(locator: str) -> str:
+    """会话历史用的同源相对地址。浏览器从当前站点加载，不带 WEB_BASE_URL。"""
+    url = build_media_proxy_url(locator)
+    marker = "/api/proxy/opspilot/wiki_mgmt/media/"
+    index = url.find(marker)
+    if index >= 0:
+        return url[index:]
+    return url
+
+
+def resign_stored_media_urls(text: str) -> str:
+    """把正文里的媒体代理 URL 换成当前密钥下的新签名。
+
+    会话历史把签名 URL 原样入库。读取时重签，7 天过期或 SECRET_KEY 轮换后仍能展示。
+    公开代理仍拒绝过期 HMAC。无法识别的链接保持原样。
+    """
+    body = text or ""
+    if "wiki_mgmt/media" not in body:
+        return body
+
+    def repl(match: re.Match) -> str:
+        url = match.group(0)
+        locator = locator_from_stored_media_url(url)
+        if not locator:
+            return url
+        return history_media_proxy_url(locator)
+
+    return _STORED_MEDIA_PROXY_URL_RE.sub(repl, body)
 
 
 def verify_media_proxy_request(locator: str, exp: str | int | None, sig: str | None) -> bool:
@@ -427,3 +515,51 @@ def _delete_media_by_prefix(prefix: str) -> dict:
         else:
             skipped += 1
     return {"prefix": prefix, "deleted": deleted, "skipped": skipped}
+
+
+_IMPORT_STAGING_RE = re.compile(r"^wiki/import-staging/(\d+)/([a-f0-9]{64})\.zip$")
+
+
+def import_archive_locator(knowledge_base_id, digest) -> str:
+    kb_id = int(knowledge_base_id)
+    hex_digest = str(digest or "").strip().lower()
+    if kb_id <= 0 or not re.fullmatch(r"[a-f0-9]{64}", hex_digest):
+        raise ValueError("invalid import archive identity")
+    return f"wiki/import-staging/{kb_id}/{hex_digest}.zip"
+
+
+def _safe_import_archive_locator(locator, *, knowledge_base_id=None) -> str | None:
+    path = (locator or "").strip().replace("\\", "/")
+    match = _IMPORT_STAGING_RE.fullmatch(path)
+    if match is None:
+        return None
+    if knowledge_base_id is not None and int(match.group(1)) != int(knowledge_base_id):
+        return None
+    return path
+
+
+def save_import_archive_bytes(knowledge_base_id, digest, data: bytes) -> str:
+    path = import_archive_locator(knowledge_base_id, digest)
+    if not _MEDIA_STORAGE.exists(path):
+        _MEDIA_STORAGE.save(path, ContentFile(data))
+    return path
+
+
+def read_import_archive_bytes(locator, *, knowledge_base_id) -> bytes:
+    path = _safe_import_archive_locator(locator, knowledge_base_id=knowledge_base_id)
+    if not path:
+        raise FileNotFoundError(locator)
+    with _MEDIA_STORAGE.open(path, "rb") as handle:
+        return handle.read()
+
+
+def delete_import_archive(locator, *, knowledge_base_id) -> bool:
+    path = _safe_import_archive_locator(locator, knowledge_base_id=knowledge_base_id)
+    if not path:
+        return False
+    try:
+        _MEDIA_STORAGE.delete(path)
+        return True
+    except Exception:
+        logger.exception("wiki import archive 删除失败 locator=%s", path)
+        return False

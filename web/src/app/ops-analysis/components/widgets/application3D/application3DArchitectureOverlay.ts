@@ -154,7 +154,14 @@ export const expandArchitectureCabinetWorldBox = (
 export const formatArchitectureHostState = (
   state: string | undefined,
   t: Application3DTranslate,
+  reason?: string,
 ) => {
+  if (reason === 'unmonitored') {
+    return t('dashboard.application3DHostUnmonitored', '未接入监控');
+  }
+  if (reason === 'monitor_unreadable') {
+    return t('dashboard.application3DHostMonitorUnreadable', '监控不可读');
+  }
   if (state === 'normal') return t('dashboard.application3DStatus_normal', '运行正常');
   if (state === 'alarming') return t('dashboard.application3DStatus_alarming', '告警');
   return t('dashboard.application3DStatus_unknown', '状态未知');
@@ -163,8 +170,18 @@ export const formatArchitectureHostState = (
 export const formatArchitectureHostAlarmCount = (count: number | null | undefined) =>
   count == null ? UNKNOWN_STATUS_BADGE : String(count);
 
-export const formatArchitectureHostSeverity = (label: string | null | undefined) =>
-  label?.trim() ? label : UNKNOWN_STATUS_BADGE;
+export const formatArchitectureHostSeverity = (
+  label: string | null | undefined,
+  severityId?: string | null,
+  t?: Application3DTranslate,
+) => {
+  const raw = label?.trim() ? label.trim() : '';
+  const id = severityId?.trim();
+  if (id && t) {
+    return t(`dashboard.application3DSeverity_${id}`, raw || undefined);
+  }
+  return raw || UNKNOWN_STATUS_BADGE;
+};
 
 export const formatArchitectureHostIp = (ip: string | undefined) =>
   ip?.trim() ? ip : UNKNOWN_STATUS_BADGE;

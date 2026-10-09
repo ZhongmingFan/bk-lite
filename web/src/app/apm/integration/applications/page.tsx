@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { AppstoreAddOutlined, PlusOutlined, SearchOutlined } from '@ant-design/icons';
-import { Button, Drawer, Form, Input, message, Space, type TableColumnsType } from 'antd';
+import { Button, Drawer, Form, Input, Popconfirm, message, Space, type TableColumnsType } from 'antd';
 import useApmApi from '@/app/apm/api';
 import ApmDataTable, { APM_TABLE_COLUMN_WIDTHS } from '@/app/apm/components/apm-data-table';
 import ApmRouteShell, { ApmSurface } from '@/app/apm/components/apm-route-shell';
@@ -12,6 +12,7 @@ import CatalogState, { catalogErrorKind, type CatalogStateKind } from '@/app/apm
 import { formatDateTime } from '@/app/apm/components/metric-format';
 import type { ApmApplication, ApmApplicationInput } from '@/app/apm/types';
 import FilterToolbar from '@/components/filter-toolbar';
+import CatalogScopeSegmented from '@/components/catalog-scope-segmented';
 import GroupTreeSelect from '@/components/group-tree-select';
 import Permission from '@/components/permission';
 import { useUserInfoContext } from '@/context/userInfo';
@@ -24,17 +25,19 @@ export default function ApmApplicationsPage() {
   const { t } = useTranslation();
   const router = useRouter();
   const [messageApi, messageContextHolder] = message.useMessage();
-  const { getApplications, createApplication, updateApplication, isLoading } = useApmApi();
+  const { getApplications, createApplication, updateApplication, deleteApplication, isLoading } = useApmApi();
   const { flatGroups } = useUserInfoContext();
   const [form] = Form.useForm<ApmApplicationInput>();
   const [applications, setApplications] = useState<ApmApplication[]>([]);
   const [editing, setEditing] = useState<ApmApplication | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [keyword, setKeyword] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [state, setState] = useState<PageState>('loading');
+  const [unassignedOnly, setUnassignedOnly] = useState(false);
 
   const groupNames = useMemo(
     () => new Map(flatGroups.map((group) => [Number(group.id), group.name])),
@@ -45,14 +48,14 @@ export default function ApmApplicationsPage() {
     if (isLoading) return;
     setState('loading');
     try {
-      const items = await getApplications();
+      const items = await getApplications(unassignedOnly ? { params: { unassigned: true } } : {});
       const visible = items.filter((item) => !item.is_builtin);
       setApplications(visible);
       setState(visible.length ? 'ready' : 'empty');
     } catch (error) {
       setState(catalogErrorKind(error));
     }
-  }, [getApplications, isLoading]);
+  }, [getApplications, isLoading, unassignedOnly]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -72,6 +75,17 @@ export default function ApmApplicationsPage() {
       organization_ids: application.organization_ids,
     });
     setDrawerOpen(true);
+  };
+
+  const remove = async (application: ApmApplication) => {
+    setDeletingId(application.id);
+    try {
+      await deleteApplication(application.id);
+      messageApi.success(t('apm.applications.deleted', '应用已删除'));
+      await load();
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   const submit = async (values: ApmApplicationInput) => {
@@ -129,13 +143,13 @@ export default function ApmApplicationsPage() {
       render: (values: number[]) => (
         <EllipsisWithTooltip
           className="truncate"
-          text={values.map((id) => groupNames.get(id) ?? `#${id}`).join('、') || '—'}
+          text={values?.length ? values.map((id) => groupNames.get(id) ?? `#${id}`).join('、') : t('common.unassigned')}
         />
       ),
     },
     { title: t('apm.applications.updatedAt', '更新时间'), dataIndex: 'updated_at', width: APM_TABLE_COLUMN_WIDTHS.timestamp, responsive: ['xxl'], className: 'tabular-nums', render: (value) => formatDateTime(value, false) },
     {
-      title: t('apm.common.operation', '操作'), key: 'action', width: APM_TABLE_COLUMN_WIDTHS.actionGroup, align: 'right', fixed: 'right',
+      title: t('apm.common.operation', '操作'), key: 'action', width: APM_TABLE_COLUMN_WIDTHS.actionGroupWide, align: 'right', fixed: 'right',
       render: (_, item) => (
         <Permission requiredPermissions={['Operate']} permissionPath="/apm/integration/applications">
           <Space className="whitespace-nowrap" size={8}>
@@ -158,6 +172,21 @@ export default function ApmApplicationsPage() {
             <Button className="!px-0" size="small" type="link" onClick={() => openEdit(item)}>
               {t('common.edit', '编辑')}
             </Button>
+            <Popconfirm
+              title={t('apm.applications.deleteConfirm', '确认删除这个应用？')}
+              description={
+                item.service_count
+                  ? t('apm.applications.deleteWithServicesHint', '其下 {count} 个服务将不再归属此应用，服务目录不再展示它们；调用链数据仍保留。', { count: item.service_count })
+                  : t('apm.applications.deleteHint', '删除后不可恢复。调用链数据仍保留。')
+              }
+              okButtonProps={{ danger: true, loading: deletingId === item.id }}
+              okText={t('common.delete', '删除')}
+              onConfirm={() => void remove(item)}
+            >
+              <Button className="!px-0" danger disabled={deletingId === item.id} size="small" type="link">
+                {t('common.delete', '删除')}
+              </Button>
+            </Popconfirm>
           </Space>
         </Permission>
       ),
@@ -171,9 +200,18 @@ export default function ApmApplicationsPage() {
         <div className="flex flex-col gap-4">
           <FilterToolbar align="start" spacing="flush" className="w-full" contentClassName="w-full">
             <Input allowClear className="min-w-0 flex-1 md:max-w-sm" prefix={<SearchOutlined aria-hidden="true" />} placeholder={t('apm.applications.searchPlaceholder', '搜索应用 ID / 名称')} value={keyword} onChange={(event) => { setKeyword(event.target.value); setPage(1); }} />
-            <Permission className="ml-auto" requiredPermissions={['Operate']} permissionPath="/apm/integration/applications">
-              <Button type="primary" icon={<PlusOutlined aria-hidden="true" />} onClick={openCreate}>{t('apm.applications.create', '创建应用')}</Button>
-            </Permission>
+            <div className="ml-auto flex items-center gap-2">
+              <CatalogScopeSegmented
+                unassignedOnly={unassignedOnly}
+                onChange={(checked) => {
+                  setUnassignedOnly(checked);
+                  setPage(1);
+                }}
+              />
+              <Permission requiredPermissions={['Operate']} permissionPath="/apm/integration/applications">
+                <Button type="primary" icon={<PlusOutlined aria-hidden="true" />} onClick={openCreate}>{t('apm.applications.create', '创建应用')}</Button>
+              </Permission>
+            </div>
           </FilterToolbar>
           {state === 'ready' ? (
             <ApmDataTable

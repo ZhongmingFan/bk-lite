@@ -40,20 +40,12 @@ assert.match(api, /target_directory_id: targetDirectoryId/);
 assert.match(api, /base_generation_id: baseGenerationId/);
 assert.match(api, /structure_version: structureVersion/);
 
-assert.match(
-  settings,
-  /name=["']schema_md["']/,
-  "Settings keeps schema as markdown, not structured editor",
-);
-assert.match(
-  settings,
-  /grid-cols-1 gap-(?:x-)?6 lg:grid-cols-2/,
-  "Purpose & Schema remain a two-column markdown layout",
-);
+assert.match(settings, /name=["']introduction["']/);
+assert.doesNotMatch(settings, /purpose_md|schema_md/);
 assert.doesNotMatch(
   settings,
-  /<WikiStructureEditor/,
-  "Settings must not embed structured Schema editor",
+  /WikiStructureEditor/,
+  "Settings must not mount a separate directory structure editor",
 );
 assert.match(
   pageTab,

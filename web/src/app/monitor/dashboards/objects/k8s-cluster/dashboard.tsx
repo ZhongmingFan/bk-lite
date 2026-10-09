@@ -1,9 +1,13 @@
 'use client';
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { DashboardSectionLabel } from '../common/dashboard-components';
 import type { Dayjs } from 'dayjs';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
+import { Button } from 'antd';
 import { DatabaseOutlined, CloudServerOutlined, AppstoreOutlined, DeploymentUnitOutlined, PartitionOutlined, ReloadOutlined } from '@ant-design/icons';
+import { applyScreenAwareHref, useScreenAwareRouter } from '@/console-layout';
+import { useTranslation } from '@/utils/i18n';
 import useViewApi from '@/app/monitor/api/view';
 import useMonitorApi from '@/app/monitor/api';
 import MetricViews from '@/app/monitor/components/metric-views';
@@ -24,6 +28,9 @@ import {
   normalizeDisplayText,
   isOpaqueIdentifier,
   resolveDashboardInstanceIdentity,
+  resolveDashboardInstanceIdValues,
+  encodeInstanceIdValuesParam,
+  isInstanceOptionForIdentity,
   formatMetricValue,
   buildPreviousPeriodTimeValues,
   getPeriodCompare,
@@ -47,14 +54,14 @@ import {
   QUERY_CONCURRENCY,
   TREND_METRICS,
   TOP_N,
+  NS_TOP_N,
   HEALTH_GREEN,
   HEALTH_AMBER,
   HEALTH_RED,
   NEUTRAL_BLUE,
   NEUTRAL_INK,
   RING_REST,
-  RING_DONE,
-  NS_LABEL
+  RING_DONE
 } from './queries';
 import {
   DashboardDisplayMode,
@@ -63,6 +70,7 @@ import {
 } from '../../shared/utils/display-mode-route';
 import {
   latestScalar,
+  latestScalarOrNull,
   seriesLatestByLabel,
   phaseCount,
   saturationColor,
@@ -70,6 +78,13 @@ import {
   coresDisplay,
   bytesDisplay
 } from './parse';
+import {
+  K8S_VIEW_NODE_MEM_ORDERING,
+  K8S_VIEW_POD_CPU_ORDERING,
+  K8S_VIEW_POD_MEM_ORDERING,
+  buildK8sClusterViewListHref,
+  resolveMonitorObjectIdByName
+} from './view-list-link';
 import styles from './index.module.scss';
 
 interface InstanceOption {
@@ -103,13 +118,16 @@ const sumSeries = (arrs: ChartData[][]): ChartData[] => {
 };
 
 export default function K8sClusterDashboardPage() {
-  const router = useRouter();
+  const router = useScreenAwareRouter();
+  const { t } = useTranslation();
   const searchParams = useSearchParams();
   const { getInstanceQuery } = useViewApi();
   const monitorApi = useMonitorApi();
   const getInstanceListRef = useRef(monitorApi.getInstanceList);
+  const getMonitorObjectRef = useRef(monitorApi.getMonitorObject);
   useEffect(() => {
     getInstanceListRef.current = monitorApi.getInstanceList;
+    getMonitorObjectRef.current = monitorApi.getMonitorObject;
   });
 
   const monitorObjectId = searchParams.get('monitorObjId') || '';
@@ -139,6 +157,10 @@ export default function K8sClusterDashboardPage() {
   const [queryTimeRange, setQueryTimeRange] = useState<{ startMs: number; endMs: number } | null>(null);
   const [instanceOptions, setInstanceOptions] = useState<InstanceOption[]>([]);
   const [instanceLoading, setInstanceLoading] = useState(false);
+  const [viewObjectIds, setViewObjectIds] = useState<{ pod: string; node: string }>({
+    pod: '',
+    node: ''
+  });
   const [metricsRefreshSignal, setMetricsRefreshSignal] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const loadSequence = useLoadSequence();
@@ -176,7 +198,7 @@ export default function K8sClusterDashboardPage() {
           map.set(value, {
             label,
             value,
-            instanceIdValues: Array.isArray(item.instance_id_values) && item.instance_id_values.length ? item.instance_id_values : [value],
+            instanceIdValues: resolveDashboardInstanceIdValues(item),
             searchTokens: buildInstanceSearchTokens(item, label),
             interval: Number(item.interval) || undefined
           });
@@ -193,7 +215,28 @@ export default function K8sClusterDashboardPage() {
     };
   }, [monitorObjectId]);
 
-  const currentOption = instanceOptions.find((o) => o.value === String(instanceId));
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const data = await getMonitorObjectRef.current({ include_invisible: true });
+        if (!active) return;
+        const pod = resolveMonitorObjectIdByName(data, 'Pod');
+        const node = resolveMonitorObjectIdByName(data, 'Node');
+        setViewObjectIds((prev) => ({
+          pod: pod || prev.pod,
+          node: node || prev.node
+        }));
+      } catch {
+        // 保留上次解析到的对象 id，「更多」不会因一次失败永久消失。
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const currentOption = instanceOptions.find((o) => isInstanceOptionForIdentity(o, instanceId, idValues));
   const currentInstanceInterval = currentOption?.interval;
 
   // 数据加载:hero 先到,面板后到
@@ -302,7 +345,9 @@ export default function K8sClusterDashboardPage() {
     collectionMetric.loadState,
     collectionMetric.viewData,
     collectionStatusRange?.startMs ?? Date.now() - 15 * 60_000,
-    collectionStatusRange?.endMs ?? Date.now()
+    collectionStatusRange?.endMs ?? Date.now(),
+    undefined,
+    currentInstanceInterval ? currentInstanceInterval * 1000 : undefined
   );
   const collectionStatusTimelineHint = collectionStatusRange
     ? formatCollectionStatusTimelineHint(collectionStatusRange.startMs, collectionStatusRange.endMs)
@@ -392,7 +437,8 @@ export default function K8sClusterDashboardPage() {
   // 工作负载可用度条
   const workloadBars = useMemo(() => {
     const mk = (label: string, key: string, color: string) => {
-      const v = latestScalar(raw[key]);
+      const v = latestScalarOrNull(raw[key]);
+      if (v === null) return { label, value: 0, display: '--', color, max: 100 };
       return { label, value: v, display: pct(v), color, max: 100 };
     };
     return [
@@ -444,7 +490,10 @@ export default function K8sClusterDashboardPage() {
   // 资源消耗 Top-N
   const topPodCpuBars = useMemo(() => buildTopBars(raw.topPodCpu, 'pod', '#9254de', coresDisplay), [raw.topPodCpu]);
   const topPodMemBars = useMemo(() => buildTopBars(raw.topPodMem, 'pod', '#13c2c2', bytesDisplay), [raw.topPodMem]);
-  const topNsMemBars = useMemo(() => buildTopBars(raw.topNsMem, NS_LABEL, '#13c2c2', bytesDisplay), [raw.topNsMem]);
+  const topNsMemBars = useMemo(
+    () => buildTopBars(raw.topNsMem, ['namespace', 'container_label_io_kubernetes_pod_namespace'], '#13c2c2', bytesDisplay, NS_TOP_N),
+    [raw.topNsMem]
+  );
 
   // ── 事件 ──
   const onTimeChange = (vals: number[], originValue: number | null) => {
@@ -462,7 +511,11 @@ export default function K8sClusterDashboardPage() {
     const opt = instanceOptions.find((o) => o.value === value);
     const params = new URLSearchParams(Array.from(searchParams.entries()));
     params.set('instance_id', value);
-    params.set('instance_id_values', (opt?.instanceIdValues || [value]).join(','));
+    params.set('instance_id_values', encodeInstanceIdValuesParam(
+      opt?.instanceIdValues?.length
+        ? opt.instanceIdValues
+        : resolveDashboardInstanceIdValues({ instance_id: value }),
+    ));
     params.set('instance_name', opt?.label || value);
     router.push(`?${params.toString()}`);
   };
@@ -475,6 +528,29 @@ export default function K8sClusterDashboardPage() {
   };
 
   const guide = (label: string, detail: string) => [{ label, detail }];
+
+  const clusterFilterId = idValues[0] || String(instanceId || '');
+  const moreHref = (objectId: string, ordering?: string) =>
+    buildK8sClusterViewListHref({
+      objectId,
+      clusterInstanceId: clusterFilterId,
+      ordering
+    });
+  const podCpuMoreHref = moreHref(viewObjectIds.pod, K8S_VIEW_POD_CPU_ORDERING);
+  const podMemMoreHref = moreHref(viewObjectIds.pod, K8S_VIEW_POD_MEM_ORDERING);
+  const podRestartMoreHref = moreHref(viewObjectIds.pod);
+  const nodeMemMoreHref = moreHref(viewObjectIds.node, K8S_VIEW_NODE_MEM_ORDERING);
+  const renderMore = (href: string | null) =>
+    href ? (
+      <Button
+        type="link"
+        size="small"
+        className="shrink-0 px-0"
+        href={applyScreenAwareHref(href, searchParams)}
+      >
+        {t('common.more')}
+      </Button>
+    ) : null;
 
   return (
     <div className={styles.page}>
@@ -540,7 +616,7 @@ export default function K8sClusterDashboardPage() {
         ) : (
           <>
             {/* Tier 1 · 概览:6 张等宽卡(采集状态 + 5 KPI),全 span2(=12) */}
-            <div className={styles.sectionLabel}>健康概览</div>
+            <DashboardSectionLabel styles={styles}>健康概览</DashboardSectionLabel>
             <section className={styles.dashboardSection}>
               <div className={styles.sectionGrid}>
                 <CollectionStatusCard
@@ -572,7 +648,7 @@ export default function K8sClusterDashboardPage() {
             </section>
 
         {/* Tier 2 · 健康构成:三环统一 span4 */}
-        <div className={styles.sectionLabel}>健康构成</div>
+        <DashboardSectionLabel styles={styles}>健康构成</DashboardSectionLabel>
         <section className={styles.dashboardSection}>
           <div className={styles.sectionGrid}>
             <RingChartPanel
@@ -609,7 +685,7 @@ export default function K8sClusterDashboardPage() {
         </section>
 
         {/* Tier 3 · 资源水位:趋势(span8)+ 容量配比(span4) */}
-        <div className={styles.sectionLabel}>资源水位</div>
+        <DashboardSectionLabel styles={styles}>资源水位</DashboardSectionLabel>
         <section className={styles.dashboardSection}>
           <div className={styles.sectionGrid}>
             <TrendChartPanel
@@ -637,7 +713,7 @@ export default function K8sClusterDashboardPage() {
         </section>
 
         {/* Tier 4 · 热点排行:Pod 三个维度拆成 3 张独立小卡,其余各占 span4 */}
-        <div className={styles.sectionLabel}>热点排行</div>
+        <DashboardSectionLabel styles={styles}>热点排行</DashboardSectionLabel>
         <section className={styles.dashboardSection}>
           <div className={styles.sectionGrid}>
             <HorizontalBarPanel
@@ -645,6 +721,7 @@ export default function K8sClusterDashboardPage() {
               subtitle="核数 · 5m"
               guide={guide('Top Pod · CPU', 'CPU 消耗最高的 Pod。')}
               items={topPodCpuBars}
+              headerAction={renderMore(podCpuMoreHref)}
               tiered
               className={styles.span4}
               styles={styles}
@@ -653,6 +730,7 @@ export default function K8sClusterDashboardPage() {
               title="Top Pod · 内存"
               guide={guide('Top Pod · 内存', '内存占用最高的 Pod。')}
               items={topPodMemBars}
+              headerAction={renderMore(podMemMoreHref)}
               tiered
               className={styles.span4}
               styles={styles}
@@ -662,6 +740,7 @@ export default function K8sClusterDashboardPage() {
               subtitle="近 1h"
               guide={guide('重启 Top Pod', '近 1 小时容器重启次数最多的 Pod。')}
               items={restartBars}
+              headerAction={renderMore(podRestartMoreHref)}
               tiered
               className={styles.span4}
               styles={styles}
@@ -674,6 +753,7 @@ export default function K8sClusterDashboardPage() {
                   title="节点内存 Top"
                   guide={guide('节点内存 Top', '内存使用率最高的节点。')}
                   items={nodeMemBars}
+                  headerAction={renderMore(nodeMemMoreHref)}
                   tiered
                   className={styles.span4}
                   styles={styles}
@@ -683,6 +763,7 @@ export default function K8sClusterDashboardPage() {
                   guide={guide('Top 命名空间 · 内存', '内存占用最高的命名空间。')}
                   items={topNsMemBars}
                   tiered
+                  isEmpty={topNsMemBars.length === 0}
                   className={styles.span4}
                   styles={styles}
                 />
@@ -690,6 +771,7 @@ export default function K8sClusterDashboardPage() {
                   title="工作负载可用度"
                   guide={guide('工作负载可用度', '各类工作负载可用副本占期望副本的比例。')}
                   items={workloadBars}
+                  isEmpty={workloadBars.every((item) => item.display === '--')}
                   className={styles.span4}
                   styles={styles}
                 />

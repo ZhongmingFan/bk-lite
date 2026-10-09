@@ -118,7 +118,7 @@ NETWORK_TOPOLOGY_FACTS = "network_topology_facts_info_gauge"
 PROTOCOL_METRIC_MAP = {
     "mysql": ["mysql_info_gauge"],
     "postgresql": ["postgresql_info_gauge"],
-    "oracle": ["oracle_info_gauge"],
+    "oracle": ["oracle_info_gauge", "oracle_instance_info_gauge", "oracle_pdb_info_gauge"],
     "mssql": ["mssql_info_gauge"],
 }
 
@@ -136,7 +136,15 @@ ALIYUN_COLLECT_CLUSTER = [
 
 HOST_COLLECT_METRIC = {
     "host": ["host_info_gauge", "host_proc_usage_info_gauge"],
-    "physcial_server": ["physcial_server_info_gauge", "disk_info_gauge", "memory_info_gauge", "nic_info_gauge", "gpu_info_gauge"],
+    "physcial_server": [
+        "physcial_server_info_gauge",
+        "disk_info_gauge",
+        "memory_info_gauge",
+        "nic_info_gauge",
+        "gpu_info_gauge",
+        "storage_controller_info_gauge",
+        "psu_info_gauge",
+    ],
 }
 
 DB_COLLECT_METRIC_MAP = {

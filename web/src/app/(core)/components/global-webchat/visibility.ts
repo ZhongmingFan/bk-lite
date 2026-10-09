@@ -6,6 +6,10 @@ export const GLOBAL_WEBCHAT_EXCLUDED_PATHS = [
   '/no-found',
 ];
 
+export const GLOBAL_WEBCHAT_EXCLUDED_PATH_PREFIXES = [
+  '/ops-analysis/share/',
+];
+
 export function hasOpsPilotClientAccess(
   apps: Array<{ name?: string | null }> | null | undefined
 ): boolean {
@@ -16,7 +20,10 @@ export function isGlobalWebchatExcludedPath(pathname: string | null | undefined)
   if (!pathname) {
     return true;
   }
-  return GLOBAL_WEBCHAT_EXCLUDED_PATHS.includes(pathname);
+  if (GLOBAL_WEBCHAT_EXCLUDED_PATHS.includes(pathname)) {
+    return true;
+  }
+  return GLOBAL_WEBCHAT_EXCLUDED_PATH_PREFIXES.some((prefix) => pathname.startsWith(prefix));
 }
 
 export function shouldMountGlobalWebchat(options: {
@@ -25,11 +32,13 @@ export function shouldMountGlobalWebchat(options: {
   userInfoLoading?: boolean;
   hasOpsPilotAccess: boolean;
   pathname: string | null | undefined;
+  screenMode?: boolean;
+  appViewFullscreen?: boolean;
 }): boolean {
   if (!options.authenticated || options.clientLoading || options.userInfoLoading) {
     return false;
   }
-  if (!options.hasOpsPilotAccess) {
+  if (!options.hasOpsPilotAccess || options.screenMode || options.appViewFullscreen) {
     return false;
   }
   return !isGlobalWebchatExcludedPath(options.pathname);
@@ -42,8 +51,15 @@ export function shouldKeepGlobalWebchat(options: {
   hasOpsPilotAccess: boolean;
   pathname: string | null | undefined;
   alreadyMounted: boolean;
+  screenMode?: boolean;
+  appViewFullscreen?: boolean;
 }): boolean {
-  if (!options.authenticated || isGlobalWebchatExcludedPath(options.pathname)) {
+  if (
+    !options.authenticated ||
+    options.screenMode ||
+    options.appViewFullscreen ||
+    isGlobalWebchatExcludedPath(options.pathname)
+  ) {
     return false;
   }
   if (options.userInfoLoading && !options.alreadyMounted) {

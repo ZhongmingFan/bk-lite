@@ -4,7 +4,9 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { renderWithApmIntl } from '@/app/apm/__tests__/intl';
+import { HandledRequestError } from '@/utils/request';
 import ApmTraceDetailPage from '../page';
+import { getTextContext } from '../trace.pilot';
 
 const api = {
   getTrace: vi.fn(),
@@ -25,6 +27,7 @@ vi.mock('@/app/apm/components/apm-route-shell', () => ({
 }));
 
 beforeEach(() => {
+  window.history.replaceState({}, '', '/apm/explore/traces/trace-1');
   window.matchMedia = vi.fn().mockImplementation((query: string) => ({
     matches: query.includes('min-width'),
     media: query,
@@ -84,6 +87,18 @@ afterEach(() => {
 });
 
 describe('APM Trace 详情', () => {
+  it('Trace 超限时展示数据量过大而不是存储不可用', async () => {
+    api.getTrace.mockRejectedValue(new HandledRequestError('VictoriaTraces 响应超过大小上限', {
+      status: 503,
+      code: 'query_too_large',
+    }));
+
+    renderWithApmIntl(<ApmTraceDetailPage />);
+
+    expect(await screen.findByText('本次查询数据量过大')).not.toBeNull();
+    expect(screen.queryByText('遥测存储暂不可用')).toBeNull();
+  });
+
   it('默认选中首个错误 Span，并支持跳到首个错误', async () => {
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     renderWithApmIntl(<ApmTraceDetailPage />);
@@ -100,7 +115,8 @@ describe('APM Trace 详情', () => {
     expect((await screen.findAllByText('POST /pay')).length).toBeGreaterThan(0);
 
     await user.click(screen.getByRole('radio', { name: '火焰图' }));
-    expect(await screen.findByLabelText('checkout · POST /pay')).not.toBeNull();
+    const flameSpan = await screen.findByLabelText('checkout · POST /pay');
+    expect(flameSpan.parentElement?.className).not.toContain('min-w-[640px]');
     expect(screen.getByRole('radio', { name: '火焰图' })).not.toBeNull();
 
     await user.click(screen.getByRole('button', { name: '跳到首个错误' }));
@@ -111,5 +127,17 @@ describe('APM Trace 详情', () => {
     const columnWidths = Array.from(attributeTable?.querySelectorAll('colgroup col') ?? [])
       .map((column) => (column as HTMLElement).style.width);
     expect(columnWidths).toEqual(['58%', '42%']);
+  });
+
+  it('页面问答快照包含服务耗时分解和选中 Span 属性', async () => {
+    renderWithApmIntl(<ApmTraceDetailPage />);
+    await waitFor(() => expect(screen.getByText('http.status_code')).not.toBeNull());
+
+    const snapshot = getTextContext();
+    const byId = Object.fromEntries((snapshot.sections || []).map((section) => [section.id, section.content]));
+    expect(byId['apm-trace-breakdown'] || '').toContain('checkout');
+    expect(byId['apm-trace-selected'] || '').toContain('POST /pay');
+    expect(byId['apm-trace-selected'] || '').toContain('http.status_code');
+    expect(byId['apm-trace-selected'] || '').toContain('500');
   });
 });

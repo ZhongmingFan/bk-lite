@@ -94,6 +94,33 @@ def is_complete_round(summary) -> bool:
     )
 
 
+def round_complete_skip_reason(request: CollectionRequest, summary) -> str | None:
+    """返回完成标记不能发布的稳定原因；None 表示满足发布契约。"""
+    if resolve_round_marker_identity(request.params) is None:
+        return "not_applicable"
+    if (
+        summary.total <= 0
+        or summary.collection_succeeded != summary.total
+        or summary.collection_failed
+        or summary.unreachable
+        or summary.deferred
+        or summary.skipped
+    ):
+        return "collection_incomplete"
+    if summary.publish_unknown:
+        return "delivery_unknown"
+    if (
+        summary.publish_failed
+        or summary.publish_event_failed
+        or summary.publish_permanent_failed
+        or summary.publish_succeeded + summary.publish_not_applicable != summary.total
+    ):
+        return "delivery_incomplete"
+    if summary.publish_succeeded <= 0:
+        return "no_publishable_metrics"
+    return None
+
+
 def _escape_label(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ").replace("\r", " ")
 
@@ -140,8 +167,7 @@ async def publish_round_complete_marker(
         await metrics_publish({}, payload, params, request.task_id)
     except Exception as error:  # noqa: BLE001 - 标记失败不得改写已发布数据结果
         logger.error(
-            "event=round_complete_marker_failed task_id=%s instance_id=%s model_id=%s " "round_ts=%s failed_stage=%s error_type=%s",
-            safe_log_value(request.task_id),
+            "event=round_complete_marker_failed instance_id=%s model_id=%s round_ts=%s failed_stage=%s error_type=%s",
             safe_log_value(instance_id),
             safe_log_value(model_id),
             round_ts,
@@ -151,8 +177,7 @@ async def publish_round_complete_marker(
         )
         return False
     logger.info(
-        "event=round_complete_marker_published task_id=%s instance_id=%s " "model_id=%s round_ts=%s",
-        request.task_id,
+        "event=round_complete_marker_published instance_id=%s model_id=%s round_ts=%s",
         instance_id,
         model_id,
         round_ts,

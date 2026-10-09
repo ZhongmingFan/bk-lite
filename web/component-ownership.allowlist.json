@@ -20,7 +20,9 @@
     { "component": "routed-detail-layout-shell", "reason": "通用路由详情页布局骨架", "contractStory": "layout-family.stories.tsx" },
     { "component": "summary-detail-layout-shell", "reason": "通用摘要与详情组合布局", "contractStory": "layout-family.stories.tsx" },
     { "component": "tree-workspace-shell", "reason": "通用树与工作区组合布局", "contractStory": "layout-family.stories.tsx" },
-    { "component": "workspace-panel", "reason": "通用工作区面板容器", "contractStory": "layout-family.stories.tsx" }
+    { "component": "workspace-panel", "reason": "通用工作区面板容器", "contractStory": "layout-family.stories.tsx" },
+    { "component": "list-page-header", "reason": "通用实体列表页头：左标题短描述、右操作成组", "contractStory": "entity-grid-family.stories.tsx" },
+    { "component": "card-grid-skeleton", "reason": "通用实体网格卡片加载骨架，与 Look B 卡同解剖", "contractStory": "entity-grid-family.stories.tsx" }
   ],
   "form": [
     { "component": "form-setting-row", "reason": "将无业务语义的表单控件与说明文本并排编排", "contractStory": "integration-onboarding-family.stories.tsx" },
@@ -34,6 +36,7 @@
     { "component": "notifications", "reason": "通用通知入口与消息反馈展示", "contractStory": "notifications.stories.tsx" },
     { "component": "field-guide-tip", "reason": "通用表单字段填写说明悬浮提示", "contractStory": "integration-onboarding-family.stories.tsx" },
     { "component": "page-status", "reason": "通用页面加载、空态与错误态反馈", "contractStory": "feedback-family.stories.tsx" },
+    { "component": "spin", "reason": "根壳全屏加载反馈原语，无业务域语义", "contractStory": "spin.stories.tsx" },
     { "component": "troubleshooting-card", "reason": "通用故障说明与处理建议反馈卡片", "contractStory": "content-family.stories.tsx" }
   ],
   "dataDisplay": [
@@ -63,16 +66,19 @@
     { "component": "time-series-area-chart-canvas", "reason": "通用时序面积图画布", "contractStory": "charts-family.stories.tsx" },
     { "component": "time-series-bar-chart", "reason": "通用时序柱状图", "contractStory": "charts-family.stories.tsx" },
     { "component": "time-series-composed-chart", "reason": "通用时序组合图", "contractStory": "charts-family.stories.tsx" },
-    { "component": "version-badge", "reason": "通用版本标签展示", "contractStory": "data-display-family.stories.tsx" }
+    { "component": "version-badge", "reason": "通用版本标签展示", "contractStory": "data-display-family.stories.tsx" },
+    { "component": "grid-entity-card", "reason": "通用实体网格卡片底盘，不绑定具体业务域状态枚举", "contractStory": "entity-grid-family.stories.tsx" }
   ],
   "interaction": [
     { "component": "chart-dimension-filter", "reason": "通用图表维度筛选交互", "contractStory": "charts-family.stories.tsx" },
     { "component": "chart-drag-selection", "reason": "通用图表拖拽框选交互", "contractStory": "charts-family.stories.tsx" },
+    { "component": "catalog-scope-segmented", "reason": "通用目录当前组织/未归属视图切换", "contractStory": "toolbar-family.stories.tsx" },
     { "component": "filter-toolbar", "reason": "通用筛选工具栏交互", "contractStory": "toolbar-family.stories.tsx" },
     { "component": "search-combination-toolbar", "reason": "通用组合搜索工具栏", "contractStory": "toolbar-family.stories.tsx" },
     { "component": "selectable-card-grid", "reason": "通用可选择卡片网格", "contractStory": "selection-family.stories.tsx" },
     { "component": "selectable-tag-filter-group", "reason": "通用标签筛选组", "contractStory": "selection-family.stories.tsx" },
     { "component": "sortable-item", "reason": "通用拖拽排序项", "contractStory": "data-entry-family.stories.tsx" },
-    { "component": "more-actions-dropdown", "reason": "通用 MoreOutlined 触发的行/卡片操作菜单,统一 PermissionWrapper/Dropdown/a11y 契约", "contractStory": "more-actions-dropdown.stories.tsx" }
+    { "component": "more-actions-dropdown", "reason": "通用 MoreOutlined 触发的行/卡片操作菜单,统一 PermissionWrapper/Dropdown/a11y 契约", "contractStory": "more-actions-dropdown.stories.tsx" },
+    { "component": "credential-picker", "reason": "跨模块凭据选用与快捷新建原语，业务页按 category/type 嵌入", "contractStory": "credential-picker.stories.tsx" }
   ]
 }

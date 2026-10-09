@@ -1,11 +1,12 @@
 # -- coding: utf-8 --
 import asyncio
+import importlib
 import json
 import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 from urllib.parse import unquote
 
 from core.logger import safe_log_value
@@ -21,10 +22,7 @@ ANSIBLE_ADHOC_FAILED_LOG_TEMPLATE = (
     "host_status=%s exit_code=%s stderr=%s stderr_missing=%s "
     "failed_stage=callback_process error_type=%s"
 )
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(password|passwd|secret|token|authorization|passphrase|"
-    r"private_key(?:_content)?)\s*[:=]\s*\S+"
-)
+_SECRET_ASSIGNMENT_RE = re.compile(r"(?i)\b(password|passwd|secret|token|authorization|passphrase|" r"private_key(?:_content)?)\s*[:=]\s*\S+")
 _PEM_BLOCK_RE = re.compile(
     r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
     re.DOTALL,
@@ -43,6 +41,18 @@ _UNREACHABLE_MARKERS = (
     "no route to host",
     "name or service not known",
 )
+
+
+def encode_ansible_raw_module_args(command: str) -> str:
+    """把 raw 命令编码成 Ansible adhoc `-a` 可安全解析的 JSON。
+
+    AdHocCLI 对非 JSON 的 `-a` 会走 ``parse_kv`` / ``split_args``。AIX ksh
+    heredoc 和脚本正文里的引号会触发
+    ``failed at splitting arguments, either an unbalanced jinja2 block or quotes``
+    （进程退出码 4），SSH 根本不会发生。JSON ``{"_raw_params": "..."}`` 走
+    ``from_yaml(..., json_only=True)``，跳过引号拆分。
+    """
+    return json.dumps({"_raw_params": command}, ensure_ascii=False)
 
 
 def _url_decode_secret(value: Any, credential_encoding: Any = "url") -> str:
@@ -70,12 +80,30 @@ VALID_MODULES = {"cpu", "mem", "disk", "net", "diskio", "processes", "system"}
 HOST_REMOTE_CALLBACK_REQUEST_TIMEOUT = 60
 LINUX_SCRIPT_WRAPPER_EOF = "STARGAZER_HOST_COLLECT_EOF"
 LINUX_SCRIPT_WRAPPER_PREFIX = "LC_ALL=C LANG=C bash --noprofile --norc"
-SUPPORTED_OS_TYPES = {"linux", "windows", "aix"}
+# 与 Host AIX/FreeBSD/HP-UX/Solaris Remote 看板、display_fields、collectTypes 取并集。
+# 采集模块按 OS 延迟导入；本 PR 不携带其它 Remote 插件树，模块存在时即可调度。
+HOST_REMOTE_OS_TYPES = frozenset({"aix", "freebsd", "hpux", "solaris"})
+SUPPORTED_OS_TYPES = {"linux", "windows", *HOST_REMOTE_OS_TYPES}
+SSH_OS_TYPES = frozenset({"linux", *HOST_REMOTE_OS_TYPES})
+DEBUG_SCRAPE_OS_TYPES = frozenset({"freebsd", "hpux", "solaris"})
+# module, wrap_attr, parse_attr — 名称对齐各 Remote 采集模块导出。
+_REMOTE_OS_MONITOR_SPECS: Dict[str, Tuple[str, str, str]] = {
+    "aix": ("aix_os_monitor", "wrap_ksh_collect", "parse_aix_metrics_to_prometheus"),
+    "freebsd": ("freebsd_os_monitor", "wrap_sh_collect", "parse_freebsd_metrics_to_prometheus"),
+    "hpux": ("hpux_os_monitor", "wrap_ksh_collect", "parse_hpux_metrics_to_prometheus"),
+    "solaris": ("solaris_os_monitor", "wrap_ksh_collect", "parse_solaris_metrics_to_prometheus"),
+}
 
 
-def sanitize_ansible_failure_text(
-    value: Any, *, max_length: int = ANSIBLE_FAILURE_TEXT_MAX_CHARS
-) -> str:
+def _load_remote_os_monitor(os_type: str):
+    spec = _REMOTE_OS_MONITOR_SPECS[os_type]
+    try:
+        return importlib.import_module(f"{__package__ or 'tasks.collectors'}.{spec[0]}")
+    except ImportError as exc:
+        raise ValueError(f"unsupported os_type: {os_type}") from exc
+
+
+def sanitize_ansible_failure_text(value: Any, *, max_length: int = ANSIBLE_FAILURE_TEXT_MAX_CHARS) -> str:
     text = _PEM_BLOCK_RE.sub("[omitted]", str(value or ""))
     text = _SECRET_ASSIGNMENT_RE.sub(r"\1=[omitted]", text)
     return safe_log_value(text, max_length=max_length)
@@ -110,21 +138,11 @@ def extract_ansible_failure_summary(result: Dict[str, Any], host: str) -> Dict[s
     summary_meta = payload.get("result_summary")
     if not isinstance(summary_meta, dict):
         summary_meta = {}
-    raw_status = str(
-        host_result.get("raw_status")
-        or summary_meta.get("failure_status")
-        or host_result.get("status")
-        or ""
-    )
+    raw_status = str(host_result.get("raw_status") or summary_meta.get("failure_status") or host_result.get("status") or "")
     exit_code = host_result.get("exit_code")
     if exit_code is None:
         exit_code = host_result.get("rc", summary_meta.get("failure_exit_code"))
-    stderr = str(
-        host_result.get("stderr")
-        or host_result.get("error_message")
-        or summary_meta.get("failure_stderr")
-        or ""
-    )
+    stderr = str(host_result.get("stderr") or host_result.get("error_message") or summary_meta.get("failure_stderr") or "")
     sanitized_stderr = sanitize_ansible_failure_text(stderr)
     return {
         "error": sanitize_ansible_failure_text(error),
@@ -137,9 +155,7 @@ def extract_ansible_failure_summary(result: Dict[str, Any], host: str) -> Dict[s
 
 def classify_ansible_failure(summary: Dict[str, Any]) -> str:
     host_status = str(summary.get("host_status") or "").upper()
-    text = " ".join(
-        str(summary.get(key) or "") for key in ("error", "stderr", "host_status")
-    ).lower()
+    text = " ".join(str(summary.get(key) or "") for key in ("error", "stderr", "host_status")).lower()
     if host_status.startswith("UNREACHABLE"):
         return "target_unreachable"
     if any(marker in text for marker in _AUTH_FAILURE_MARKERS):
@@ -169,10 +185,10 @@ def build_script(
     config_type: str | None = None,
 ) -> str:
     os_type = str(os_type or "").strip().lower()
-    if os_type == "aix":
-        from .aix_os_monitor import wrap_ksh_collect
-
-        return wrap_ksh_collect()
+    spec = _REMOTE_OS_MONITOR_SPECS.get(os_type)
+    if spec:
+        module = _load_remote_os_monitor(os_type)
+        return getattr(module, spec[1])()
     if os_type not in {"linux", "windows"}:
         raise ValueError(f"unsupported os_type: {os_type}")
     base_dir = SCRIPTS_DIR / ("linux" if os_type == "linux" else "windows")
@@ -310,6 +326,21 @@ def _append_gauge(lines: List[str], name: str, labels: str, value: Any, timestam
     lines.append(f"{name}{{{labels}}} {value} {timestamp}")
 
 
+def _append_gauge_if_present(
+    lines: List[str],
+    name: str,
+    labels: str,
+    data: Dict[str, Any],
+    *keys: str,
+    timestamp: int,
+    help_text: str = "",
+) -> None:
+    value = _metric_value(data, *keys, default=None)
+    if value is None:
+        return
+    _append_gauge(lines, name, labels, value, timestamp, help_text)
+
+
 def parse_metrics_to_prometheus(
     data: Dict[str, Any],
     instance_id: str,
@@ -325,40 +356,66 @@ def parse_metrics_to_prometheus(
 
     if "cpu" in data:
         cpu = data["cpu"]
-        _append_gauge(lines, "host_cpu_usage_percent", base_labels, cpu.get("usage_percent", 0), timestamp, "CPU usage percentage")
-        _append_gauge(lines, "cpu_usage_total", base_labels, cpu.get("usage_percent", 0), timestamp, "CPU usage percentage")
-        _append_gauge(lines, "cpu_usage_user_total", base_labels, cpu.get("usage_user_percent", 0), timestamp, "CPU user usage percentage")
-        _append_gauge(lines, "cpu_usage_system_total", base_labels, cpu.get("usage_system_percent", 0), timestamp, "CPU system usage percentage")
-        _append_gauge(lines, "cpu_usage_iowait_total", base_labels, cpu.get("usage_iowait_percent", 0), timestamp, "CPU iowait usage percentage")
-        _append_gauge(lines, "cpu_usage_irq_total", base_labels, cpu.get("usage_irq_percent", 0), timestamp, "CPU irq usage percentage")
-        _append_gauge(lines, "cpu_usage_steal_total", base_labels, cpu.get("usage_steal_percent", 0), timestamp, "CPU steal usage percentage")
+        _append_gauge_if_present(
+            lines, "host_cpu_usage_percent", base_labels, cpu, "usage_percent", timestamp=timestamp, help_text="CPU usage percentage"
+        )
+        _append_gauge_if_present(lines, "cpu_usage_total", base_labels, cpu, "usage_percent", timestamp=timestamp, help_text="CPU usage percentage")
+        _append_gauge_if_present(
+            lines, "cpu_usage_user_total", base_labels, cpu, "usage_user_percent", timestamp=timestamp, help_text="CPU user usage percentage"
+        )
+        _append_gauge_if_present(
+            lines, "cpu_usage_system_total", base_labels, cpu, "usage_system_percent", timestamp=timestamp, help_text="CPU system usage percentage"
+        )
+        _append_gauge_if_present(
+            lines, "cpu_usage_iowait_total", base_labels, cpu, "usage_iowait_percent", timestamp=timestamp, help_text="CPU iowait usage percentage"
+        )
+        _append_gauge_if_present(
+            lines, "cpu_usage_irq_total", base_labels, cpu, "usage_irq_percent", timestamp=timestamp, help_text="CPU irq usage percentage"
+        )
+        _append_gauge_if_present(
+            lines, "cpu_usage_steal_total", base_labels, cpu, "usage_steal_percent", timestamp=timestamp, help_text="CPU steal usage percentage"
+        )
         _append_gauge(lines, "host_cpu_core_count", base_labels, cpu.get("core_count", 0), timestamp, "CPU core count")
-        _append_gauge(lines, "host_cpu_load_1m", base_labels, cpu.get("load_1m", 0), timestamp, "CPU load 1 minute")
-        _append_gauge(lines, "host_cpu_load_5m", base_labels, cpu.get("load_5m", 0), timestamp, "CPU load 5 minutes")
-        _append_gauge(lines, "host_cpu_load_15m", base_labels, cpu.get("load_15m", 0), timestamp, "CPU load 15 minutes")
-        _append_gauge(lines, "system_load1", base_labels, cpu.get("load_1m", 0), timestamp, "System load 1 minute")
-        _append_gauge(lines, "system_load5", base_labels, cpu.get("load_5m", 0), timestamp, "System load 5 minutes")
-        _append_gauge(lines, "system_load15", base_labels, cpu.get("load_15m", 0), timestamp, "System load 15 minutes")
+        _append_gauge_if_present(lines, "host_cpu_load_1m", base_labels, cpu, "load_1m", timestamp=timestamp, help_text="CPU load 1 minute")
+        _append_gauge_if_present(lines, "host_cpu_load_5m", base_labels, cpu, "load_5m", timestamp=timestamp, help_text="CPU load 5 minutes")
+        _append_gauge_if_present(lines, "host_cpu_load_15m", base_labels, cpu, "load_15m", timestamp=timestamp, help_text="CPU load 15 minutes")
+        _append_gauge_if_present(lines, "system_load1", base_labels, cpu, "load_1m", timestamp=timestamp, help_text="System load 1 minute")
+        _append_gauge_if_present(lines, "system_load5", base_labels, cpu, "load_5m", timestamp=timestamp, help_text="System load 5 minutes")
+        _append_gauge_if_present(lines, "system_load15", base_labels, cpu, "load_15m", timestamp=timestamp, help_text="System load 15 minutes")
 
     if "mem" in data:
         mem = data["mem"]
-        for key in ["total_bytes", "used_bytes", "available_bytes", "swap_total_bytes", "swap_used_bytes"]:
-            metric_name = f"host_mem_{key}"
-            _append_gauge(lines, metric_name, base_labels, mem.get(key, 0), timestamp, f"Memory {key}")
-        total_bytes = float(mem.get("total_bytes", 0) or 0)
-        used_bytes = float(mem.get("used_bytes", 0) or 0)
-        used_percent = round((used_bytes / total_bytes) * 100, 2) if total_bytes > 0 else 0
+        _append_gauge_if_present(lines, "host_mem_total_bytes", base_labels, mem, "total_bytes", timestamp=timestamp, help_text="Memory total_bytes")
+        _append_gauge_if_present(lines, "host_mem_used_bytes", base_labels, mem, "used_bytes", timestamp=timestamp, help_text="Memory used_bytes")
+        _append_gauge_if_present(
+            lines, "host_mem_available_bytes", base_labels, mem, "available_bytes", timestamp=timestamp, help_text="Memory available_bytes"
+        )
+        _append_gauge_if_present(
+            lines, "host_mem_swap_total_bytes", base_labels, mem, "swap_total_bytes", timestamp=timestamp, help_text="Memory swap_total_bytes"
+        )
+        _append_gauge_if_present(
+            lines, "host_mem_swap_used_bytes", base_labels, mem, "swap_used_bytes", timestamp=timestamp, help_text="Memory swap_used_bytes"
+        )
+        total_bytes = _metric_value(mem, "total_bytes", default=None)
+        available_bytes = _metric_value(mem, "available_bytes", default=None)
+        used_percent = mem.get("used_percent")
+        if used_percent is None and total_bytes and available_bytes is not None:
+            used_percent = round(((float(total_bytes) - float(available_bytes)) / float(total_bytes)) * 100, 2)
+        if used_percent is not None:
+            _append_gauge(lines, "host_mem_used_percent", base_labels, used_percent, timestamp, "Memory used percent")
+            _append_gauge(lines, "mem_used_percent", base_labels, used_percent, timestamp, "Memory used percent")
+        _append_gauge_if_present(lines, "mem_total", base_labels, mem, "total_bytes", timestamp=timestamp, help_text="Memory total bytes")
+        _append_gauge_if_present(lines, "mem_available", base_labels, mem, "available_bytes", timestamp=timestamp, help_text="Memory available bytes")
         swap_total = float(mem.get("swap_total_bytes", 0) or 0)
         swap_used = float(mem.get("swap_used_bytes", 0) or 0)
-        swap_free = mem.get("swap_free_bytes", max(swap_total - swap_used, 0))
-        _append_gauge(lines, "host_mem_used_percent", base_labels, used_percent, timestamp, "Memory used percent")
-        _append_gauge(lines, "mem_total", base_labels, mem.get("total_bytes", 0), timestamp, "Memory total bytes")
-        _append_gauge(lines, "mem_available", base_labels, mem.get("available_bytes", 0), timestamp, "Memory available bytes")
-        _append_gauge(lines, "mem_used_percent", base_labels, used_percent, timestamp, "Memory used percent")
-        _append_gauge(lines, "mem_swap_free", base_labels, swap_free, timestamp, "Swap free bytes")
-        _append_gauge(lines, "mem_cached", base_labels, mem.get("cached_bytes", 0), timestamp, "Cached memory bytes")
-        _append_gauge(lines, "mem_shared", base_labels, mem.get("shared_bytes", 0), timestamp, "Shared memory bytes")
-        _append_gauge(lines, "mem_buffered", base_labels, mem.get("buffered_bytes", 0), timestamp, "Buffered memory bytes")
+        swap_free = _metric_value(mem, "swap_free_bytes", default=None)
+        if swap_free is None and (swap_total or swap_used):
+            swap_free = max(swap_total - swap_used, 0)
+        if swap_free is not None:
+            _append_gauge(lines, "mem_swap_free", base_labels, swap_free, timestamp, "Swap free bytes")
+        _append_gauge_if_present(lines, "mem_cached", base_labels, mem, "cached_bytes", timestamp=timestamp, help_text="Cached memory bytes")
+        _append_gauge_if_present(lines, "mem_shared", base_labels, mem, "shared_bytes", timestamp=timestamp, help_text="Shared memory bytes")
+        _append_gauge_if_present(lines, "mem_buffered", base_labels, mem, "buffered_bytes", timestamp=timestamp, help_text="Buffered memory bytes")
 
     if "disk" in data:
         disks = data["disk"]
@@ -384,8 +441,14 @@ def parse_metrics_to_prometheus(
                 _append_gauge(lines, "disk_total", disk_labels, total, timestamp, "Disk total bytes")
                 _append_gauge(lines, "disk_free", disk_labels, free, timestamp, "Disk free bytes")
                 _append_gauge(lines, "disk_used_percent", disk_labels, used_percent, timestamp, "Disk used percent")
-                _append_gauge(
-                    lines, "disk_inodes_used_percent", disk_labels, disk.get("inodes_used_percent", 0), timestamp, "Disk inode used percent"
+                _append_gauge_if_present(
+                    lines,
+                    "disk_inodes_used_percent",
+                    disk_labels,
+                    disk,
+                    "inodes_used_percent",
+                    timestamp=timestamp,
+                    help_text="Disk inode used percent",
                 )
 
     if "net" in data:
@@ -423,21 +486,42 @@ def parse_metrics_to_prometheus(
             _append_gauge(lines, "diskio_writes_total", diskio_labels, diskio.get("writes", 0), timestamp, "Disk writes counter")
             _append_gauge(lines, "diskio_read_bytes_total", diskio_labels, diskio.get("read_bytes", 0), timestamp, "Disk read bytes counter")
             _append_gauge(lines, "diskio_write_bytes_total", diskio_labels, diskio.get("write_bytes", 0), timestamp, "Disk write bytes counter")
-            _append_gauge(lines, "diskio_io_time_ms", diskio_labels, diskio.get("io_time_ms", 0), timestamp, "Disk IO time ms")
-            _append_gauge(lines, "disk_read_latency", diskio_labels, diskio.get("read_time_ms", 0), timestamp, "Disk read time ms")
-            _append_gauge(lines, "disk_write_latency", diskio_labels, diskio.get("write_time_ms", 0), timestamp, "Disk write time ms")
+            _append_gauge_if_present(
+                lines, "diskio_io_time_ms", diskio_labels, diskio, "io_time_ms", timestamp=timestamp, help_text="Disk IO time ms"
+            )
+            _append_gauge_if_present(
+                lines, "diskio_io_util", diskio_labels, diskio, "io_util_percent", timestamp=timestamp, help_text="Disk IO utilization percent"
+            )
+            _append_gauge_if_present(
+                lines, "diskio_read_time_ms", diskio_labels, diskio, "read_time_ms", timestamp=timestamp, help_text="Disk read time ms counter"
+            )
+            _append_gauge_if_present(
+                lines, "diskio_write_time_ms", diskio_labels, diskio, "write_time_ms", timestamp=timestamp, help_text="Disk write time ms counter"
+            )
+            _append_gauge_if_present(
+                lines, "disk_read_latency", diskio_labels, diskio, "read_latency_ms", timestamp=timestamp, help_text="Disk read latency ms"
+            )
+            _append_gauge_if_present(
+                lines, "disk_write_latency", diskio_labels, diskio, "write_latency_ms", timestamp=timestamp, help_text="Disk write latency ms"
+            )
 
     if "processes" in data and isinstance(data["processes"], dict):
         processes = data["processes"]
         for key in ("running", "blocked", "zombies", "sleeping"):
-            _append_gauge(lines, f"processes_{key}", base_labels, processes.get(key, 0), timestamp, f"Processes {key}")
+            _append_gauge_if_present(lines, f"processes_{key}", base_labels, processes, key, timestamp=timestamp, help_text=f"Processes {key}")
 
     if "system" in data and isinstance(data["system"], dict):
         system = data["system"]
         _append_gauge(lines, "system_uptime", base_labels, system.get("uptime_seconds", 0), timestamp, "System uptime seconds")
-        _append_gauge(lines, "system_load1", base_labels, system.get("load1", system.get("load_1m", 0)), timestamp, "System load 1 minute")
-        _append_gauge(lines, "system_load5", base_labels, system.get("load5", system.get("load_5m", 0)), timestamp, "System load 5 minutes")
-        _append_gauge(lines, "system_load15", base_labels, system.get("load15", system.get("load_15m", 0)), timestamp, "System load 15 minutes")
+        _append_gauge_if_present(
+            lines, "system_load1", base_labels, system, "load1", "load_1m", timestamp=timestamp, help_text="System load 1 minute"
+        )
+        _append_gauge_if_present(
+            lines, "system_load5", base_labels, system, "load5", "load_5m", timestamp=timestamp, help_text="System load 5 minutes"
+        )
+        _append_gauge_if_present(
+            lines, "system_load15", base_labels, system, "load15", "load_15m", timestamp=timestamp, help_text="System load 15 minutes"
+        )
 
     return "\n".join(lines) + "\n"
 
@@ -461,20 +545,21 @@ class HostCollector(BaseCollector):
             raise ValueError(f"unsupported os_type: {os_type}")
         username = self.params["username"]
         raw_port = self.params.get("port")
-        ssh_like = os_type in {"linux", "aix"}
+        ssh_like = os_type in SSH_OS_TYPES
         port = int(raw_port) if raw_port not in (None, "") else (22 if ssh_like else 5986)
         ansible_node_id = self.params["ansible_node_id"]
-        if os_type == "aix":
-            from .aix_os_monitor import COMMAND_EXECUTE_TIMEOUT
-
-            execute_timeout = COMMAND_EXECUTE_TIMEOUT
+        if os_type in _REMOTE_OS_MONITOR_SPECS:
+            execute_timeout = getattr(_load_remote_os_monitor(os_type), "COMMAND_EXECUTE_TIMEOUT")
         else:
             execute_timeout = 60  # 脚本执行上限硬编码；表单 timeout 由框架作单对象预算
 
         modules = self._resolve_modules()
         credential_encoding = self.params.get("credential_encoding") or self.params.get("credentials_encoding") or "url"
 
-        logger.info("[Host Collector] host=%s, os=%s, modules=%s", host, os_type, modules)
+        if os_type in DEBUG_SCRAPE_OS_TYPES:
+            logger.debug("[Host Collector] host=%s, os=%s, modules=%s", host, os_type, modules)
+        else:
+            logger.info("[Host Collector] host=%s, os=%s, modules=%s", host, os_type, modules)
 
         script = build_script(
             os_type,
@@ -484,6 +569,7 @@ class HostCollector(BaseCollector):
 
         connection = "ssh" if ssh_like else "winrm"
         module = "raw" if ssh_like else "win_shell"
+        module_args = encode_ansible_raw_module_args(script) if ssh_like else script
 
         host_credential = {
             "host": host,
@@ -519,16 +605,15 @@ class HostCollector(BaseCollector):
             "ansible_node_id": ansible_node_id,
             "host_credentials": host_credentials,
             "module": module,
-            "module_args": script,
+            "module_args": module_args,
             "execute_timeout": execute_timeout,
         }
 
     def _resolve_callback_timeout(self) -> int:
         os_type = str(self.params.get("os_type", "") or "").strip().lower()
-        if os_type == "aix":
-            from .aix_os_monitor import COMMAND_EXECUTE_TIMEOUT
-
-            return int(self.params.get("host_remote_callback_timeout", COMMAND_EXECUTE_TIMEOUT))
+        if os_type in _REMOTE_OS_MONITOR_SPECS:
+            execute_timeout = getattr(_load_remote_os_monitor(os_type), "COMMAND_EXECUTE_TIMEOUT")
+            return int(self.params.get("host_remote_callback_timeout", execute_timeout))
         return int(
             self.params.get(
                 "host_remote_callback_timeout",
@@ -603,13 +688,14 @@ class HostCollector(BaseCollector):
 
         instance_id = self.params.get("tags", {}).get("instance_id", host)
         callback_timestamp = self.params.get("callback_timestamp")
-        if os_type == "aix":
-            from .aix_os_monitor import parse_aix_metrics_to_prometheus
-
-            prometheus_metrics = parse_aix_metrics_to_prometheus(
+        os_key = str(os_type or "linux").strip().lower()
+        spec = _REMOTE_OS_MONITOR_SPECS.get(os_key)
+        if spec:
+            parse_metrics = getattr(_load_remote_os_monitor(os_key), spec[2])
+            prometheus_metrics = parse_metrics(
                 metrics_data,
                 instance_id,
-                os_type,
+                os_key,
                 int(callback_timestamp) if callback_timestamp is not None else int(time.time() * 1000),
             )
         else:
@@ -622,7 +708,10 @@ class HostCollector(BaseCollector):
                 disk_exclude_fstypes=self.params.get("disk_exclude_fstypes"),
             )
 
-        logger.info(f"[Host Collector] Completed: host={host}, metrics_size={len(prometheus_metrics)}")
+        if os_key in DEBUG_SCRAPE_OS_TYPES:
+            logger.debug("[Host Collector] Completed: host=%s, metrics_size=%s", host, len(prometheus_metrics))
+        else:
+            logger.info(f"[Host Collector] Completed: host={host}, metrics_size={len(prometheus_metrics)}")
         return prometheus_metrics
 
     async def collect(self) -> str:

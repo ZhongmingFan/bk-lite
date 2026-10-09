@@ -46,12 +46,15 @@
 | 功能项 | 功能说明 | 规格 / 约束 | 状态 |
 |---|---|---|---|
 | 活跃/历史切换 | "活跃告警 / 历史告警"标签切换 | 历史告警支持时间范围筛选；活跃告警固定按当前活跃状态展示 | GA |
-| 多维筛选 | 按监控对象树、级别、状态、关键词筛选 | — | GA |
-| 告警详情 | 查看告警详情及生命周期内的指标快照 | 快照记录于告警全生命周期，支撑复盘 | GA |
-| 告警关闭 | 人工关闭活跃告警 | 受权限点控制 | GA |
+| 多维筛选 | 按监控对象树、级别、状态、关键词筛选 | 支持 `my_alert=1` 在当前可见集合中再筛处理人包含当前用户的告警，不靠 `operator`，不放大可见范围 | GA |
+| 告警详情 | 查看告警详情及生命周期内的指标快照 | 快照记录于告警全生命周期，支撑复盘；详情、认领、分派、转派响应含 `handlers_display` | GA |
+| 告警关闭 | 人工关闭活跃告警 | 受权限点控制；没有处理人时可关，已有处理人时只有当前处理人能关 | GA |
+| 告警认领 / 分派 / 转派 | 空处理人的活跃告警可认领给自己或分派给告警所属组织用户；当前处理人可把活跃告警转派给该组织一名或多名用户 | 空单不能转派；转派整表替换 `handlers`，写 `reassigned` MonitorEvent；认领 / 分派 / 转派 / 关闭写生命周期事件；手工分派与转派按策略已开的人工渠道通知新处理人，告警中心副本 / 仅 NATS 不发；创建与认领不发分派通知 | GA |
 | 告警趋势 | 以堆叠柱状图展示告警趋势 | — | GA |
 | 告警状态 | 告警状态枚举 | `new` 活跃 / `closed` 人工关闭 / `recovered` 自动恢复 | GA |
 | 告警类型 | 告警实体类型 | `alert` 阈值告警 / `no_data` 无数据告警 | GA |
+| 告警组织 | 生成时从策略快照所属组织，之后与策略当前组织解耦 | 策略删除后历史告警仍按快照组织可见 | GA |
+| 事件动作 | 监控事件动作 | `triggered` 触发 / `escalated` 级别升级 / `claimed` 认领 / `assigned` 分派 / `reassigned` 转派 / `recovered` 恢复 / `closed` 人工关闭；每告警每动作一条的唯一约束只覆盖 `triggered` / `recovered` / `closed`，不扩到认领、分派与转派 | GA |
 | 事件等级 | 监控事件等级 | `no_data` / `info` / `warning` / `error` / `critical`；`info` 用于记录恢复判断过程，不参与升级、不生成新活跃告警 | GA |
 
 ### 4. Event - 策略管理
@@ -68,7 +71,7 @@
 | 单位配置 | 配置指标原始单位与计算单位（用于阈值对比和结果记录） | — | GA |
 | 执行周期 | 策略启用后按 `schedule` 周期扫描，按 `period` 数据周期检测 | 扫描时按策略 source 过滤实例（实例/组织维度） | GA |
 | 数据补偿 | 任务执行时对历史周期进行补偿 | 单次最多补偿 30 个周期，超过 24 小时的历史数据不再补偿 | GA |
-| 通知配置 | 配置通知开关、通知方式与通知人 | 通知渠道来源于系统管理已配置渠道；开启通知后非 `info` 事件按渠道发送；NATS 渠道不要求填写通知人 | GA |
+| 通知配置 | 配置通知开关、通知方式、通知人与处理人 | 处理人可空、多选，必须是策略所属组织内未禁用用户；组织变更后越界处理人拒绝；通知渠道来源于系统管理已配置渠道；开启通知后非 `info` 事件按渠道发送；NATS 渠道不要求填写通知人 | GA |
 | 告警名称变量 | 策略配置页提供告警名称模板变量与变量插入 | 默认变量：`${monitor_object}`、`${resource_name}`、`${level}`、`${metric_name}`、`${value}`、`${dimension_value}`；`resource_name` 为实例名称（不含维度），`dimension_value` 为非 `instance_id` 维度按序输出 `维度名称:维度值`、英文逗号分隔 | GA |
 | 配置辅助面板 | 策略配置页提供变量面板与指标预览，支持阈值对照与查询结果预览 | — | GA |
 
@@ -808,7 +811,7 @@ _The IPMI collection plugin is a tool used for gathering hardware monitoring dat
 
 | 指标分组 | 指标名 | 显示名 | 单位 | 中文含义 |
 |---|---|---|---|---|
-| Power | `ipmi_chassis_power_state` | Power State | [{"name":"正常","id":1,"color":"#1ac44a"},{"name":"异常","id":2,"color":"#ff4d4f"}] | 设备电源开关状态，监控是否上电（状态枚举） |
+| Power | `ipmi_chassis_power_state` | Power State | [{"name":"正常","id":1,"color":"#1ac44a"},{"name":"异常","id":2,"color":"#ff4d4f"}] | 设备电源开关状态，监控是否上电（状态枚举）。优先 SDR `host_power`，否则使用 Telegraf `chassis_power_status`（开机=1，关机=2） |
 | Power | `ipmi_power_watts` | Power | watts | 设备当前功耗（瓦特），评估能耗状况 |
 | Power | `ipmi_voltage_volts` | Voltage | volts | 设备各电源轨电压水平，监控供电稳定性 |
 | Environment | `ipmi_fan_speed_rpm` | Fan Speed | none | 设备风扇转速（转/分），监控风扇运行状态 |

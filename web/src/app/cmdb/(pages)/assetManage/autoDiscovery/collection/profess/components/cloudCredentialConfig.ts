@@ -39,7 +39,12 @@ export function buildCloudCredential(
   region?: Record<string, any>,
 ) {
   const config = getCloudCredentialConfig(modelId);
-  const credential: Record<string, any> = { regions: region };
+  const credential: Record<string, any> = {
+    regions: region || (raw.regionId ? { resource_id: raw.regionId, resource_name: raw.regionName || raw.regionId } : undefined),
+  };
+  if (raw.credential_id) {
+    credential.credential_id = raw.credential_id;
+  }
   const accessKey = String(raw.accessKey || '').trim();
   const accessSecret = String(raw.accessSecret || '').trim();
   if (accessKey && accessKey !== PASSWORD_PLACEHOLDER) {
@@ -50,6 +55,9 @@ export function buildCloudCredential(
   }
   if (config.requiresProjectId) {
     credential.project_id = String(raw.projectId || '').trim();
+  }
+  for (const field of ['port', 'api_url', 'scheme', 'verify_tls', 'source', 'user_type']) {
+    if (raw[field] !== undefined) credential[field] = raw[field];
   }
   return credential;
 }
@@ -73,6 +81,9 @@ export function restoreCloudCredential(
     ...(config.requiresProjectId
       ? { projectId: credential.project_id || '' }
       : {}),
+    ...Object.fromEntries(['port', 'api_url', 'scheme', 'verify_tls', 'source', 'user_type']
+      .filter((field) => credential[field] !== undefined)
+      .map((field) => [field, credential[field]])),
   };
 }
 
@@ -80,10 +91,13 @@ export function validateCloudCredential(
   modelId: string,
   raw: CredentialPoolItem,
 ): 'accessKey' | 'accessSecret' | 'projectId' | 'regionId' | null {
-  if (!String(raw.accessKey || '').trim()) {
+  if (raw.credential_source === 'vault' && !raw.vault_credential_id) {
     return 'accessKey';
   }
-  if (!String(raw.accessSecret || '').trim()) {
+  if (raw.credential_source !== 'vault' && !String(raw.accessKey || '').trim()) {
+    return 'accessKey';
+  }
+  if (raw.credential_source !== 'vault' && !String(raw.accessSecret || '').trim()) {
     return 'accessSecret';
   }
   if (
@@ -96,4 +110,45 @@ export function validateCloudCredential(
     return 'regionId';
   }
   return null;
+}
+
+export interface CloudRegionQueryInput {
+  modelId: string;
+  cloudRegionId: string;
+  accessKey?: string;
+  accessSecret?: string;
+  vaultCredentialId?: string;
+  editId?: number | null;
+  host?: string;
+  projectId?: string;
+}
+
+function isUsableCloudSecret(value?: string) {
+  const normalized = String(value || '').trim();
+  return Boolean(normalized) && normalized !== PASSWORD_PLACEHOLDER;
+}
+
+export function buildCloudRegionQueryParams(input: CloudRegionQueryInput) {
+  const accessKey = String(input.accessKey || '').trim();
+  const accessSecret = String(input.accessSecret || '').trim();
+  const params: Record<string, string | number> = {
+    model_id: input.modelId,
+    cloud_id: input.cloudRegionId,
+  };
+  if (input.host) {
+    params.host = input.host;
+  }
+  if (input.projectId) {
+    params.project_id = input.projectId;
+  }
+  if (input.editId) {
+    params.task_id = input.editId as number;
+  }
+  if (input.vaultCredentialId) {
+    params.vault_credential_id = input.vaultCredentialId;
+  } else if (isUsableCloudSecret(accessKey) && isUsableCloudSecret(accessSecret)) {
+    params.access_key = accessKey;
+    params.access_secret = accessSecret;
+  }
+  return params;
 }

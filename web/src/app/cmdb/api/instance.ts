@@ -1,11 +1,12 @@
+import { useCallback } from 'react';
 import useApiClient from '@/utils/request';
 
 export const useInstanceApi = () => {
   const { get, post, patch, del } = useApiClient();
 
   // 搜索实例
-  const searchInstances = (params: any) =>
-    post('/cmdb/api/instance/search/', params);
+  const searchInstances = useCallback((params: any) =>
+    post('/cmdb/api/instance/search/', params), [post]);
 
   // 全文搜索实例
   const fulltextSearchInstances = (params: any) =>
@@ -20,8 +21,8 @@ export const useInstanceApi = () => {
   const topoSearchInstances = (modelId: string, instUuid: string) =>
     get(`/cmdb/api/instance/topo_search/${modelId}/${instUuid}/`);
 
-  const getTopoThemes = (modelId: string) =>
-    get(`/cmdb/api/instance/topo_themes/${modelId}/`);
+  const getTopoThemes = useCallback((modelId: string) =>
+    get(`/cmdb/api/instance/topo_themes/${modelId}/`), [get]);
 
   const getNetworkTopo = (modelId: string, instUuid: string, depth?: number) =>
     get(
@@ -48,6 +49,53 @@ export const useInstanceApi = () => {
   const getApplicationResourceResources = (modelId: string, instUuid: string) =>
     get(`/cmdb/api/instance/application_resource_resources/${modelId}/${instUuid}/`);
 
+  const getServiceTree = (systemUuid: string) =>
+    get(`/cmdb/api/service_tree/${systemUuid}/tree/`);
+
+  const getServiceTreeHosts = (systemUuid: string, nodeUuid: string) =>
+    get(`/cmdb/api/service_tree/${systemUuid}/hosts/`, { params: { node_uuid: nodeUuid } });
+
+  const createServiceTreeChild = (
+    systemUuid: string,
+    params: { parent_uuid: string; kind: string; inst_name: string }
+  ) => post(`/cmdb/api/service_tree/${systemUuid}/children/`, params);
+
+  const renameServiceTreeNode = (
+    systemUuid: string,
+    params: { node_uuid: string; inst_name: string }
+  ) => post(`/cmdb/api/service_tree/${systemUuid}/rename/`, params);
+
+  const deleteServiceTreeNode = (systemUuid: string, nodeUuid: string) =>
+    post(`/cmdb/api/service_tree/${systemUuid}/delete_node/`, { node_uuid: nodeUuid });
+
+  const assignServiceTreeHosts = (
+    systemUuid: string,
+    params: { application_uuid: string; host_uuids: string[] }
+  ) => post(`/cmdb/api/service_tree/${systemUuid}/assign/`, params);
+
+  const transferServiceTreeHosts = (
+    systemUuid: string,
+    params: { source_app: string; target_app: string; host_uuids: string[] }
+  ) => post(`/cmdb/api/service_tree/${systemUuid}/transfer/`, params);
+
+  const unbindServiceTreeHosts = (
+    systemUuid: string,
+    params: { application_uuid: string; host_uuids: string[] }
+  ) => post(`/cmdb/api/service_tree/${systemUuid}/unbind/`, params);
+
+  const getServiceTreeApplicationSystems = (
+    systemUuid: string,
+    uuids: string[]
+  ) => post(`/cmdb/api/service_tree/${systemUuid}/application_systems/`, { uuids });
+
+  const importServiceTree = (systemUuid: string, formData: FormData) =>
+    post(`/cmdb/api/service_tree/${systemUuid}/import/`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+
+  const exportServiceTree = (systemUuid: string) =>
+    get(`/cmdb/api/service_tree/${systemUuid}/export/`, { responseType: 'blob' });
+
   const getApplicationResourceInstances = (
     modelId: string,
     instUuid: string,
@@ -68,8 +116,8 @@ export const useInstanceApi = () => {
   );
 
   // 获取实例详情
-  const getInstanceDetail = (instUuid: string) =>
-    get(`/cmdb/api/instance/${instUuid}/`);
+  const getInstanceDetail = useCallback((instUuid: string) =>
+    get(`/cmdb/api/instance/${instUuid}/`), [get]);
 
   // 创建实例
   const createInstance = (params: any) =>
@@ -99,6 +147,25 @@ export const useInstanceApi = () => {
 
   const pushToMonitor = (instUuid: string) =>
     post(`/cmdb/api/instance/${instUuid}/push_to_monitor/`);
+
+  const batchPushToMonitor = (instUuids: string[]) =>
+    post('/cmdb/api/instance/batch_push_to_monitor/', { inst_uuids: instUuids });
+
+  const listMonitorBindCandidates = (instUuid: string, q = '') =>
+    get(`/cmdb/api/instance/${instUuid}/monitor_bind_candidates/`, {
+      params: { q },
+    });
+
+  const bindMonitor = (
+    instUuid: string,
+    params: { monitor_id: string; confirm?: boolean },
+  ) =>
+    post(`/cmdb/api/instance/${instUuid}/bind_monitor/`, params, {
+      suppressErrorNotification: true,
+    });
+
+  const unbindMonitor = (instUuid: string) =>
+    post(`/cmdb/api/instance/${instUuid}/unbind_monitor/`);
 
   // 获取模型实例数量
   const getModelInstanceCount = () =>
@@ -182,7 +249,7 @@ export const useInstanceApi = () => {
     ip_allocated_status: string;
     ip_status?: string;
     ip_type?: string;
-    ip_user?: string[];
+    ip_user?: number[];
     mac?: string;
     description?: string;
   }) => post('/cmdb/api/instance/ipam_ip/', params);
@@ -230,6 +297,17 @@ export const useInstanceApi = () => {
     getApplicationResourceResources,
     getApplicationResourceInstances,
     exportApplicationResourceInstances,
+    getServiceTree,
+    getServiceTreeHosts,
+    createServiceTreeChild,
+    renameServiceTreeNode,
+    deleteServiceTreeNode,
+    assignServiceTreeHosts,
+    transferServiceTreeHosts,
+    unbindServiceTreeHosts,
+    getServiceTreeApplicationSystems,
+    importServiceTree,
+    exportServiceTree,
     getInstanceDetail,
     createInstance,
     updateInstance,
@@ -238,6 +316,10 @@ export const useInstanceApi = () => {
     batchDeleteInstances,
     getInstanceProxys,
     pushToMonitor,
+    batchPushToMonitor,
+    listMonitorBindCandidates,
+    bindMonitor,
+    unbindMonitor,
     getModelInstanceCount,
     getInstanceShowFieldDetail,
     setInstanceShowFieldSettings,

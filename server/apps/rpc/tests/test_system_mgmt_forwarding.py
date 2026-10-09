@@ -102,6 +102,41 @@ def test_get_group_id_转发(client):
     assert _last(client) == ("get_group_id", (), {"group_name": "OpsPilotGuest"})
 
 
+def test_list_credentials_转发(client):
+    ctx = {"username": "a", "current_team": 1}
+    client.list_credentials(ctx, category="database", type="sql", search="db", page=2, page_size=10)
+    assert _last(client) == (
+        "list_credentials",
+        (),
+        {
+            "actor_context": ctx,
+            "category": "database",
+            "type": "sql",
+            "search": "db",
+            "page": 2,
+            "page_size": 10,
+        },
+    )
+
+
+def test_create_and_resolve_credential_转发(client):
+    ctx = {"username": "a", "current_team": 1}
+    client.create_credential(ctx, "db", "sql", 1, {"username": "u"})
+    assert _last(client) == (
+        "create_credential",
+        (),
+        {
+            "actor_context": ctx,
+            "name": "db",
+            "type": "sql",
+            "group_id": 1,
+            "fields": {"username": "u"},
+        },
+    )
+    client.resolve_credential(ctx, "crd-sql-abc")
+    assert _last(client) == ("resolve_credential", (), {"actor_context": ctx, "credential_id": "crd-sql-abc"})
+
+
 def test_get_group_users_默认include_children(client):
     client.get_group_users(5)
     assert _last(client) == ("get_group_users", (), {"group": 5, "include_children": False})
@@ -113,7 +148,7 @@ def test_get_group_users_scoped_转发(client):
     assert _last(client) == (
         "get_group_users_scoped",
         (),
-        {"actor_context": ctx, "group": 3, "include_children": True},
+        {"actor_context": ctx, "group": 3, "include_children": True, "search": ""},
     )
 
 
@@ -356,11 +391,6 @@ def test_probe_notification_channel_转发纯能力探针(client):
     )
 
 
-def test_search_groups_转发query_params(client):
-    client.search_groups({"search": "x"})
-    assert _last(client) == ("search_groups", (), {"query_params": {"search": "x"}})
-
-
 def test_search_opspilot_nats_channels_默认值(client):
     client.search_opspilot_nats_channels()
     assert _last(client) == (
@@ -368,11 +398,6 @@ def test_search_opspilot_nats_channels_默认值(client):
         (),
         {"teams": None, "bot_id": None, "include_children": False},
     )
-
-
-def test_search_users_转发(client):
-    client.search_users({"page": 1, "page_size": 10})
-    assert _last(client) == ("search_users", (), {"query_params": {"page": 1, "page_size": 10}})
 
 
 def test_send_email_to_receiver_转发(client):

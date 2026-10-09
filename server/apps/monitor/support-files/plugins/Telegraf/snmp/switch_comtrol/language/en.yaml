@@ -1,7 +1,6 @@
 Switch Comtrol RocketLinx SNMP:
   name: Comtrol RocketLinx (Telegraf)
-  desc: SNMP monitoring template for Comtrol RocketLinx switch. It reports per-port
-    inbound traffic rate, per-port outbound traffic rate, and system uptime
+  desc: "SNMP monitoring template for Comtrol RocketLinx switch. It reports uptime, temperature, optical modules, dual power-supply LED status, and interface traffic (enterprise PEN 2882)."
 monitor_object:
   Switch: Switch
 monitor_object_type:
@@ -20,6 +19,20 @@ monitor_object_metric:
       name: SFP TX Power
       desc: Optical transmit power reading of the SFP/SFP+ module. Abnormal Tx power
         may indicate an aging or failing optical module.
+    sfp_temperature_celsius:
+      name: SFP Temperature
+      desc: Current SFP DDM temperature in degrees Celsius. Empty or no-module rows
+        are skipped. Abnormally high module temperature can indicate airflow issues
+        or a failing optic.
+    sfp_tx_power:
+      name: SFP TX Power
+      desc: Current SFP DDM transmit power reading. Empty or no-module rows are skipped.
+        Abnormally low Tx power can indicate an aging or failing optical module.
+    sfp_rx_power:
+      name: SFP RX Power
+      desc: Current SFP DDM receive power reading. Empty or no-module rows are skipped.
+        Abnormally low Rx power can indicate link attenuation, dirty fiber, or a
+        faulty peer transmitter.
     snmp_uptime:
       name: System Uptime
       desc: This metric indicates the uptime of the device since the last restart.
@@ -160,6 +173,10 @@ monitor_object_metric:
         the device. A non-normal state signals a power redundancy or hardware fault;
         on devices with redundant PSUs a single failure may not cause an outage but
         removes redundancy and must be remediated promptly.
+    device_psu_state_backup:
+      name: PSU Backup State
+      desc: Operational state of the device backup power supply unit, normalized to
+        normal or abnormal.
     device_fan_speed:
       name: Fan Speed
       desc: This metric reports the fan rotation speed (RPM) of the device, taken

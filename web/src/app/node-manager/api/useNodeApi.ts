@@ -1,4 +1,5 @@
 import useApiClient from '@/utils/request';
+import type { AxiosResponse } from 'axios';
 import type {
   ControllerInstallFields,
   NodeItem,
@@ -9,6 +10,7 @@ import {
   NodeParams
 } from '../types/node';
 import { SearchFilters } from '@/components/search-combination/types';
+import { parseContentDispositionFilename } from '../utils/nodeListExport';
 
 /**
  * 节点管理API Hook
@@ -23,8 +25,9 @@ const useNodeApi = () => {
     filters?: SearchFilters;
     page?: number;
     page_size?: number;
+    unassigned?: boolean;
   }) => {
-    const { page, page_size, ...bodyParams } = params;
+    const { page, page_size, unassigned, ...bodyParams } = params;
     // 构建 URL 查询参数
     const queryParams = new URLSearchParams();
     if (page !== undefined) {
@@ -33,11 +36,49 @@ const useNodeApi = () => {
     if (page_size !== undefined) {
       queryParams.append('page_size', page_size.toString());
     }
+    if (unassigned) {
+      queryParams.append('unassigned', 'true');
+    }
     const queryString = queryParams.toString();
     const url = queryString
       ? `/node_mgmt/api/node/search/?${queryString}`
       : '/node_mgmt/api/node/search/';
     return await post(url, bodyParams);
+  };
+
+  const exportNodeList = async (params: {
+    cloud_region_id?: number;
+    filters?: SearchFilters;
+    selected_ids?: string[];
+    unassigned?: boolean;
+  }) => {
+    const { unassigned, ...bodyParams } = params;
+    const queryParams = new URLSearchParams();
+    if (unassigned) {
+      queryParams.append('unassigned', 'true');
+    }
+    const queryString = queryParams.toString();
+    const url = queryString
+      ? `/node_mgmt/api/node/export_excel/?${queryString}`
+      : '/node_mgmt/api/node/export_excel/';
+    const res = await post<{
+      data: Blob;
+      headers: AxiosResponse['headers'];
+    }>(url, bodyParams, {
+      responseType: 'blob',
+      blobMeta: true,
+      suppressErrorNotification: true
+    });
+    const disposition =
+      res.headers?.['content-disposition'] ??
+      res.headers?.['Content-Disposition'];
+    return {
+      blob: res.data,
+      filename:
+        parseContentDispositionFilename(
+          typeof disposition === 'string' ? disposition : undefined
+        ) || 'nodes.xlsx'
+    };
   };
 
   // 删除节点必清 CMDB 悬挂 node_id（实例保留）。retire_linked=true 时额外退役监控。
@@ -108,9 +149,21 @@ const useNodeApi = () => {
   };
 
   // 获取采集器安装节点信息（返回完整响应，包含status和summary）
-  const getCollectorNodes = async (params: { taskId: string | number }) => {
+  const getCollectorNodes = async (params: {
+    taskId: string | number;
+    page?: number;
+    page_size?: number;
+  }) => {
+    const body: { page?: number; page_size?: number } = {};
+    if (params.page !== undefined) {
+      body.page = params.page;
+    }
+    if (params.page_size !== undefined) {
+      body.page_size = params.page_size;
+    }
     const res = await post(
-      `/node_mgmt/api/installer/collector/install/${params.taskId}/nodes/`
+      `/node_mgmt/api/installer/collector/install/${params.taskId}/nodes/`,
+      body
     );
     // 返回完整响应，让调用方处理 status 和 summary
     return (
@@ -125,9 +178,19 @@ const useNodeApi = () => {
   // 获取采集器操作节点信息（启动、停止、重启，返回完整响应，包含status和summary）
   const getCollectorOperationNodes = async (params: {
     taskId: string | number;
+    page?: number;
+    page_size?: number;
   }) => {
+    const body: { page?: number; page_size?: number } = {};
+    if (params.page !== undefined) {
+      body.page = params.page;
+    }
+    if (params.page_size !== undefined) {
+      body.page_size = params.page_size;
+    }
     const res = await post(
-      `/node_mgmt/api/node/collector/action/${params.taskId}/nodes/`
+      `/node_mgmt/api/node/collector/action/${params.taskId}/nodes/`,
+      body
     );
     // 返回完整响应，让调用方处理 status 和 summary
     return (
@@ -171,6 +234,7 @@ const useNodeApi = () => {
 
   return {
     getNodeList,
+    exportNodeList,
     delNode,
     modulePush,
     getNodeStateEnum,

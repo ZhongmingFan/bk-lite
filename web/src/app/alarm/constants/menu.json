@@ -27,7 +27,7 @@
       "name": "Integration",
       "children": [
         {
-          "title": "告警源详情",
+          "title": "集成源详情",
           "url": "/alarm/integration/detail",
           "name": "integration_detail",
           "isNotMenuItem": true
@@ -51,6 +51,12 @@
           "url": "/alarm/settings/alertAssign",
           "name": "alert_assign",
           "icon": "gaojingfenpai"
+        },
+        {
+          "title": "通知模板",
+          "url": "/alarm/settings/notificationTemplates",
+          "name": "notification_templates",
+          "icon": "shiyongwendang"
         },
         {
           "title": "屏蔽策略",
@@ -119,7 +125,7 @@
       "name": "Integration",
       "children": [
         {
-          "title": "Source Detail",
+          "title": "Integration Source Detail",
           "url": "/alarm/integration/detail",
           "name": "integration_detail",
           "isNotMenuItem": true
@@ -143,6 +149,12 @@
           "url": "/alarm/settings/alertAssign",
           "name": "alert_assign",
           "icon": "gaojingfenpai"
+        },
+        {
+          "title": "Notification Templates",
+          "url": "/alarm/settings/notificationTemplates",
+          "name": "notification_templates",
+          "icon": "shiyongwendang"
         },
         {
           "title": "Shield Strategy",

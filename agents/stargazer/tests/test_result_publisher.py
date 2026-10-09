@@ -527,6 +527,174 @@ async def test_batch_delegate_can_report_one_failed_result_without_poisoning_pee
 
 
 @pytest.mark.asyncio
+async def test_streaming_batch_completes_each_receipt_without_waiting_for_slow_peer():
+    release_slow = asyncio.Event()
+    fast_terminal = asyncio.Event()
+
+    request = CollectionRequest(
+        task_id="batch-streaming-result",
+        plugin_ref="network_topo.config",
+        targets=("10.10.24.1", "10.10.24.2"),
+    )
+    lease = RunLease(request.task_id, request.digest, "pod-a", 8, 999999)
+    fast_id = build_collection_result_id(
+        task_id=request.task_id,
+        plugin_ref=request.plugin_ref,
+        target="10.10.24.1",
+        fence=lease.fence,
+    )
+    slow_id = build_collection_result_id(
+        task_id=request.task_id,
+        plugin_ref=request.plugin_ref,
+        target="10.10.24.2",
+        fence=lease.fence,
+    )
+
+    class StreamingDelegate:
+        async def publish_batch_events(self, _items):
+            yield fast_id, None
+            fast_terminal.set()
+            await release_slow.wait()
+            yield slow_id, None
+
+    publisher = BufferedResultPublisher(
+        StreamingDelegate(),
+        capacity=2,
+        batch_size=2,
+        flush_interval_seconds=0.01,
+    )
+    receipts = await asyncio.gather(
+        *(
+            publisher.enqueue(
+                request,
+                TargetCollectionResult(target=target, status="success", attempts=1, value="metric 1"),
+                lease,
+            )
+            for target in request.targets
+        )
+    )
+
+    await asyncio.wait_for(fast_terminal.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert receipts[0].done() is True
+    assert receipts[1].done() is False
+    assert (await receipts[0].wait()).status == PublishStatus.CONFIRMED
+
+    release_slow.set()
+    assert (await receipts[1].wait()).status == PublishStatus.CONFIRMED
+    await publisher.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_streaming_batch_never_confirms_a_result_without_a_terminal_event():
+    request = CollectionRequest(
+        task_id="batch-streaming-incomplete",
+        plugin_ref="network_topo.config",
+        targets=("10.10.26.1", "10.10.26.2"),
+    )
+    lease = RunLease(request.task_id, request.digest, "pod-a", 10, 999999)
+    first_id = build_collection_result_id(
+        task_id=request.task_id,
+        plugin_ref=request.plugin_ref,
+        target=request.targets[0],
+        fence=lease.fence,
+    )
+
+    class IncompleteDelegate:
+        async def publish_batch_events(self, _items):
+            yield first_id, None
+
+    publisher = BufferedResultPublisher(
+        IncompleteDelegate(),
+        capacity=2,
+        batch_size=2,
+        flush_interval_seconds=0.01,
+    )
+    receipts = await asyncio.gather(
+        *(
+            publisher.enqueue(
+                request,
+                TargetCollectionResult(target=target, status="success", attempts=1, value="metric 1"),
+                lease,
+            )
+            for target in request.targets
+        )
+    )
+
+    first, missing = await asyncio.gather(*(receipt.wait() for receipt in receipts))
+
+    assert first.status == PublishStatus.CONFIRMED
+    assert missing.status == PublishStatus.RETRYABLE_FAILED
+    assert missing.error_code == "publish_batch_terminal_missing"
+    await publisher.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_default_nats_pipeline_forwards_per_target_terminal_events(monkeypatch):
+    release_slow = asyncio.Event()
+    fast_terminal = asyncio.Event()
+    request = CollectionRequest(
+        task_id="default-nats-streaming",
+        plugin_ref="network_topo.config",
+        targets=("10.10.25.1", "10.10.25.2"),
+        params={"model_id": "network_topo", "plugin_family": "configuration"},
+    )
+    lease = RunLease(request.task_id, request.digest, "pod-a", 9, 999999)
+
+    from core.infra.jetstream_publish_window import JetStreamPublishWindow
+
+    class JetStream:
+        async def publish_async(self, _subject, payload, **_kwargs):
+            future = asyncio.get_running_loop().create_future()
+            if b"10.10.25.1" in payload:
+                future.set_result(None)
+                fast_terminal.set()
+            else:
+
+                async def confirm():
+                    await release_slow.wait()
+                    if not future.done():
+                        future.set_result(None)
+
+                asyncio.create_task(confirm())
+            return future
+
+    monkeypatch.setattr(nats_utils, "_metrics_js_window", JetStreamPublishWindow(lambda: JetStream()))
+    publisher = BufferedResultPublisher(
+        NatsResultPublisher(),
+        capacity=2,
+        batch_size=2,
+        flush_interval_seconds=0.01,
+    )
+    receipts = await asyncio.gather(
+        *(
+            publisher.enqueue(
+                request,
+                TargetCollectionResult(
+                    target=target,
+                    status="success",
+                    attempts=1,
+                    value=f"network_topo_info,host={target} gauge=1",
+                ),
+                lease,
+            )
+            for target in request.targets
+        )
+    )
+
+    await asyncio.wait_for(fast_terminal.wait(), timeout=1)
+    await asyncio.wait_for(receipts[0].wait(), timeout=1)
+
+    assert receipts[0].done() is True
+    assert receipts[1].done() is False
+
+    release_slow.set()
+    await asyncio.gather(*(receipt.wait() for receipt in receipts))
+    await publisher.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_nats_result_publisher_uses_one_metrics_batch_adapter_call():
     batches = []
 

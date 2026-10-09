@@ -32,7 +32,9 @@ class ToolsLoader:
         "attachment_file": ("apps.opspilot.metis.llm.tools.attachment", False),
         "agent_browser": ("apps.opspilot.metis.llm.tools.agent_browser", False),
         "browser_use": ("apps.opspilot.metis.llm.tools.browser_use", False),
-        # "cmdb": ("apps.opspilot.metis.llm.tools.cmdb", False),  # 临时关闭 CMDB tools
+        "cmdb": ("apps.opspilot.metis.llm.tools.cmdb", False),
+        "alerts": ("apps.opspilot.metis.llm.tools.alerts", False),
+        "log": ("apps.opspilot.metis.llm.tools.log", False),
         "current_time": ("apps.opspilot.metis.llm.tools.date", False),
         "duckduckgo": ("apps.opspilot.metis.llm.tools.search", False),
         "elasticsearch": ("apps.opspilot.metis.llm.tools.elasticsearch", True),
@@ -48,6 +50,7 @@ class ToolsLoader:
         "postgres": ("apps.opspilot.metis.llm.tools.postgres", True),
         "python": ("apps.opspilot.metis.llm.tools.python", False),
         "redis": ("apps.opspilot.metis.llm.tools.redis", True),
+        "activedirectory": ("apps.opspilot.metis.llm.tools.activedirectory", True),
         "shell": ("apps.opspilot.metis.llm.tools.shell", False),
         "ssh": ("apps.opspilot.metis.llm.tools.ssh", False),
     }

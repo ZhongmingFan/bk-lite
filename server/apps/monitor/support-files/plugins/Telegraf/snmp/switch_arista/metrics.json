@@ -2,7 +2,7 @@
   "collector": "Telegraf",
   "collect_type": "snmp_arista",
   "plugin": "Switch Arista SNMP",
-  "plugin_desc": "Arista EOS switch SNMP collection. Beyond standard IF-MIB interface metrics, it adds device CPU utilization via HOST-RESOURCES hrProcessorLoad (averaged across cores), which the generic SNMP switch plugin does not provide. Arista exposes memory only through the multi-row hrStorage table (RAM row index not fixed) and temperature/fan/power only through the ENTITY-SENSOR table (sensor types mixed in one table), neither of which can be row/type-filtered by the SNMP input, so those are N/A. Supported brands/models — Arista Networks EOS data-center switches (7050/7060/7280/7300/7500 series and other EOS platforms).",
+  "plugin_desc": "SNMP monitoring template for Arista switch. It reports uptime, CPU utilization, memory utilization, temperature, fan, power supply status, optical modules, and interface traffic, for EOS data-center switches (based on standard MIBs).",
   "support_collect_detect": true,
   "status_query": "any({instance_type='switch', collect_type='snmp_arista'}) by (instance_id)",
   "name": "Switch",
@@ -15,7 +15,14 @@
   ],
   "supplementary_indicators": [
     "snmp_uptime",
-    "device_cpu_usage"
+    "device_cpu_usage",
+    "device_memory_usage",
+    "device_temperature_celsius",
+    "device_fan_state",
+    "device_psu_state",
+    "device_optical_rx_power",
+    "device_optical_tx_power",
+    "device_optical_temperature"
   ],
   "metrics": [
     {
@@ -35,6 +42,168 @@
         "instance_id"
       ],
       "description": "CPU utilization of the Arista EOS switch (HOST-RESOURCES hrProcessorLoad, averaged across cores). Sustained high CPU may indicate control-plane or routing-process load."
+    },
+    {
+      "metric_group": "Memory",
+      "name": "device_memory_used",
+      "query": "sum(device_memory_used{instance_type='switch', __$labels__}) by (instance_id)",
+      "display_name": "Memory Used",
+      "data_type": "Number",
+      "unit": "bytes",
+      "dimensions": [],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "This metric reports the number of bytes currently in use by Arista EOS system RAM (HOST-RESOURCES hrStorageUsed on the RAM row selected by hrStorageDescr, multiplied by hrStorageAllocationUnits). It helps administrators understand absolute memory consumption and identify when the device is under memory pressure."
+    },
+    {
+      "metric_group": "Memory",
+      "name": "device_memory_total",
+      "query": "sum(device_memory_total{instance_type='switch', __$labels__}) by (instance_id)",
+      "display_name": "Memory Total",
+      "data_type": "Number",
+      "unit": "bytes",
+      "dimensions": [],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "This metric reports the total size in bytes of Arista EOS system RAM (HOST-RESOURCES hrStorageSize on the RAM row selected by hrStorageDescr, multiplied by hrStorageAllocationUnits). Together with the used bytes it determines overall memory utilization."
+    },
+    {
+      "metric_group": "Memory",
+      "name": "device_memory_usage",
+      "query": "sum(device_memory_used{instance_type='switch', __$labels__}) by (instance_id) / sum(device_memory_total{instance_type='switch', __$labels__}) by (instance_id) * 100",
+      "display_name": "Memory Utilization",
+      "data_type": "Number",
+      "unit": "percent",
+      "dimensions": [],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "This metric reports overall memory utilization of the Arista EOS switch, computed as used / total * 100 from HOST-RESOURCES RAM rows. High memory usage may indicate memory leaks, oversized routing/MAC/ARP tables, or insufficient capacity, and can cause instability or failed allocations."
+    },
+    {
+      "metric_group": "Temperature",
+      "name": "device_temperature_celsius",
+      "query": "max(device_temperature_celsius{instance_type='switch', __$labels__}) by (instance_id)",
+      "display_name": "Temperature",
+      "data_type": "Number",
+      "unit": "celsius",
+      "dimensions": [],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "This metric reports the highest chassis ENTITY-SENSOR temperature reading on the Arista EOS switch, in degrees Celsius. Only sensors whose type is celsius and whose descr is not a DOM module sensor are kept, and the raw value is converted with entPhySensorScale and entPhySensorPrecision. Abnormally high temperatures may indicate fan failure, blocked airflow, or excessive ambient heat."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "device_fan_state",
+      "query": "device_fan_state{instance_type='switch', entPhysicalClass='7', __$labels__}",
+      "display_name": "Fan Status",
+      "data_type": "Enum",
+      "unit": "[{\"name\":\"正常\",\"id\":1,\"color\":\"#1ac44a\"},{\"name\":\"异常\",\"id\":2,\"color\":\"#ff4d4f\"},{\"name\":\"未知\",\"id\":3,\"color\":\"#8c8c8c\"}]",
+      "dimensions": [
+        {
+          "name": "index",
+          "description": "SNMP table row index"
+        },
+        {
+          "name": "descr",
+          "description": "Entity description"
+        }
+      ],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "This metric reports the operational state of each Arista EOS cooling fan (ENTITY-STATE-MIB entStateOper joined with ENTITY-MIB entPhysicalClass fan=7), normalized so that 1 means ok (enabled), 2 means bad, and 3 means Unknown (gray, no alert). unknown(1) maps to 3; enabled(3) maps to 1; disabled(2) and testing(4) map to 2. A value of 2 indicates a cooling fault that can quickly lead to overheating and should be investigated immediately."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "device_psu_state",
+      "query": "device_psu_state{instance_type='switch', entPhysicalClass='6', __$labels__}",
+      "display_name": "Power Supply Status",
+      "data_type": "Enum",
+      "unit": "[{\"name\":\"正常\",\"id\":1,\"color\":\"#1ac44a\"},{\"name\":\"异常\",\"id\":2,\"color\":\"#ff4d4f\"},{\"name\":\"未知\",\"id\":3,\"color\":\"#8c8c8c\"}]",
+      "dimensions": [
+        {
+          "name": "index",
+          "description": "SNMP table row index"
+        },
+        {
+          "name": "descr",
+          "description": "Entity description"
+        }
+      ],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "This metric reports the operational state of each Arista EOS power supply (ENTITY-STATE-MIB entStateOper joined with ENTITY-MIB entPhysicalClass powerSupply=6), normalized so that 1 means ok (enabled), 2 means bad, and 3 means Unknown (gray, no alert). unknown(1) maps to 3; enabled(3) maps to 1; disabled(2) and testing(4) map to 2. A value of 2 signals a power redundancy or hardware fault and must be remediated promptly."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "device_optical_rx_power",
+      "query": "device_optical_rx_power{instance_type='switch', __$labels__}",
+      "display_name": "SFP RX Power",
+      "data_type": "Number",
+      "unit": "counts",
+      "dimensions": [
+        {
+          "name": "index",
+          "description": "SNMP table row index (entPhysicalIndex)"
+        },
+        {
+          "name": "descr",
+          "description": "Sensor description"
+        }
+      ],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "Per-sensor optical receive power in dBm from ENTITY-SENSOR-MIB entPhySensorTable. Rows are selected when entPhysicalDescr or entPhysicalName contains DOM RX Power (case-insensitive). The raw value is converted with entPhySensorScale and entPhySensorPrecision. A dropping RX level is an early sign of fiber attenuation, dirty optics, or a failing peer transmitter."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "device_optical_tx_power",
+      "query": "device_optical_tx_power{instance_type='switch', __$labels__}",
+      "display_name": "SFP TX Power",
+      "data_type": "Number",
+      "unit": "counts",
+      "dimensions": [
+        {
+          "name": "index",
+          "description": "SNMP table row index (entPhysicalIndex)"
+        },
+        {
+          "name": "descr",
+          "description": "Sensor description"
+        }
+      ],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "Per-sensor optical transmit power in dBm from ENTITY-SENSOR-MIB entPhySensorTable. Rows are selected when entPhysicalDescr or entPhysicalName contains DOM TX Power (case-insensitive). The raw value is converted with entPhySensorScale and entPhySensorPrecision. An abnormally low TX level indicates a failing laser/optic rather than fiber attenuation alone."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "device_optical_temperature",
+      "query": "device_optical_temperature{instance_type='switch', __$labels__}",
+      "display_name": "Optical Module Temperature",
+      "data_type": "Number",
+      "unit": "celsius",
+      "dimensions": [
+        {
+          "name": "index",
+          "description": "SNMP table row index (entPhysicalIndex)"
+        },
+        {
+          "name": "descr",
+          "description": "Sensor description"
+        }
+      ],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "Per-sensor optical-module temperature in degrees Celsius from ENTITY-SENSOR-MIB. Rows are selected when sensor type is celsius and descr contains DOM. The raw value is converted with entPhySensorScale and entPhySensorPrecision. Abnormally high module temperature can precede laser degradation or link errors."
     },
     {
       "metric_group": "Traffic",

@@ -3,9 +3,9 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Alert, Button, Space, Spin, message } from "antd";
 import {
-  DownloadOutlined,
+  FileZipOutlined,
+  ImportOutlined,
   PlusOutlined,
-  UploadOutlined,
 } from "@ant-design/icons";
 import { useTranslation } from "@/utils/i18n";
 import { useWikiApi } from "@/app/opspilot/api/wiki";
@@ -13,13 +13,19 @@ import {
   KnowledgePage,
   WikiDirectoryTreeResult,
 } from "@/app/opspilot/types/wiki";
+import {
+  parseExportBlobError,
+  parseJsonErrorBlob,
+} from "@/app/opspilot/utils/wikiExportBlobError";
 import WikiDirectoryTree, {
   findFirstWikiTreePageId,
   toWikiTreePages,
+  type WikiTreeMaterialItem,
 } from "./WikiDirectoryTree";
 import WikiPageMoveModal from "./WikiPageMoveModal";
 import WikiMarkdownImportModal from "./WikiMarkdownImportModal";
 import WikiPageEditorDrawer from "./WikiPageEditorDrawer";
+import WikiMaterialSourcePane from "./WikiMaterialSourcePane";
 import WikiPageReadingPane from "./WikiPageReadingPane";
 import type { WikiDirectoryQuery } from "./useWikiDirectoryQuery";
 
@@ -35,18 +41,25 @@ const PageTab: React.FC<PageTabProps> = ({ kbId, directoryQuery }) => {
   const {
     search: nameFilter,
     selectedPageId,
+    selectedMaterialId,
     setSearch,
     setSelectedPageId,
+    setSelectedMaterialId,
   } = directoryQuery;
   const {
     fetchPages,
+    fetchMaterials,
     fetchDirectoryTree,
+    deleteNestedDirectory,
     movePagesToDirectory,
-    exportKnowledgeBaseMarkdown,
+    exportKnowledgeBaseOkf,
+    deletePage,
   } = useWikiApi();
 
   const [treePages, setTreePages] = useState<KnowledgePage[]>([]);
+  const [treeMaterials, setTreeMaterials] = useState<WikiTreeMaterialItem[]>([]);
   const [pagesLoading, setPagesLoading] = useState(false);
+  const [materialsLoading, setMaterialsLoading] = useState(false);
   const [directoryTreeState, setDirectoryTreeState] = useState<{
     kbId: number;
     value: WikiDirectoryTreeResult;
@@ -54,8 +67,8 @@ const PageTab: React.FC<PageTabProps> = ({ kbId, directoryQuery }) => {
   const [directoryTreeLoadState, setDirectoryTreeLoadState] = useState<
     "loading" | "ready" | "error"
   >("loading");
-  const [exportingMarkdown, setExportingMarkdown] = useState(false);
-  const [markdownImportOpen, setMarkdownImportOpen] = useState(false);
+  const [exportingOkf, setExportingOkf] = useState(false);
+  const [okfImportOpen, setOkfImportOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [editing, setEditing] = useState<KnowledgePage | null>(null);
   const [movePageIds, setMovePageIds] = useState<number[]>([]);
@@ -109,6 +122,24 @@ const PageTab: React.FC<PageTabProps> = ({ kbId, directoryQuery }) => {
     }
   }, [kbId]);
 
+  const loadTreeMaterials = useCallback(async () => {
+    setMaterialsLoading(true);
+    try {
+      const res = await fetchMaterials(kbId, {
+        page: 1,
+        page_size: 500,
+      });
+      setTreeMaterials(
+        (res.items || []).map((material) => ({
+          id: material.id,
+          name: material.name,
+        })),
+      );
+    } finally {
+      setMaterialsLoading(false);
+    }
+  }, [kbId]);
+
   useEffect(() => {
     let active = true;
     setDirectoryTreeState(null);
@@ -133,6 +164,10 @@ const PageTab: React.FC<PageTabProps> = ({ kbId, directoryQuery }) => {
     void loadTreePages();
   }, [loadTreePages]);
 
+  useEffect(() => {
+    void loadTreeMaterials();
+  }, [loadTreeMaterials]);
+
   const typeOptions = useMemo(
     () =>
       Array.from(
@@ -148,8 +183,20 @@ const PageTab: React.FC<PageTabProps> = ({ kbId, directoryQuery }) => {
 
   // 进入知识页且未选中时，按树序默认打开第一份页面；空目录自动跳到后续有页面的节点
   useEffect(() => {
-    if (pagesLoading || !directoryTree || directoryTreeLoadState !== "ready") {
+    if (
+      pagesLoading ||
+      materialsLoading ||
+      !directoryTree ||
+      directoryTreeLoadState !== "ready"
+    ) {
       return;
+    }
+    if (selectedMaterialId != null) {
+      const materialExists = treeMaterials.some(
+        (material) => material.id === selectedMaterialId,
+      );
+      if (materialExists) return;
+      setSelectedMaterialId(null, "replace");
     }
     const firstPageId = findFirstWikiTreePageId(
       directoryTree.directories,
@@ -171,10 +218,14 @@ const PageTab: React.FC<PageTabProps> = ({ kbId, directoryQuery }) => {
   }, [
     directoryTree,
     directoryTreeLoadState,
+    materialsLoading,
     nameFilter,
     pagesLoading,
+    selectedMaterialId,
     selectedPageId,
+    setSelectedMaterialId,
     setSelectedPageId,
+    treeMaterials,
     treePageItems,
   ]);
 
@@ -231,29 +282,92 @@ const PageTab: React.FC<PageTabProps> = ({ kbId, directoryQuery }) => {
     }
   };
 
-  const handleExportMarkdown = async () => {
-    setExportingMarkdown(true);
+  const handleDeletePage = async (pageId: number) => {
+    if (
+      !directoryMutationReady ||
+      !directoryTree ||
+      directoryTree.active_generation_id === null ||
+      directoryTree.structure_version === null
+    ) {
+      return;
+    }
+    setDirectoryMutationLoading(true);
     try {
-      const blob = await exportKnowledgeBaseMarkdown(kbId);
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = `wiki-kb-${kbId}-markdown.zip`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-      message.success(t("wiki.exportMarkdownDone"));
-    } catch {
-      message.error(t("wiki.exportMarkdownFailed"));
+      await deletePage(
+        pageId,
+        directoryTree.active_generation_id,
+        directoryTree.structure_version,
+      );
+      message.success(t("wiki.deleteSuccess"));
+      if (selectedPageId === pageId) setSelectedPageId(null, "replace");
+      await Promise.all([loadTreePages(), refreshDirectoryTree()]);
     } finally {
-      setExportingMarkdown(false);
+      setDirectoryMutationLoading(false);
     }
   };
 
-  const handleMarkdownImportCompleted = async () => {
-    setMarkdownImportOpen(false);
-    await Promise.allSettled([refreshDirectoryTree(), loadTreePages()]);
+  const handleDeleteDirectory = async (directoryId: number) => {
+    if (
+      !directoryMutationReady ||
+      !directoryTree ||
+      directoryTree.active_generation_id === null ||
+      directoryTree.structure_version === null
+    ) {
+      return;
+    }
+    setDirectoryMutationLoading(true);
+    try {
+      await deleteNestedDirectory(
+        kbId,
+        directoryId,
+        directoryTree.active_generation_id,
+        directoryTree.structure_version,
+      );
+      message.success(t("wiki.deleteSuccess"));
+      setSelectedPageId(null, "replace");
+      await Promise.all([loadTreePages(), refreshDirectoryTree()]);
+    } finally {
+      setDirectoryMutationLoading(false);
+    }
+  };
+
+  const downloadExportBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleExportOkf = async () => {
+    setExportingOkf(true);
+    try {
+      const blob = await exportKnowledgeBaseOkf(kbId);
+      const jsonError = await parseJsonErrorBlob(blob);
+      if (jsonError) {
+        message.error(jsonError.message);
+        return;
+      }
+      downloadExportBlob(blob, `wiki-kb-${kbId}-okf.zip`);
+      message.success(t("wiki.exportOkfDone"));
+    } catch (error) {
+      const parsed = await parseExportBlobError(error);
+      message.error(parsed?.message || t("wiki.exportOkfFailed"));
+    } finally {
+      setExportingOkf(false);
+    }
+  };
+
+  const handleOkfImportCompleted = async () => {
+    setOkfImportOpen(false);
+    await Promise.allSettled([
+      refreshDirectoryTree(),
+      loadTreePages(),
+      loadTreeMaterials(),
+    ]);
   };
 
   return (
@@ -282,17 +396,17 @@ const PageTab: React.FC<PageTabProps> = ({ kbId, directoryQuery }) => {
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
           <Space size={8} wrap>
             <Button
-              icon={<UploadOutlined />}
-              onClick={() => setMarkdownImportOpen(true)}
+              icon={<ImportOutlined />}
+              onClick={() => setOkfImportOpen(true)}
             >
-              {t("wiki.importMarkdown")}
+              {t("wiki.importOkf")}
             </Button>
             <Button
-              icon={<DownloadOutlined />}
-              loading={exportingMarkdown}
-              onClick={handleExportMarkdown}
+              icon={<FileZipOutlined />}
+              loading={exportingOkf}
+              onClick={handleExportOkf}
             >
-              {t("wiki.exportMarkdown")}
+              {t("wiki.exportOkf")}
             </Button>
             <Button
               type="primary"
@@ -309,11 +423,21 @@ const PageTab: React.FC<PageTabProps> = ({ kbId, directoryQuery }) => {
             <WikiDirectoryTree
               directories={directoryTree.directories}
               pages={treePageItems}
+              materials={treeMaterials}
               unclassifiedDirectoryId={directoryTree.unclassified_directory_id}
               selectedPageId={selectedPageId}
+              selectedMaterialId={selectedMaterialId}
               search={nameFilter}
               onSearchChange={(value) => setSearch(value, "replace")}
               onSelectPage={(pageId) => setSelectedPageId(pageId)}
+              onSelectMaterial={(materialId) => setSelectedMaterialId(materialId)}
+              canMutate={
+                directoryMutationReady && !directoryMutationLoading
+              }
+              onDeletePage={(pageId) => void handleDeletePage(pageId)}
+              onDeleteDirectory={(directoryId) =>
+                void handleDeleteDirectory(directoryId)
+              }
             />
           ) : (
             <aside className="flex w-[260px] shrink-0 items-center justify-center border-r border-[var(--color-border)] bg-[var(--color-fill-1)] px-3 text-xs text-[var(--color-text-3)]">
@@ -326,14 +450,20 @@ const PageTab: React.FC<PageTabProps> = ({ kbId, directoryQuery }) => {
           )}
 
           <div className="flex min-h-0 min-w-0 flex-1 flex-col p-3">
-            <WikiPageReadingPane
-              kbId={kbId}
-              pageId={selectedPageId}
-              treePages={treePageItems}
-              onEdit={openEdit}
-              onMove={(page) => openMovePages([page.id])}
-              onOpenRelatedPage={(pageId) => setSelectedPageId(pageId)}
-            />
+            {selectedMaterialId != null ? (
+              <WikiMaterialSourcePane materialId={selectedMaterialId} />
+            ) : (
+              <WikiPageReadingPane
+                kbId={kbId}
+                pageId={selectedPageId}
+                treePages={treePageItems}
+                onEdit={openEdit}
+                onMove={(page) => openMovePages([page.id])}
+                onDelete={(page) => void handleDeletePage(page.id)}
+                canMutate={directoryMutationReady && !directoryMutationLoading}
+                onOpenRelatedPage={(pageId) => setSelectedPageId(pageId)}
+              />
+            )}
           </div>
         </div>
       </div>
@@ -349,11 +479,11 @@ const PageTab: React.FC<PageTabProps> = ({ kbId, directoryQuery }) => {
 
       <WikiMarkdownImportModal
         kbId={kbId}
-        open={markdownImportOpen}
+        open={okfImportOpen}
         directories={directoryTree?.directories || []}
         directoryEnabled={directoryScopeEnabled}
-        onCancel={() => setMarkdownImportOpen(false)}
-        onCompleted={handleMarkdownImportCompleted}
+        onCancel={() => setOkfImportOpen(false)}
+        onCompleted={handleOkfImportCompleted}
       />
 
       <WikiPageEditorDrawer

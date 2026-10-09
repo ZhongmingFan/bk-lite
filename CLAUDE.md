@@ -39,6 +39,7 @@
 - **按需深读**（只读相关章节）：新建视觉组件、改 token/设计语义、组件治理大迁移、
   设计走查，或短规则不够用时 → `web/DESIGN.md` 的 Layout & Styling + Do/Don't；
   实体网格列表页（统一卡 / 页头 / 骨架 / 「新建」）→ `web/DESIGN.md` Components → Entity List Cards；
+  详情页 / 概览页（KPI 格 / 分区卡栏头 / 属性面板 / 计数胶囊）→ `web/DESIGN.md` Components → Detail / Overview Workbench；
   归属争议 → `COMPONENT_GOVERNANCE.md`；改色值 → `globals.css`。
 - 纯文案 / 接 API / 改 props 且不动布局与主题时，不必深读 DESIGN。
 
@@ -59,6 +60,7 @@
 ## 仓库约束
 
 - 只改任务范围，保留无关工作区状态，不做全仓格式化。
+- **拒绝预防性过度设计**：默认不为未来重构或假想风险新增重复契约清单、兼容层、预留抽象或重复防线；只有明确具体事故并说明现有机制为何挡不住时才允许新增。已有安全措施不删，高风险环节仍按项目要求处理。
 - 中文交流和提交；代码标识符遵循现有项目风格。
 - 凭据只由环境注入，不提交或记录 `.env`、keystore、token。
 - 数据库访问使用 Django ORM，禁止 raw SQL、`.raw()`、`RawSQL`、`cursor.execute`。

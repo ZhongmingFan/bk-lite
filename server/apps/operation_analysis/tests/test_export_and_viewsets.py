@@ -36,6 +36,19 @@ def test_scene_widget_surface_contract_rejects_illegal_imports():
     assert vs.normalize_canvas_view_sets_for_storage(screen, ObjectType.SCREEN)["items"] == application3d
 
 
+def test_room3d_scene_widget_is_screen_only():
+    room3d = [{"valueConfig": {"chartType": "room3D", "sceneWidgetType": "room3D"}}]
+    with pytest.raises(ValueError, match="room3D is not supported on dashboard"):
+        vs.normalize_canvas_view_sets_for_storage(room3d, ObjectType.DASHBOARD)
+    with pytest.raises(ValueError, match="room3D is not supported on report"):
+        vs.normalize_canvas_view_sets_for_storage(
+            {"schema_version": 1, "filters": [], "sections": room3d},
+            ObjectType.REPORT,
+        )
+    screen = {"viewport": {"width": 1920, "height": 1080}, "items": room3d, "decorations": {}}
+    assert vs.normalize_canvas_view_sets_for_storage(screen, ObjectType.SCREEN)["items"] == room3d
+
+
 def test_network_status_topology_remains_dashboard_and_screen_only():
     nst = [{"valueConfig": {"chartType": "networkStatusTopology", "sceneWidgetType": "networkStatusTopology"}}]
     assert vs.normalize_canvas_view_sets_for_storage(nst, ObjectType.DASHBOARD) == nst
@@ -95,6 +108,95 @@ def test_normalize_screen_keeps_valid_view_sets_without_ui_defaults():
         "items": [],
         "decorations": {},
     }
+
+
+def test_normalize_screen_keeps_adapter_background_and_chrome_items():
+    items = [
+        {
+            "id": "title-1",
+            "kind": "titleFrame",
+            "preset": "hero-1",
+            "content": "值班总览",
+            "x": 80,
+            "y": 16,
+            "w": 700,
+            "h": 56,
+            "zIndex": 2,
+        },
+        {
+            "id": "clock-1",
+            "kind": "clock",
+            "format": "YYYY-MM-DD HH:mm:ss",
+            "x": 1600,
+            "y": 20,
+            "w": 280,
+            "h": 48,
+            "zIndex": 3,
+        },
+    ]
+    out = vs.normalize_canvas_view_sets_for_storage(
+        {
+            "viewport": {
+                "width": 1920,
+                "height": 1080,
+                "adapter": "fitWidth",
+                "background": {"type": "color", "color": "#112233"},
+                "theme": "screen-dark",
+            },
+            "items": items,
+            "decorations": {"showTitle": False, "showClock": False},
+        },
+        ObjectType.SCREEN,
+    )
+
+    assert out["viewport"]["adapter"] == "fitWidth"
+
+    legacy = vs.normalize_canvas_view_sets_for_storage(
+        {
+            "viewport": {"width": 1920, "height": 1080, "adapter": "contain"},
+            "items": [],
+            "decorations": {},
+        },
+        ObjectType.SCREEN,
+    )
+    assert legacy["viewport"]["adapter"] == "fill"
+    assert out["viewport"]["background"] == {"type": "color", "color": "#112233"}
+    assert out["items"] == items
+
+
+def test_validate_screen_allows_chrome_items_without_chart_type():
+    from apps.operation_analysis.services.canvas_draft.validation import validate_projectable
+
+    validate_projectable(
+        ObjectType.SCREEN,
+        {
+            "viewport": {"width": 1920, "height": 1080, "adapter": "contain"},
+            "items": [
+                {
+                    "id": "text-1",
+                    "kind": "text",
+                    "content": "说明",
+                    "x": 0,
+                    "y": 0,
+                    "w": 120,
+                    "h": 40,
+                    "zIndex": 1,
+                },
+                {
+                    "id": "shape-1",
+                    "kind": "shape",
+                    "shape": "rect",
+                    "shapeStyle": {"backgroundColor": "rgba(4, 165, 180, 0.10)"},
+                    "x": 40,
+                    "y": 40,
+                    "w": 320,
+                    "h": 180,
+                    "zIndex": 2,
+                },
+            ],
+            "decorations": {},
+        },
+    )
 
 
 def test_normalize_screen_keeps_unified_filters():

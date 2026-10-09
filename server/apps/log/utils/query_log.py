@@ -65,8 +65,7 @@ class VictoriaMetricsAPI:
     @staticmethod
     def _extract_metric_value(metrics_text: str, metric_name: str, metric_type: str) -> int:
         sample_pattern = re.compile(
-            r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(?P<labels>[^}]*)\})?\s+"
-            r"(?P<value>[^\s]+)(?:\s+(?P<timestamp>[^\s]+))?$"
+            r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?:\{(?P<labels>[^}]*)\})?\s+" r"(?P<value>[^\s]+)(?:\s+(?P<timestamp>[^\s]+))?$"
         )
         label_pattern = re.compile(r'(\w+)="((?:\\.|[^"])*)"')
 
@@ -108,7 +107,6 @@ class VictoriaMetricsAPI:
             "query": query or "*",
             "start": start,
             "end": end,
-            "ignore_pipes": 1,
         }
         response = requests.get(
             self._build_url(self.host, "/select/logsql/field_names"),
@@ -147,10 +145,7 @@ class VictoriaMetricsAPI:
     def query(self, query, start, end, limit=10):
         limit = VictoriaLogsConstants.normalize_query_limit(limit, default=10, clamp=True)
         query = self._normalize_logsql_query(query)
-        logger.info(
-            "发送VictoriaLogs query查询",
-            extra={"query": query, "start": start, "end": end, "limit": limit},
-        )
+        logger.info("event=victorialogs_query_sent start=%s end=%s limit=%s", start, end, limit)
         data = {"query": query, "start": start, "end": end, "limit": limit}
         response = requests.post(
             self._build_url(self.host, "/select/logsql/query"),
@@ -281,7 +276,7 @@ class VictoriaMetricsAPI:
             )
             raise
 
-    async def tail_async(self, query) -> AsyncIterator[str]:
+    async def tail_async(self, query) -> AsyncIterator[str]:  # noqa: C901
         """异步版本的tail方法，ASGI兼容实现"""
         query = self._normalize_logsql_query(query)
         logger.info("发送VictoriaLogs tail查询", extra={"query": query})
@@ -451,5 +446,5 @@ class VictoriaMetricsAPI:
             if response:
                 try:
                     response.close()
-                except:
+                except Exception:
                     pass  # 忽略关闭时的异常

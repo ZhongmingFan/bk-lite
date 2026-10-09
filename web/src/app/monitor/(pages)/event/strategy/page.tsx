@@ -1,4 +1,5 @@
 'use client';
+import './register-strategy-pilot';
 import React, { useEffect, useState, useRef } from 'react';
 import { Spin, Input, Button, message, Switch, Popconfirm } from 'antd';
 import useApiClient from '@/utils/request';
@@ -23,7 +24,8 @@ import { findLabelById } from '@/app/monitor/utils/common';
 import { buildMonitorStrategyDetailUrl } from '@/app/monitor/utils/policyRouteUtils';
 import { useLocalizedTime } from '@/hooks/useLocalizedTime';
 import { PlusOutlined } from '@ant-design/icons';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import TreeSelector from '@/app/monitor/components/treeSelector';
 import ResizableSidebar from '@/app/monitor/components/resizableSidebar';
 import Permission from '@/components/permission';
@@ -49,7 +51,7 @@ const Strategy: React.FC = () => {
   const { convertToLocalizedTime } = useLocalizedTime();
   const commonContext = useCommon();
   const userList: UserItem[] = commonContext?.userList || [];
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const { syncObjectId } = useMonitorObjectQuery();
   const instRef = useRef<ModalRef>(null);
   const policyAbortControllerRef = useRef<AbortController | null>(null);
@@ -393,7 +395,10 @@ const Strategy: React.FC = () => {
   };
 
   return (
-    <Spin spinning={treeLoading}>
+    <Spin
+      spinning={treeLoading}
+      wrapperClassName="flex h-full min-h-0 w-full min-w-0 max-w-full flex-1 flex-col [&>.ant-spin-container]:flex [&>.ant-spin-container]:h-full [&>.ant-spin-container]:min-h-0 [&>.ant-spin-container]:flex-1 [&>.ant-spin-container]:flex-col"
+    >
       <div className={assetStyle.asset}>
         <ResizableSidebar collapseStorageKey="monitor.event.strategy.sidebarCollapsed">
           <div className={assetStyle.assetTree}>
@@ -407,9 +412,9 @@ const Strategy: React.FC = () => {
         </ResizableSidebar>
         <div className={assetStyle.table}>
           <div className={assetStyle.search}>
-            <div>
+            <div className="min-w-0 flex-1">
               <Input
-                className="w-[320px]"
+                className="w-full max-w-[320px]"
                 placeholder={t('common.searchPlaceHolder')}
                 allowClear
                 onPressEnter={enterText}
@@ -427,15 +432,17 @@ const Strategy: React.FC = () => {
               </Button>
             </Permission>
           </div>
-          <CustomTable
-            scroll={{ y: 'calc(100vh - 336px)', x: 'calc(100vw - 500px)' }}
-            columns={columns}
-            dataSource={tableData}
-            pagination={pagination}
-            loading={tableLoading}
-            rowKey="id"
-            onChange={handleTableChange}
-          ></CustomTable>
+          <div className="min-h-0 min-w-0 flex-1">
+            <CustomTable
+              scroll={{ x: 'max-content' }}
+              columns={columns}
+              dataSource={tableData}
+              pagination={pagination}
+              loading={tableLoading}
+              rowKey="id"
+              onChange={handleTableChange}
+            ></CustomTable>
+          </div>
         </div>
         <SelectAssets
           ref={instRef}

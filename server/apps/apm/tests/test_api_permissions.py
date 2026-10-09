@@ -8,12 +8,23 @@ from urllib.parse import unquote
 import pytest
 from rest_framework.test import APIClient
 
-from apps.apm.models import ApmApplication
+from apps.apm.models import ApmApplication, ApmService
 from apps.apm.services import DjangoTelemetryCatalogService
 from apps.apm.services.contracts import CatalogDiscovery
+from apps.apm.services.probe_artifacts import ProbeArtifactNotFound
 from apps.apm.tests.helpers import create_application
 
 pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture(autouse=True)
+def _stub_probe_artifact_sha256(monkeypatch):
+    # 接入脚本要给探针制品算 SHA-256，真跑会去连 NATS 对象存储；
+    # 这里统一桩掉，制品缺失 / 不可用的用例在测试体内再覆盖。
+    monkeypatch.setattr(
+        "apps.apm.services.integration_configuration.get_probe_artifact_sha256",
+        lambda artifact_name: "0" * 64,
+    )
 
 
 def _configuration_script(code: str) -> str:
@@ -63,6 +74,40 @@ def test_application_crud_persists_business_boundary_without_a_token(apm_api_cli
     assert updated.data["application_id"] == "shop"
     assert updated.data["name"] == "电商应用"
     assert updated.data["is_builtin"] is False
+
+    deleted = apm_api_client.delete(f"/api/v1/apm/applications/{created.data['id']}/")
+    assert deleted.status_code in {200, 204}
+    assert not ApmApplication.objects.filter(id=created.data["id"]).exists()
+
+
+def test_application_delete_detaches_services_and_keeps_catalog_rows(apm_api_client):
+    created = apm_api_client.post(
+        "/api/v1/apm/applications/",
+        {"application_id": "shop", "name": "电商主站", "organization_ids": [10]},
+        format="json",
+    )
+    assert created.status_code == 201
+    DjangoTelemetryCatalogService().discover(CatalogDiscovery("shop", "checkout", "pod-a", "prod"))
+    service = ApmService.objects.get(normalized_namespace="shop", normalized_name="checkout")
+    assert str(service.application_id) == created.data["id"]
+
+    deleted = apm_api_client.delete(f"/api/v1/apm/applications/{created.data['id']}/")
+    assert deleted.status_code in {200, 204}
+    assert not ApmApplication.objects.filter(id=created.data["id"]).exists()
+    service.refresh_from_db()
+    assert service.application_id is None
+
+
+def test_application_delete_requires_operate_permission(apm_user):
+    application = create_application("shop", (10,))
+    client = APIClient()
+    client.force_authenticate(user=apm_user)
+    client.cookies["current_team"] = "10"
+    apm_user.permission["apm"] = {"applications-View"}
+
+    denied = client.delete(f"/api/v1/apm/applications/{application.id}/")
+    assert denied.status_code == 403
+    assert ApmApplication.objects.filter(id=application.id).exists()
 
 
 def test_application_catalog_does_not_expose_a_builtin_uncategorized_application(apm_api_client):
@@ -450,6 +495,113 @@ def test_integration_config_java_snippet_reports_missing_probe_download_address(
     assert response.data["code"] == "probe_download_unavailable"
 
 
+@pytest.mark.parametrize("language", ["python", "nodejs", "java", "go", "dotnet"])
+def test_integration_config_reports_missing_probe_artifact_instead_of_500(apm_api_client, monkeypatch, language):
+    create_application("shop", (10,))
+    _integration_region(monkeypatch)
+
+    def missing(artifact_name):
+        raise ProbeArtifactNotFound(artifact_name)
+
+    monkeypatch.setattr(
+        "apps.apm.services.integration_configuration.get_probe_artifact_sha256",
+        missing,
+        raising=False,
+    )
+    response = apm_api_client.post(
+        "/api/v1/apm/integration-config/",
+        {
+            "application_id": "shop",
+            "cloud_region_id": 7,
+            "language": language,
+            "runtime": "host",
+            "service_name": "checkout",
+            "environment": "production",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 404
+    assert response.data["code"] == "probe_artifact_not_found"
+    assert "probe artifact does not exist" in response.data["detail"]
+    assert "系统错误" not in str(response.data)
+
+
+@pytest.mark.parametrize("language", ["python", "nodejs", "java", "go", "dotnet"])
+def test_integration_config_reports_probe_storage_unavailability_instead_of_500(
+    apm_api_client,
+    monkeypatch,
+    caplog,
+    language,
+):
+    create_application("shop", (10,))
+    _integration_region(monkeypatch)
+    caplog.set_level("WARNING", logger="apm")
+
+    def unavailable(artifact_name):
+        raise TimeoutError("nats connect timeout")
+
+    monkeypatch.setattr(
+        "apps.apm.services.integration_configuration.get_probe_artifact_sha256",
+        unavailable,
+        raising=False,
+    )
+    response = apm_api_client.post(
+        "/api/v1/apm/integration-config/",
+        {
+            "application_id": "shop",
+            "cloud_region_id": 7,
+            "language": language,
+            "runtime": "docker",
+            "service_name": "checkout",
+            "environment": "production",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 503
+    assert response.data["code"] == "probe_artifact_unavailable"
+    assert response.data["detail"] == "The probe artifact is temporarily unavailable. Try again later."
+    assert "nats" not in str(response.data).lower()
+    assert "timeout" not in str(response.data).lower()
+    records = [record for record in caplog.records if record.msg == "APM ingest snippet rendering failed: %s"]
+    assert len(records) == 1
+    assert records[0].args == ("TimeoutError",)
+    assert records[0].getMessage() == "APM ingest snippet rendering failed: TimeoutError"
+    assert records[0].exc_info is None
+    assert "nats connect timeout" not in records[0].getMessage()
+
+
+@pytest.mark.parametrize("language", ["python", "nodejs", "java", "go", "dotnet"])
+def test_integration_config_kubernetes_does_not_hash_probe_artifacts(apm_api_client, monkeypatch, language):
+    create_application("shop", (10,))
+    _integration_region(monkeypatch)
+
+    def missing(artifact_name):
+        raise ProbeArtifactNotFound(artifact_name)
+
+    monkeypatch.setattr(
+        "apps.apm.services.integration_configuration.get_probe_artifact_sha256",
+        missing,
+        raising=False,
+    )
+    response = apm_api_client.post(
+        "/api/v1/apm/integration-config/",
+        {
+            "application_id": "shop",
+            "cloud_region_id": 7,
+            "language": language,
+            "runtime": "kubernetes",
+            "service_name": "checkout",
+            "environment": "production",
+        },
+        format="json",
+    )
+
+    assert response.status_code == 200
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" in response.data["code"]
+
+
 def test_integration_config_rejects_unknown_or_out_of_scope_application(apm_api_client):
     create_application("hidden", (20,))
 
@@ -544,7 +696,7 @@ def test_integration_config_hides_probe_download_rpc_failures_from_clients(apm_a
 
     assert response.status_code == 503
     assert response.data["code"] == "cloud_region_unavailable"
-    assert response.data["detail"] == "云区域配置暂时不可用，请稍后重试。"
+    assert response.data["detail"] == "Cloud region configuration is temporarily unavailable. Try again later."
     assert "nats" not in str(response.data).lower()
     assert "no responders" not in str(response.data).lower()
 
@@ -577,7 +729,7 @@ def test_integration_config_rejects_client_endpoint_and_invalid_region_proxy_add
         )
 
     assert injected.status_code == 400
-    assert "服务器" in str(injected.data)
+    assert "resolved by the server" in str(injected.data)
     assert invalid_config.status_code == 400
     assert invalid_config.data["code"] == "invalid_cloud_region_proxy_address"
 

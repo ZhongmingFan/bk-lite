@@ -28,6 +28,9 @@ vi.mock('@/app/ops-analysis/components/ops-analysis-widgets/text-panel', () => (
 vi.mock('@/app/ops-analysis/components/widgets/topologyMap', () => ({ default: stubComponent }));
 vi.mock('@/app/ops-analysis/components/widgets/nodeGraph', () => ({ default: stubComponent }));
 vi.mock('@/app/ops-analysis/components/widgets/application3D', () => ({ default: stubComponent }));
+vi.mock('@/app/ops-analysis/components/widgets/relatedTopology/canvas', () => ({
+  default: stubComponent,
+}));
 
 describe('scene widget runtime surface enforcement', () => {
   let getWidgetComponent: typeof import('../widgetRegistry').getWidgetComponent;
@@ -48,10 +51,21 @@ describe('scene widget runtime surface enforcement', () => {
     expect(getWidgetComponent('networkStatusTopology', 'report')).toBeNull();
   });
 
+  it('keeps relatedTopology on dashboard and screen, not report', () => {
+    expect(getWidgetComponent('relatedTopology', 'dashboard')).not.toBeNull();
+    expect(getWidgetComponent('relatedTopology', 'screen')).not.toBeNull();
+    expect(getWidgetComponent('relatedTopology', 'report')).toBeNull();
+  });
+
+  it('mounts room3D only on screen', () => {
+    expect(getWidgetComponent('room3D', 'screen')).not.toBeNull();
+    expect(getWidgetComponent('room3D', 'dashboard')).toBeNull();
+    expect(getWidgetComponent('room3D', 'report')).toBeNull();
+  });
+
   it('does not gate ordinary chart types by surface', () => {
     expect(getWidgetComponent('line', 'dashboard')).not.toBeNull();
     expect(getWidgetComponent('line', 'screen')).not.toBeNull();
     expect(getWidgetComponent('line', 'report')).not.toBeNull();
-    expect(getWidgetComponent('room3D', 'screen')).not.toBeNull();
   });
 });

@@ -19,6 +19,7 @@ import { useCommon } from '@/app/alarm/context/common';
 import { useTranslation } from '@/utils/i18n';
 import { useSearchParams } from 'next/navigation';
 import { useIncidentsApi } from '@/app/alarm/api/incidents';
+import { collectSelectedAlertIds } from '@/app/alarm/utils/incidentAlertRelations';
 import { message, Spin, Modal, Timeline, Empty } from 'antd';
 import { IncidentTableDataItem } from '@/app/alarm/types/incidents';
 import { useStateMap } from '@/app/alarm/constants/alarm';
@@ -44,11 +45,21 @@ import { useLocalizedTime } from '@/hooks/useLocalizedTime';
 import { TimeLineItem } from '@/app/alarm/types/types';
 import { useUserInfoContext } from '@/context/userInfo';
 import GroupTreeSelect from '@/components/group-tree-select';
+import { useAiPageContext } from '@/components/ai-page-context';
+import { buildIncidentDetailPageContext } from './incidentDetail.context';
+import { PublicWidgetPane } from '@/app/alarm/components/public-widget-pane';
+import { listIncidentAssetOptions } from '@/app/alarm/utils/alarmSnapshotObjects';
+import { useAppWidget } from '@/context/appCapabilities';
+import {
+  canShowIncidentAssetChangeTab,
+  resolveIncidentSelectedAssetUuid,
+} from './incidentPublicAssetChange';
 
 const { TabPane } = Tabs;
 
 const IncidentDetail: React.FC = () => {
   const { t } = useTranslation();
+  const assetChange = useAppWidget('cmdb.assetChange');
   const { getLogList } = useSettingApi();
   const { convertToLocalizedTime } = useLocalizedTime();
   const { flatGroups } = useUserInfoContext();
@@ -57,7 +68,12 @@ const IncidentDetail: React.FC = () => {
   const [recordLoading, setRecordLoading] = useState<boolean>(false);
   const { levelListIncident, levelMapIncident, userList } = useCommon();
   const { getAlarmList } = useAlarmApi();
-  const { getIncidentDetail, modifyIncidentDetail } = useIncidentsApi();
+  const {
+    getIncidentDetail,
+    modifyIncidentDetail,
+    addAlertsToIncident,
+    removeAlertsFromIncident,
+  } = useIncidentsApi();
   const STATE_MAP = useStateMap();
   const searchParams = useSearchParams();
   const rowDetailId = searchParams.get('id') || '';
@@ -85,6 +101,31 @@ const IncidentDetail: React.FC = () => {
   const [selectedTeams, setSelectedTeams] = useState<number[]>([]);
   const [preTeams, setPreTeams] = useState<number[]>([]);
   const [teamLoading, setTeamLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState('alert');
+  const [selectedAssetUuid, setSelectedAssetUuid] = useState('');
+
+  const assetOptions = useMemo(
+    () => listIncidentAssetOptions(tableData),
+    [tableData],
+  );
+  const instUuids = useMemo(
+    () => assetOptions.map((item) => item.instUuid),
+    [assetOptions],
+  );
+  const showAssetChange = canShowIncidentAssetChangeTab({
+    declared: assetChange.declared,
+    instUuids,
+  });
+  const currentAssetUuid = resolveIncidentSelectedAssetUuid(
+    instUuids,
+    selectedAssetUuid,
+  );
+
+  useEffect(() => {
+    if (activeTab === 'assetChange' && !showAssetChange) {
+      setActiveTab('alert');
+    }
+  }, [activeTab, showAssetChange]);
 
   const alarmAttrList = useMemo(() => [
     {
@@ -247,6 +288,44 @@ const IncidentDetail: React.FC = () => {
       .join(', ');
   }, [preTeams, flatGroups]);
 
+  const incidentContextLabels = useMemo(
+    () => ({
+      level: (value?: string | number) =>
+        levelListIncident.find((item) => item.level_id === Number(value))
+          ?.level_display_name || String(value ?? '--'),
+      state: (value?: string) =>
+        (value ? STATE_MAP[value as keyof typeof STATE_MAP] : undefined) ||
+        value ||
+        '--',
+      formatTime: (value?: string) =>
+        value ? convertToLocalizedTime(value) : '--',
+      team: () => {
+        const text = getTeamDisplay();
+        return text && text !== '--' ? text : '';
+      },
+    }),
+    [STATE_MAP, convertToLocalizedTime, getTeamDisplay, levelListIncident],
+  );
+
+  useAiPageContext(
+    () =>
+      buildIncidentDetailPageContext({
+        visible: true,
+        pageLoading: loadingDetail,
+        alertLoading: tabLoading,
+        incident: incidentDetail,
+        alerts: tableData,
+        labels: incidentContextLabels,
+      }),
+    [
+      loadingDetail,
+      tabLoading,
+      incidentDetail,
+      tableData,
+      incidentContextLabels,
+    ],
+  );
+
   const onTabTableChange = useCallback(() => {
     fetchAlarmList();
   }, []);
@@ -265,12 +344,9 @@ const IncidentDetail: React.FC = () => {
         else setUnlinkLoading(true);
 
         try {
-          const toRemove = keys ?? selectedRowKeys;
-          if (!toRemove.length) return;
-          const remainingIds = tableData
-            .map((i) => i.id)
-            .filter((id) => !toRemove.includes(id));
-          await modifyIncidentDetail(rowDetailId, { alert: remainingIds });
+          const selectedIds = collectSelectedAlertIds(keys ?? selectedRowKeys);
+          if (!selectedIds.length) return;
+          await removeAlertsFromIncident(rowDetailId, selectedIds);
           message.success(
             t('alarmCommon.unlinkAlert') + t('alarmCommon.success')
           );
@@ -292,13 +368,11 @@ const IncidentDetail: React.FC = () => {
   }, []);
 
   const handleLinkConfirm = async (selectedKeys: React.Key[]) => {
+    const selectedIds = collectSelectedAlertIds(selectedKeys);
+    if (!selectedIds.length) return;
     setLinkingLoading(true);
     try {
-      const existingIds = tableData.map((i) => i.id);
-      const newIds = Array.from(
-        new Set([...existingIds, ...(selectedKeys as number[])])
-      );
-      await modifyIncidentDetail(rowDetailId, { alert: newIds });
+      await addAlertsToIncident(rowDetailId, selectedIds);
       message.success(t('alarmCommon.linkAlert') + t('alarmCommon.success'));
       setOperateVisible(false);
       fetchAlarmList();
@@ -618,7 +692,7 @@ const IncidentDetail: React.FC = () => {
           </Descriptions>
         )}
         <div className={`${styles.tabsWrapper} w-full`}>
-          <Tabs defaultActiveKey="alert">
+          <Tabs activeKey={activeTab} onChange={setActiveTab}>
             <TabPane tab={t('alarms.alert')} key="alert">
               <div className={styles.tabContent}>
                 <div className={styles.filterRow}>
@@ -700,12 +774,37 @@ const IncidentDetail: React.FC = () => {
                   <GanttChart
                     loading={tabLoading}
                     alarmData={tableData}
-                    selectedTasks={selectedRowKeys as number[]}
+                    selectedTasks={collectSelectedAlertIds(selectedRowKeys)}
                     onSelectionChange={(keys) => setSelectedRowKeys(keys)}
                   />
                 )}
               </div>
             </TabPane>
+            {showAssetChange && (
+              <TabPane tab={t('alarms.assetChange')} key="assetChange">
+                <div className={styles.tabContent}>
+                  <PublicWidgetPane
+                    active={activeTab === 'assetChange'}
+                    loadWidget={assetChange.loadWidget}
+                    identifier={currentAssetUuid}
+                    identifierProp="instUuid"
+                    toolbarStart={
+                      instUuids.length > 1 ? (
+                        <Select
+                          className="w-[240px]"
+                          value={currentAssetUuid}
+                          options={assetOptions.map(({ instUuid, label }) => ({
+                            value: instUuid,
+                            label,
+                          }))}
+                          onChange={setSelectedAssetUuid}
+                        />
+                      ) : null
+                    }
+                  />
+                </div>
+              </TabPane>
+            )}
             <TabPane tab={t('incidents.collaboration')} key="collaboration">
               <CollaborationTab
                 incidentDetail={incidentDetail}

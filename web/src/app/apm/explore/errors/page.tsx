@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { Alert, Button, Select } from 'antd';
 import useApmApi from '@/app/apm/api';
@@ -9,6 +9,7 @@ import CatalogState, { catalogErrorKind, type CatalogStateKind } from '@/app/apm
 import ApmIssueList from '@/app/apm/components/issue-list';
 import type { ApmIssue, ApmService } from '@/app/apm/types';
 import FilterToolbar from '@/components/filter-toolbar';
+import { createLatestRequestGuard } from '@/context/latestRequestGuard';
 import { useTranslation } from '@/utils/i18n';
 
 type PageState = CatalogStateKind | 'ready';
@@ -36,6 +37,12 @@ export default function ApmErrorsPage() {
   const [truncated, setTruncated] = useState(false);
   const [state, setState] = useState<PageState>('loading');
   const [loadingMore, setLoadingMore] = useState(false);
+  const [requestGuard] = useState(createLatestRequestGuard);
+  const requestIdRef = useRef(0);
+  const queryKeyRef = useRef('');
+  const nextCursorRef = useRef<string | null>(null);
+  const loadingMoreRef = useRef(false);
+  const queryKey = `${serviceId ?? ''}|${environment ?? ''}|${timeRange}`;
 
   useEffect(() => {
     if (!authLoading) void getServices().then(setServices).catch(() => setServices([]));
@@ -51,31 +58,70 @@ export default function ApmErrorsPage() {
   const selectedService = useMemo(() => services.find((service) => service.id === serviceId), [serviceId, services]);
   const load = useCallback((cursor?: string) => {
     if (authLoading) return;
-    if (cursor) setLoadingMore(true); else setState('loading');
+    let requestId: number;
+    if (cursor) {
+      if (loadingMoreRef.current) return;
+      loadingMoreRef.current = true;
+      setLoadingMore(true);
+      requestId = requestIdRef.current;
+    } else {
+      requestId = requestGuard.begin();
+      requestIdRef.current = requestId;
+      queryKeyRef.current = queryKey;
+      loadingMoreRef.current = false;
+      setLoadingMore(false);
+      setState('loading');
+      nextCursorRef.current = null;
+      setNextCursor(null);
+    }
+    const requestedQueryKey = queryKey;
+    const requestedCursor = cursor;
     const endedAt = new Date();
     const startedAt = new Date(endedAt.getTime() - RANGE_MS[timeRange]);
     void getIssues({ service_namespace: selectedService?.namespace, service_name: selectedService?.name, environment, started_at: startedAt.toISOString(), ended_at: endedAt.toISOString(), cursor, limit: 50 })
       .then((page) => {
-        setItems((current) => cursor ? [...current, ...page.items] : page.items);
-        setNextCursor(page.next_cursor); setTruncated(page.truncated);
-        setState(page.items.length || cursor || page.next_cursor ? 'ready' : 'empty');
-      }).catch((error) => setState(catalogErrorKind(error))).finally(() => setLoadingMore(false));
-  }, [authLoading, environment, getIssues, selectedService, timeRange]);
+        requestGuard.commitIfCurrent(requestId, () => {
+          if (cursor) {
+            if (queryKeyRef.current !== requestedQueryKey || nextCursorRef.current !== requestedCursor) return;
+            setItems((current) => [...current, ...page.items]);
+          } else {
+            setItems(page.items);
+          }
+          nextCursorRef.current = page.next_cursor;
+          setNextCursor(page.next_cursor);
+          setTruncated(page.truncated);
+          setState(page.items.length || cursor || page.next_cursor ? 'ready' : 'empty');
+        });
+      }).catch((error) => {
+        requestGuard.commitIfCurrent(requestId, () => setState(catalogErrorKind(error)));
+      }).finally(() => {
+        requestGuard.commitIfCurrent(requestId, () => {
+          loadingMoreRef.current = false;
+          setLoadingMore(false);
+        });
+      });
+  }, [authLoading, environment, getIssues, queryKey, requestGuard, selectedService, timeRange]);
   useEffect(() => { load(); }, [load]);
 
   return (
-    <ApmRouteShell title={t('apm.errors.title', '错误分析')} description={t('apm.errors.description', '按真实异常语义聚类 Error Span，并下钻版本、端点和样本 Trace。')}>
+    <ApmRouteShell title={t('apm.errors.title', '错误分析')} description={t('apm.errors.description', '按异常语义聚类错误。次数是该类发生次数，不是探索列表条数。')}>
       <ApmSurface>
         <div className="flex flex-col gap-4">
           <FilterToolbar align="start" spacing="flush" className="w-full" contentClassName="w-full">
-            <Select className="w-52" allowClear showSearch optionFilterProp="label" placeholder={t('apm.errors.allServices', '全部服务')} value={serviceId} options={services.map((service) => ({ value: service.id, label: `${service.namespace} / ${service.name}` }))} onChange={setServiceId} />
-            <Select className="w-44" allowClear showSearch placeholder={t('apm.errors.allEnvironments', '全部环境')} value={environment} options={environments.map((value) => ({ value, label: value || t('apm.common.unset', '未设置') }))} onChange={setEnvironment} />
+            <Select className="w-full sm:w-52" allowClear showSearch optionFilterProp="label" placeholder={t('apm.errors.allServices', '全部服务')} value={serviceId} options={services.map((service) => ({ value: service.id, label: `${service.namespace} / ${service.name}` }))} onChange={setServiceId} />
+            <Select className="w-full sm:w-44" allowClear showSearch placeholder={t('apm.errors.allEnvironments', '全部环境')} value={environment} options={environments.map((value) => ({ value, label: value || t('apm.common.unset', '未设置') }))} onChange={setEnvironment} />
             <Select<TimeRange> className="w-28" value={timeRange} options={(Object.keys(RANGE_MS) as TimeRange[]).map((value) => ({ value, label: value }))} onChange={setTimeRange} />
           </FilterToolbar>
           {truncated ? <Alert showIcon type="info" message={t('apm.errors.boundedHint', '结果按时间窗和游标有界展示，可继续加载更早样本。')} /> : null}
           {state === 'ready' ? (
             <div className="flex flex-col gap-4">
-              {!items.length ? <CatalogState kind="empty" description={t('apm.errors.emptyPage', '当前游标页没有可见 Issue，可继续加载更早样本。')} /> : null}
+              {items.length ? (
+                <span className="text-xs text-[var(--color-text-3)]">
+                  {t('apm.errors.loadedTypes', '已加载 {count} 类错误', { count: items.length })}
+                </span>
+              ) : (
+                <CatalogState kind="empty" description={t('apm.errors.emptyPage', '当前游标页没有可见 Issue，可继续加载更早样本。')} />
+              )}
               <ApmIssueList items={items} />
               {nextCursor ? <Button loading={loadingMore} onClick={() => load(nextCursor)}>{t('apm.common.loadMore', '加载更多')}</Button> : null}
             </div>

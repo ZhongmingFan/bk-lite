@@ -7,6 +7,7 @@ from apps.operation_analysis.services.string_param_multiple_migrate import migra
 _SCENE_WIDGET_SURFACES = {
     "networkStatusTopology": {ObjectType.DASHBOARD, ObjectType.SCREEN},
     "application3D": {ObjectType.SCREEN},
+    "room3D": {ObjectType.SCREEN},
 }
 
 
@@ -66,6 +67,8 @@ def _normalize_screen_view_sets(view_sets: Any) -> dict:
         raise ValueError("view_sets.decorations must be an object")
 
     normalized_viewport = dict(viewport)
+    if "adapter" in viewport and viewport.get("adapter") not in ("fill", "fitWidth", "fitHeight"):
+        normalized_viewport["adapter"] = "fill"
     normalized_viewport["width"] = _require_positive_int(
         viewport.get("width"),
         "view_sets.viewport.width",

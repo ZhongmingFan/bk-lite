@@ -51,6 +51,7 @@ import type {
 } from '@/app/apm/types';
 import ApmRouteShell from '@/app/apm/components/apm-route-shell';
 import SummaryMetricCard from '@/components/summary-metric-card';
+import { createLatestRequestGuard } from '@/context/latestRequestGuard';
 import { useTranslation } from '@/utils/i18n';
 
 const { Text, Paragraph } = Typography;
@@ -71,6 +72,21 @@ const HEALTH_LINK: Record<ApmTopologyHealth, string> = {
   critical: '/apm/services?health=critical',
   unknown: '/apm/services',
 };
+
+const HEALTH_LABEL_KEYS: Record<ApmTopologyHealth, string> = {
+  healthy: 'apm.health.healthy',
+  warning: 'apm.health.warning',
+  critical: 'apm.health.critical',
+  unknown: 'apm.health.unknown',
+};
+
+function healthBucketLabel(
+  key: ApmTopologyHealth,
+  fallback: string,
+  t: (id: string, defaultMessage?: string) => string,
+) {
+  return t(HEALTH_LABEL_KEYS[key], fallback);
+}
 
 interface KpiCardConfig {
   key: string;
@@ -217,6 +233,7 @@ function FailedSection({ onRetry }: { onRetry: () => void }) {
 }
 
 function HealthLegendRow({ bucket, total }: { bucket: ApmDashboardHealthBucket; total: number }) {
+  const { t } = useTranslation();
   const pct = formatPercentage(total > 0 ? (bucket.count / total) * 100 : 0, 0);
   return (
     <Link
@@ -227,7 +244,7 @@ function HealthLegendRow({ bucket, total }: { bucket: ApmDashboardHealthBucket; 
         className="h-2 w-2 shrink-0 rounded-sm"
         style={{ background: HEALTH_DONUT_COLORS[bucket.key] }}
       />
-      <span className="flex-1 font-medium text-[var(--color-text-1)]">{bucket.label}</span>
+      <span className="flex-1 font-medium text-[var(--color-text-1)]">{healthBucketLabel(bucket.key, bucket.label, t)}</span>
       <span className="font-semibold tabular-nums text-[var(--color-text-1)]">{bucket.count}</span>
       <span className="min-w-9 text-right tabular-nums text-[var(--color-text-4)]">({pct})</span>
     </Link>
@@ -318,6 +335,7 @@ function ReleaseOverviewList({ items }: { items: ApmDashboardReleaseRow[] }) {
 export default function ApmHomePage() {
   const { t } = useTranslation();
   const { getDashboard, isLoading: authLoading } = useApmApi();
+  const [requestGuard] = useState(createLatestRequestGuard);
   const [timeWindow, setTimeWindow] = useState<ApmTimeWindow>('1h');
   const [dashboard, setDashboard] = useState<ApmDashboard | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -325,19 +343,26 @@ export default function ApmHomePage() {
 
   const load = useCallback(() => {
     if (authLoading) return;
+    const requestId = requestGuard.begin();
     setLoading(true);
     setLoadFailed(false);
     getDashboard(timeWindow)
       .then((payload) => {
-        setDashboard(payload);
-        setLoadFailed(false);
+        requestGuard.commitIfCurrent(requestId, () => {
+          setDashboard(payload);
+          setLoadFailed(false);
+        });
       })
       .catch(() => {
-        setDashboard(null);
-        setLoadFailed(true);
+        requestGuard.commitIfCurrent(requestId, () => {
+          setDashboard(null);
+          setLoadFailed(true);
+        });
       })
-      .finally(() => setLoading(false));
-  }, [authLoading, getDashboard, timeWindow]);
+      .finally(() => {
+        requestGuard.commitIfCurrent(requestId, () => setLoading(false));
+      });
+  }, [authLoading, getDashboard, requestGuard, timeWindow]);
 
   useEffect(() => {
     load();
@@ -447,13 +472,13 @@ export default function ApmHomePage() {
                 bodyMinHeight={188}
               >
                 {healthData && healthData.total > 0 ? (
-                  <div className="grid grid-cols-1 items-center gap-4 sm:grid-cols-[180px_1fr]">
-                    <div className="relative mx-auto h-[180px] w-[180px]">
+                  <div className="grid grid-cols-1 items-center gap-4 sm:grid-cols-[180px_1fr] 3xl:grid-cols-[220px_1fr]">
+                    <div className="relative mx-auto h-[180px] w-[180px] 3xl:h-[220px] 3xl:w-[220px]">
                       <DonutChart
                         data={healthData.buckets
                           .filter((bucket) => bucket.count > 0)
                           .map((bucket) => ({
-                            label: bucket.label,
+                            label: healthBucketLabel(bucket.key, bucket.label, t),
                             count: bucket.count,
                             color: HEALTH_DONUT_COLORS[bucket.key],
                           }))}

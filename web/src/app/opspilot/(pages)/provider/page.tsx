@@ -1,14 +1,14 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import { Button, Input, message } from 'antd';
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import { useProviderApi } from '@/app/opspilot/api/provider';
 import { isSilentRequestError } from '@/utils/request';
 import VendorCardGrid from '@/app/opspilot/components/provider/vendorCardGrid';
 import VendorModal from '@/app/opspilot/components/provider/vendorModal';
-import OpsPilotListPageHeader from '@/app/opspilot/components/opspilot-list-page-header';
+import ListPageHeader from '@/components/list-page-header';
 import { useTranslation } from '@/utils/i18n';
 import type { ModelVendor, ModelVendorPayload } from '@/app/opspilot/types/provider';
 import { VENDOR_LABEL_MAP } from '@/app/opspilot/constants/provider';
@@ -20,7 +20,7 @@ interface VendorModalSubmitValues extends Omit<ModelVendorPayload, 'api_key'> {
 const { Search } = Input;
 
 const ProviderPage: React.FC = () => {
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const { t } = useTranslation();
   const { fetchVendors, createVendor, updateVendor, deleteVendor } = useProviderApi();
 
@@ -135,7 +135,7 @@ const ProviderPage: React.FC = () => {
 
   return (
     <div className="min-h-full w-full rounded-3xl">
-      <OpsPilotListPageHeader
+      <ListPageHeader
         title={t('provider.vendor.pageTitle')}
         description={t('provider.vendor.pageDescription')}
         actions={

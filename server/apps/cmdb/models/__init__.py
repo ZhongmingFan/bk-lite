@@ -3,6 +3,7 @@ from apps.cmdb.models.collect_model import *  # noqa
 from apps.cmdb.models.collect_task_credential_hit import *  # noqa
 from apps.cmdb.models.config_file_version import *  # noqa
 from apps.cmdb.models.field_group import *  # noqa
+from apps.cmdb.models.first_collection_run import *  # noqa
 from apps.cmdb.models.ipam_models import IPAMReconcileRun, IPAMReconcileSource  # noqa
 from apps.cmdb.models.node_mgmt_sync import *  # noqa
 from apps.cmdb.models.operation import *  # noqa
@@ -12,5 +13,6 @@ from apps.cmdb.models.scene_view import *  # noqa
 from apps.cmdb.models.show_field import *  # noqa
 from apps.cmdb.models.subscription_delivery import *  # noqa
 from apps.cmdb.models.subscription_rule import *  # noqa
+from apps.cmdb.models.transfer_task import CmdbTransferGuard, CmdbTransferTask  # noqa
 from apps.cmdb.models.user_personal_config import *  # noqa
 from apps.cmdb.models.uuid_migration_state import *  # noqa

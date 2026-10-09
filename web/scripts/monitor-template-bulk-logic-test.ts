@@ -9,6 +9,7 @@ import {
   clearTemplateSelection,
   canDeleteTemplates,
   containsBuiltinTemplate,
+  formatTemplateAlgorithmSummary,
   getAssetCollectionTemplateLabels,
   getAssetOrganizationText,
   getPrimaryNoticeType,
@@ -154,6 +155,7 @@ assert.deepEqual(payload.template_keys, ['host-remote:0', 'host-remote:1']);
 assert.deepEqual(payload.config.notice_type_ids, [1, 2]);
 assert.equal(payload.config.notice_type, 'email');
 assert.equal(payload.config.trigger_count, 2);
+assert.deepEqual(payload.config.handlers, []);
 assert.equal('no_data_level' in payload.config, false);
 assert.equal('no_data_alert_name' in payload.config, false);
 
@@ -311,5 +313,15 @@ assert.match(
   /requestId !== assetRequestIdRef\.current/,
   '旧资产请求响应不应覆盖新查询'
 );
+
+assert.equal(
+  formatTemplateAlgorithmSummary({ algorithm: 'p95_over_time' }),
+  'P95'
+);
+assert.equal(
+  formatTemplateAlgorithmSummary({ algorithm: 'count_if_over_time' }),
+  '条件计数'
+);
+assert.equal(formatTemplateAlgorithmSummary({ algorithm: 'rate' }), '速率');
 
 console.log('monitor-template-bulk logic validation passed');

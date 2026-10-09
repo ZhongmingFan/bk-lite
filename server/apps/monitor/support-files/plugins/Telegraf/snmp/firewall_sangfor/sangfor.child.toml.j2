@@ -32,47 +32,108 @@
         oid = "1.3.6.1.2.1.1.5.0"
         name = "source"
         is_tag = true
-    # ---- Interfaces (generic IF-MIB, telegraf auto-walks ifTable columns) ----
-    [[inputs.snmp.table]]
-        oid = "1.3.6.1.2.1.2.2"
-        name = "interface"
-        inherit_tags = ["source"]
-    [[inputs.snmp.table.field]]
-        oid = "1.3.6.1.2.1.2.2.1.2"
-        name = "ifDescr"
-        is_tag = true
-    # ---- 64-bit IF-MIB HC traffic counters (ifXTable, wrap-safe on high-speed ports) ----
-    # 待现网核验：ifHCInOctets 1.3.6.1.2.1.31.1.1.1.6 / ifHCOutOctets ...1.10，按 ifIndex 与上表接口行对齐。
-    [[inputs.snmp.table.field]]
-        oid = "1.3.6.1.2.1.31.1.1.1.6"
-        name = "ifHCInOctets"
-    [[inputs.snmp.table.field]]
-        oid = "1.3.6.1.2.1.31.1.1.1.10"
-        name = "ifHCOutOctets"
-    # ---- Sangfor NGAF CPU usage (SANGFOR private MIB, scalar %, IANA PEN 35047) ----
-    # 待现网核验：整机 CPU 使用率标量 1.3.6.1.4.1.35047.2.1.1.0（设备直接以 0-100% 上报）。
-    # 标量用 table+field 命名 → device_cpu_usage。
-    [[inputs.snmp.table]]
-        name = "device_cpu"
-        inherit_tags = ["source"]
-    [[inputs.snmp.table.field]]
+# @bk_include_ifmib_table
+    # ---- Sangfor chassis CPU / memory / sessions：AF8.0.107 均为标量，顶层 field 带 .0（measurement snmp）。----
+    # sfSysCpuCostRate 35047.1.3.0（%）；sfSysMemoryUsage 35047.1.13.5.0（%）。
+    [[inputs.snmp.field]]
+        oid = "1.3.6.1.4.1.35047.1.3.0"
+        name = "device_cpu_usage"
+    [[inputs.snmp.field]]
+        oid = "1.3.6.1.4.1.35047.1.13.5.0"
+        name = "device_memory_usage"
+    # sfNewSessions=当前并发、sfTotalSessions=会话上限、sfNewSessionPerSec=新建速率。
+    [[inputs.snmp.field]]
+        oid = "1.3.6.1.4.1.35047.1.27.1.0"
+        name = "firewall_current_connections"
+    [[inputs.snmp.field]]
+        oid = "1.3.6.1.4.1.35047.1.27.2.0"
+        name = "firewall_max_sessions"
+    [[inputs.snmp.field]]
+        oid = "1.3.6.1.4.1.35047.1.27.4.0"
+        name = "firewall_new_sessions_per_sec"
+    # 旧机回填：35047.2.1.1/2/3 不在 AF8.0.107 OID 表内；仅当 AF8 叶子缺失时由 starlark 写入同名主字段，不双写。
+    [[inputs.snmp.field]]
         oid = "1.3.6.1.4.1.35047.2.1.1.0"
-        name = "usage"
-    # ---- Sangfor NGAF memory usage (SANGFOR private MIB, scalar %) ----
-    # 待现网核验：整机内存使用率标量 1.3.6.1.4.1.35047.2.1.2.0（设备直接以 0-100% 上报）。device_memory_usage 直采。
-    [[inputs.snmp.table]]
-        name = "device_memory"
-        inherit_tags = ["source"]
-    [[inputs.snmp.table.field]]
+        name = "device_cpu_usage_legacy"
+    [[inputs.snmp.field]]
         oid = "1.3.6.1.4.1.35047.2.1.2.0"
-        name = "usage"
-    # ---- Sangfor NGAF current sessions / connections (SANGFOR private MIB, scalar) ----
-    # 待现网核验：当前并发会话总数标量 1.3.6.1.4.1.35047.2.1.3.0。
-    # 度量名取 firewall_current_connections（measurement=firewall + field=current_connections），对齐防火墙盘连接 or-chain。
-    [[inputs.snmp.table]]
-        name = "firewall"
-        inherit_tags = ["source"]
-    [[inputs.snmp.table.field]]
+        name = "device_memory_usage_legacy"
+    [[inputs.snmp.field]]
         oid = "1.3.6.1.4.1.35047.2.1.3.0"
-        name = "current_connections"
-# ---- 温度/风扇/电源：Sangfor NGAF 私有 MIB 未以无需行过滤的标量形式暴露环境传感器 → 温度/风扇/电源 N/A 不采。仅 CPU/内存/并发会话/接口干净可采。----
+        name = "firewall_current_connections_legacy"
+    # ---- Disk usage table INDEX diskIndex；tag sfFilesystemName。磁盘温度对象不采集。----
+    # 不设私有表根：采集节点通常无 Sangfor MIB，表级 oid 会触发 snmptable「Was that a table?」并阻断整路 SNMP 初始化。
+    [[inputs.snmp.table]]
+        name = "device_disk"
+        inherit_tags = ["source"]
+        index_as_tag = true
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.4.1.35047.1.5.1.2"
+        name = "sfFilesystemName"
+        is_tag = true
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.4.1.35047.1.5.1.6"
+        name = "usage"
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.4.1.35047.1.5.1.7"
+        name = "size"
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.4.1.35047.1.5.1.8"
+        name = "used"
+    # ---- SFP optics table：温度 / 发送光功率 / 接收光功率，tag sfSFPIfName。CPU 温度对象不采集。----
+    # 同 disk：只 walk 列 OID，避免表根 snmptable 依赖私有 MIB。
+    [[inputs.snmp.table]]
+        name = "device"
+        inherit_tags = ["source"]
+        index_as_tag = true
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.4.1.35047.1.60.1.2"
+        name = "sfSFPIfName"
+        is_tag = true
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.4.1.35047.1.60.1.10"
+        name = "temperature_celsius"
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.4.1.35047.1.60.1.13"
+        name = "optical_tx_power"
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.4.1.35047.1.60.1.14"
+        name = "optical_rx_power"
+    # ---- NAT4 source-port usage；tag sfNat4Name。----
+    # 同 disk：只 walk 列 OID，避免表根 snmptable 依赖私有 MIB。
+    [[inputs.snmp.table]]
+        name = "firewall_nat"
+        inherit_tags = ["source"]
+        index_as_tag = true
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.4.1.35047.1.63.1.1.2"
+        name = "sfNat4Name"
+        is_tag = true
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.4.1.35047.1.63.1.1.3"
+        name = "tcp_port_usage"
+    [[inputs.snmp.table.field]]
+        oid = "1.3.6.1.4.1.35047.1.63.1.1.4"
+        name = "udp_port_usage"
+# ---- 机箱风扇/电源：私有 MIB 未以无需行过滤的标量形式暴露 → 风扇/电源 N/A 不采。----
+
+[[processors.starlark]]
+    namepass = ["snmp"]
+    source = '''
+def apply(metric):
+    pairs = [
+        ("device_cpu_usage", "device_cpu_usage_legacy"),
+        ("device_memory_usage", "device_memory_usage_legacy"),
+        ("firewall_current_connections", "firewall_current_connections_legacy"),
+    ]
+    for primary, legacy in pairs:
+        if metric.fields.get(primary) == None:
+            value = metric.fields.get(legacy)
+            if value != None:
+                metric.fields[primary] = value
+        if legacy in metric.fields:
+            metric.fields.pop(legacy)
+    return metric
+'''
+    [processors.starlark.tagpass]
+        brand = ["sangfor"]

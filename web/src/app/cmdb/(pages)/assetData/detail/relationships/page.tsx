@@ -11,19 +11,28 @@ import relationshipsStyle from './index.module.scss';
 import { useTranslation } from '@/utils/i18n';
 import AssoList from './list';
 import Topo from './topo';
+import { PublicRelatedTopoSlot } from './publicRelatedTopoSlot';
 import NetworkTopo from './networkTopo';
 import RackElevation from './rackElevation';
 import RoomFloorPlan from './roomFloorPlan';
 import ApplicationResourceOverview from './applicationResourceOverview';
+import ServiceTree from './serviceTree';
 import DeviceDetailDrawer from './deviceDetailDrawer';
 import IpamMatrix from '../ipView/ipamMatrix';
 import type { RackDevice } from '@/app/cmdb/types/rackRoom';
 import { useInstanceApi } from '@/app/cmdb/api/instance';
-import { useCommon } from '@/app/cmdb/context/common';
-import { useSearchParams } from 'next/navigation';
+import { useCmdbUserList } from '@/app/cmdb/context/common';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import PermissionWrapper from '@/components/permission';
 import { useRelationships } from '@/app/cmdb/context/relationships';
 import usePermissions from '@/hooks/usePermissions';
+import {
+  buildRelationshipTabHref,
+  DEFAULT_RELATIONSHIP_TAB,
+  isAllowedRelationshipTab,
+  normalizeRelationshipTab,
+  relationshipGatesSettled,
+} from '../../relationshipViewNavigation';
 import {
   RACK_ROOM_ASSET_PERMISSION_PATH,
   canUnplaceFromLayout,
@@ -32,22 +41,20 @@ import {
 
 const Ralationships = () => {
   const { t } = useTranslation();
-  const commonContext = useCommon();
   const searchParams = useSearchParams();
+  const pathname = usePathname();
+  const router = useRouter();
   const { modelList, assoTypes, loading } = useRelationships();
-  const users = useRef(commonContext?.userList || []);
-  const userList: UserItem[] = users.current;
+  const userList: UserItem[] = useCmdbUserList();
   const assoListRef = useRef<AssoListRef>(null);
-  const [isExpand, setIsExpand] = useState<boolean>(true);
-  const [activeTab, setActiveTab] = useState<string>(
-    searchParams.get('tab') || 'list'
-  );
+  const [isExpand, setIsExpand] = useState<boolean>(false);
   const modelId: string = searchParams.get('model_id') || '';
   const instUuid: string = searchParams.get('inst_uuid') || '';
   const tabParam: string = searchParams.get('tab') || '';
 
   const { getTopoThemes } = useInstanceApi();
   const [themes, setThemes] = useState<string[]>([]);
+  const [themesReady, setThemesReady] = useState(false);
   // 机柜视图点设备：右侧抽屉展示详情（再从抽屉下钻到实例详情），与机房视图一致
   const [device, setDevice] = useState<RackDevice | null>(null);
   const [devOpen, setDevOpen] = useState<boolean>(false);
@@ -56,25 +63,31 @@ const Ralationships = () => {
   const hasEdit = hasPermission(['Edit']);
 
   useEffect(() => {
-    if (!modelId) return;
+    if (!modelId) {
+      setThemes([]);
+      setThemesReady(true);
+      return;
+    }
     let cancelled = false;
+    setThemes([]);
+    setThemesReady(false);
     getTopoThemes(modelId)
       .then((res: { themes: string[] }) => {
-        if (!cancelled) setThemes(res?.themes || []);
+        if (!cancelled) {
+          setThemes(res?.themes || []);
+          setThemesReady(true);
+        }
       })
       .catch(() => {
-        if (!cancelled) setThemes([]);
+        if (!cancelled) {
+          setThemes([]);
+          setThemesReady(true);
+        }
       });
     return () => {
       cancelled = true;
     };
-     
   }, [modelId]);
-
-  // 下钻进入时若带 tab 参数（如机房视图点机柜跳到机柜的「机柜视图」），自动选中该 Tab
-  useEffect(() => {
-    if (tabParam) setActiveTab(tabParam);
-  }, [tabParam, instUuid]);
 
   const segmentedOptions = [
     { label: t('list'), value: 'list' },
@@ -88,6 +101,9 @@ const Ralationships = () => {
     ...(themes.includes('app_overview')
       ? [{ label: t('Model.applicationResourceOverview'), value: 'appOverview' }]
       : []),
+    ...(themes.includes('service_tree') && modelId === 'system'
+      ? [{ label: t('Model.serviceTree'), value: 'serviceTree' }]
+      : []),
     ...(modelId === 'rack'
       ? [{ label: t('Model.rackElevation'), value: 'rackView' }]
       : []),
@@ -96,14 +112,33 @@ const Ralationships = () => {
       : []),
   ];
 
+  const allowedTabs = segmentedOptions.map((option) => option.value);
+  const gatesSettled = relationshipGatesSettled({
+    themesReady,
+    widgetStatus: 'ready',
+  });
+  const { tab: activeTab, shouldRewrite } = normalizeRelationshipTab({
+    requestedTab: tabParam || DEFAULT_RELATIONSHIP_TAB,
+    allowedTabs,
+    gatesSettled,
+  });
+
+  useEffect(() => {
+    if (!shouldRewrite) {
+      return;
+    }
+    router.replace(
+      buildRelationshipTabHref(pathname, searchParams, activeTab),
+    );
+  }, [shouldRewrite, activeTab, pathname, searchParams, router]);
+
   const handleTabChange = (val: string) => {
-    setActiveTab(val);
-    setIsExpand(true);
+    setIsExpand(false);
+    router.replace(buildRelationshipTabHref(pathname, searchParams, val));
   };
 
   const handleExpand = () => {
     assoListRef.current?.expandAll(!isExpand);
-    setIsExpand(!isExpand);
   };
 
   const handleRelate = () => {
@@ -114,6 +149,7 @@ const Ralationships = () => {
     'network',
     'ipam',
     'appOverview',
+    'serviceTree',
     'rackView',
     'roomView',
   ].includes(activeTab);
@@ -156,34 +192,43 @@ const Ralationships = () => {
         )}
       </header>
       <div className={isCanvasTab ? relationshipsStyle.canvasBody : undefined}>
-      {activeTab === 'list' && (
+      {activeTab === 'list' && isAllowedRelationshipTab('list', allowedTabs) && (
         <AssoList
           ref={assoListRef}
           userList={userList}
           modelList={modelList}
           assoTypeList={assoTypes}
+          onExpandStateChange={setIsExpand}
         />
       )}
-      {activeTab === 'topo' && (
-        <Topo
-          assoTypeList={assoTypes}
-          modelList={modelList}
-          modelId={modelId}
+      {activeTab === 'topo' && isAllowedRelationshipTab('topo', allowedTabs) && (
+        <PublicRelatedTopoSlot
           instUuid={instUuid}
+          fallback={
+            <Topo
+              assoTypeList={assoTypes}
+              modelList={modelList}
+              modelId={modelId}
+              instUuid={instUuid}
+            />
+          }
         />
       )}
-      {activeTab === 'network' && (
+      {activeTab === 'network' && isAllowedRelationshipTab('network', allowedTabs) && (
         <NetworkTopo key={instUuid} modelId={modelId} instUuid={instUuid} fillContainer />
       )}
-      {activeTab === 'ipam' && (
+      {activeTab === 'ipam' && isAllowedRelationshipTab('ipam', allowedTabs) && (
         <div className={relationshipsStyle.scrollCanvas}>
           <IpamMatrix instUuid={instUuid} />
         </div>
       )}
-      {activeTab === 'appOverview' && (
+      {activeTab === 'appOverview' && isAllowedRelationshipTab('appOverview', allowedTabs) && (
         <ApplicationResourceOverview modelId={modelId} instUuid={instUuid} fillContainer />
       )}
-      {activeTab === 'rackView' && (
+      {activeTab === 'serviceTree' && isAllowedRelationshipTab('serviceTree', allowedTabs) && (
+        <ServiceTree instUuid={instUuid} />
+      )}
+      {activeTab === 'rackView' && isAllowedRelationshipTab('rackView', allowedTabs) && (
         <div className={relationshipsStyle.scrollCanvas}>
           <RackElevation
             key={`${instUuid}-${rackNonce}`}
@@ -196,7 +241,7 @@ const Ralationships = () => {
           />
         </div>
       )}
-      {activeTab === 'roomView' && (
+      {activeTab === 'roomView' && isAllowedRelationshipTab('roomView', allowedTabs) && (
         <div className={relationshipsStyle.scrollCanvas}>
           <RoomFloorPlan modelId={modelId} instUuid={instUuid} />
         </div>

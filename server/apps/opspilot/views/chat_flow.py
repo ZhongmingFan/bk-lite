@@ -18,6 +18,7 @@ from apps.core.utils.exempt import api_exempt
 from apps.core.utils.loader import LanguageLoader
 from apps.core.utils.team_utils import get_current_team
 from apps.opspilot.enum import WorkFlowTaskStatus
+from apps.opspilot.metis.llm.common.llm_client_factory import DEFAULT_CHAT_TEMPERATURE
 from apps.opspilot.models import Bot, BotChannel, BotWebChatSession, BotWorkFlow, LLMSkill, WorkFlowTaskResult
 from apps.opspilot.serializers.request_serializers import InterruptChatFlowRequestSerializer
 from apps.opspilot.services.caller_identity import CALLER_IDENTITY_CONFIG_KEY, CallerIdentityError, capture_caller_identity, mark_api_secret_identity
@@ -157,14 +158,26 @@ def validate_openai_token(token, team=None, is_mobile=False):
             domain=user_info["domain"],
             team=int(team),
             locale=user_info.get("locale", "en"),
+            timezone=user_info.get("timezone") or "",
             group_list=user_info.get("group_list", []),
             is_authenticated=True,
         )
     else:
-        # UserAPISecret 认证：查询用户信息获取 locale
+        # UserAPISecret 认证：查询用户信息获取 locale 与时区
         mark_api_secret_identity(user)
         user.locale = _get_user_locale(user.username, user.domain)  # pragma: no cover
+        user.timezone = _get_user_timezone(user.username, user.domain)  # pragma: no cover
     return True, user  # pragma: no cover
+
+
+def _get_user_profile_field(username: str, domain: str, field: str, default: str) -> str:
+    try:
+        value = User.objects.filter(username=username, domain=domain).values_list(field, flat=True).first()  # pragma: no cover
+        if value:  # pragma: no cover
+            return value
+    except Exception as e:
+        logger.warning(f"Failed to get user {field} for {username}@{domain}: {e}")  # pragma: no cover
+    return default
 
 
 def _get_user_locale(username: str, domain: str) -> str:
@@ -179,14 +192,12 @@ def _get_user_locale(username: str, domain: str) -> str:
     Returns:
         用户语言设置，默认 "en"
     """
+    return _get_user_profile_field(username, domain, "locale", "en")
 
-    try:
-        user_obj = User.objects.filter(username=username, domain=domain).first()  # pragma: no cover
-        if user_obj:  # pragma: no cover
-            return user_obj.locale or "en"
-    except Exception as e:
-        logger.warning(f"Failed to get user locale for {username}@{domain}: {e}")  # pragma: no cover
-    return "en"
+
+def _get_user_timezone(username: str, domain: str) -> str:
+    """获取用户 IANA 时区。缺失时返回空字符串，由工具回退 Asia/Shanghai。"""
+    return _get_user_profile_field(username, domain, "timezone", "")
 
 
 def get_skill_and_params(kwargs, team, bot_id=None):
@@ -228,15 +239,16 @@ def get_skill_and_params(kwargs, team, bot_id=None):
     params = {  # pragma: no cover
         "llm_model": skill_obj.llm_model_id,
         "skill_prompt": kwargs.get("prompt", "") or kwargs.get("skill_prompt", "") or skill_obj.skill_prompt,
-        "temperature": pick_request_value(kwargs, "temperature", skill_obj.temperature),
+        "temperature": DEFAULT_CHAT_TEMPERATURE,
         "chat_history": chat_history,
         "user_message": chat_history[-1]["message"],
         "conversation_window_size": num,
-        "show_think": skill_obj.show_think,
+        "show_think": False,
         "tools": skill_obj.tools,
         "skill_type": skill_obj.skill_type,
         "group": skill_obj.team[0],
         "wiki_kb_ids": list(skill_obj.wiki_knowledge_bases.values_list("id", flat=True)),
+        "force_wiki_grounded": bool(getattr(skill_obj, "force_wiki_grounded", False)),
     }
 
     return skill_obj, params, None  # pragma: no cover
@@ -391,6 +403,7 @@ def get_skill_execute_result(bot_id, channel, chat_history, kwargs, request, sen
         )
     return result
 
+
 @api_exempt
 async def execute_chat_flow(request, bot_id, node_id):  # pragma: no cover
     """执行ChatFlow流程（支持流式响应）"""
@@ -491,6 +504,7 @@ async def execute_chat_flow(request, bot_id, node_id):  # pragma: no cover
             "session_id": session_id,
             "execution_id": engine.execution_id,
             "locale": getattr(user, "locale", "en"),  # 用户语言设置，用于 browser-use 输出国际化
+            "user_timezone": getattr(user, "timezone", "") or "",
             CALLER_IDENTITY_CONFIG_KEY: caller_snapshot,
         }
 
@@ -595,6 +609,7 @@ def interrupt_chat_flow_execution(request):  # pragma: no cover
             },
         }
     )
+
 
 @api_exempt
 def execute_chat_flow_wechat_official(request, bot_id):  # pragma: no cover
@@ -732,4 +747,3 @@ def execute_chat_flow_dingtalk(request, bot_id):  # pragma: no cover
 
     # 5. 处理HTTP回调模式的消息
     return dingtalk_utils.handle_dingtalk_message(request, bot_chat_flow, dingtalk_config)  # pragma: no cover
-

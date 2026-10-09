@@ -16,14 +16,18 @@ import {
 import { SourceFeild } from '@/app/monitor/types/event';
 import { InstanceItem } from '@/app/monitor/types/search';
 import { renderChart } from '@/app/monitor/utils/common';
-import { useUnitTransform } from '@/app/monitor/hooks/useUnitTransform';
 import { sanitizeGroupBy } from '@/app/monitor/utils/metricDimensions';
 import { MetricExpressionRow } from './metricExpressionTypes';
 import {
   buildMetricExpressionPreviewPayload,
   MetricExpressionMode
 } from './formulaExpressionUtils';
-import { resolvePreviewChartUnit } from './strategyDetailUtils';
+import {
+  compareSpanIssue,
+  partitionTimeleftPreviewSeries,
+  resolvePreviewChartUnit,
+  COMPARE_MODE_TIMELEFT
+} from './strategyDetailUtils';
 
 const { Option } = Select;
 
@@ -41,6 +45,13 @@ interface MetricPreviewProps {
   threshold: ThresholdField[];
   calculationUnit?: string | null;
   thresholdUnit?: string | null;
+  compareMode?: string | null;
+  compareValueKind?: string | null;
+  compareOffsetHours?: number | null;
+  countPredicate?: { method?: string; value?: number | null } | null;
+  forecastTarget?: number | null;
+  forecastTargetUnit?: string | null;
+  forecastLookback?: { type: string; value: number } | null;
   metricRows: MetricExpressionRow[];
   metricExpressionMode: MetricExpressionMode;
   resultName: string;
@@ -48,6 +59,7 @@ interface MetricPreviewProps {
   scrollContainerRef?: RefObject<HTMLDivElement | null>;
   anchorRef?: RefObject<HTMLDivElement | null>;
   fixedGroupByList?: string[];
+  onSelectedInstanceChange?: (instanceId: string) => void;
 }
 
 const normalizePreviewWarnings = (warnings: unknown): string[] => {
@@ -84,25 +96,32 @@ const MetricPreview: React.FC<MetricPreviewProps> = ({
   threshold,
   calculationUnit,
   thresholdUnit,
+  compareMode,
+  compareValueKind,
+  compareOffsetHours,
+  countPredicate,
+  forecastTarget,
+  forecastTargetUnit,
+  forecastLookback,
   metricRows,
   metricExpressionMode,
   resultName,
   expression,
   scrollContainerRef,
   anchorRef,
-  fixedGroupByList = []
+  fixedGroupByList = [],
+  onSelectedInstanceChange
 }) => {
   const { t } = useTranslation();
   const { getInstanceList } = useMonitorApi();
   const { previewMonitorPolicy } = useEventApi();
-  const { findUnitNameById } = useUnitTransform();
   const [loading, setLoading] = useState<boolean>(false);
   const [instanceLoading, setInstanceLoading] = useState<boolean>(false);
   const [chartData, setChartData] = useState<ChartData[]>([]);
   const [previewChartUnit, setPreviewChartUnit] = useState<string | null>(null);
+  const [previewDisplayUnit, setPreviewDisplayUnit] = useState('');
   const [previewError, setPreviewError] = useState<string>('');
   const [previewWarnings, setPreviewWarnings] = useState<string[]>([]);
-  const [previewThreshold, setPreviewThreshold] = useState<ThresholdField[]>([]);
   const [selectedInstance, setSelectedInstance] = useState<string | null>(null);
   const [instances, setInstances] = useState<InstanceItem[]>([]);
   const [allInstances, setAllInstances] = useState<TableDataItem[]>([]);
@@ -171,6 +190,10 @@ const MetricPreview: React.FC<MetricPreviewProps> = ({
     }
   }, [source?.type, source?.values, allInstances]);
 
+  useEffect(() => {
+    onSelectedInstanceChange?.(selectedInstance || '');
+  }, [selectedInstance, onSelectedInstanceChange]);
+
   // 判断是否可以查询
   const canQuery = useMemo(() => {
     const previewGroupBy =
@@ -235,7 +258,14 @@ const MetricPreview: React.FC<MetricPreviewProps> = ({
       groupBy,
       threshold,
       calculationUnit,
-      thresholdUnit
+      thresholdUnit,
+      compareMode,
+      compareValueKind,
+      compareOffsetHours,
+      countPredicate,
+      forecastTarget,
+      forecastTargetUnit,
+      forecastLookback
     });
   };
 
@@ -271,24 +301,41 @@ const MetricPreview: React.FC<MetricPreviewProps> = ({
   };
 
   // 查询数据
+  const clearPreview = (message = '') => {
+    setChartData([]);
+    setPreviewWarnings([]);
+    setPreviewChartUnit(null);
+    setPreviewDisplayUnit('');
+    setPreviewError(message);
+  };
+
   const fetchData = async () => {
-    if (!canQuery) {
-      setChartData([]);
-      setPreviewError('');
-      setPreviewWarnings([]);
-      setPreviewThreshold([]);
-      setPreviewChartUnit(null);
+    const spanIssue = compareSpanIssue({
+      mode: compareMode,
+      amount: compareOffsetHours,
+      periodType: periodUnit,
+      periodValue: period,
+      t
+    });
+    if (
+      !canQuery ||
+      (compareMode === COMPARE_MODE_TIMELEFT &&
+        (forecastTarget == null || !Number.isFinite(forecastTarget)))
+    ) {
+      clearPreview();
+      return;
+    }
+    if (spanIssue) {
+      requestIdRef.current += 1;
+      abortControllerRef.current?.abort();
+      clearPreview(spanIssue);
       return;
     }
     let payload = null;
     try {
       payload = getPreviewPayload();
     } catch (error) {
-      setChartData([]);
-      setPreviewWarnings([]);
-      setPreviewThreshold([]);
-      setPreviewChartUnit(null);
-      setPreviewError(
+      clearPreview(
         error instanceof Error
           ? error.message
           : t('monitor.events.metricValidate')
@@ -296,11 +343,7 @@ const MetricPreview: React.FC<MetricPreviewProps> = ({
       return;
     }
     if (!payload) {
-      setChartData([]);
-      setPreviewError('');
-      setPreviewWarnings([]);
-      setPreviewThreshold([]);
-      setPreviewChartUnit(null);
+      clearPreview();
       return;
     }
     // 取消之前的请求
@@ -320,18 +363,30 @@ const MetricPreview: React.FC<MetricPreviewProps> = ({
       }
       const vmData = responseData?.data || {};
       const data = vmData.data?.result || [];
-      setPreviewWarnings(
-        normalizePreviewWarnings(responseData?.warnings || vmData.warnings)
+      const partitioned =
+        compareMode === COMPARE_MODE_TIMELEFT
+          ? partitionTimeleftPreviewSeries(
+            data,
+            threshold.map((item) => item.value)
+          )
+          : { kept: data, omitted: 0 };
+      const warnings = normalizePreviewWarnings(
+        responseData?.warnings || vmData.warnings
       );
-      setPreviewThreshold(
-        Array.isArray(responseData?.threshold) ? responseData.threshold : []
-      );
+      if (partitioned.omitted > 0) {
+        warnings.push(
+          t(
+            'monitor.events.timeleftPreviewOffScale',
+            '斜率过小，剩余时间超出图表范围'
+          )
+        );
+      }
+      setPreviewWarnings(warnings);
       setPreviewChartUnit(
-        resolvePreviewChartUnit(
-          responseData?.chart_unit,
-          thresholdUnit,
-          calculationUnit
-        )
+        responseData?.chart_unit != null ? responseData.chart_unit : null
+      );
+      setPreviewDisplayUnit(
+        typeof vmData.unit === 'string' ? vmData.unit : ''
       );
       // 渲染图表数据
       const selectedInst = instances.find(
@@ -362,17 +417,19 @@ const MetricPreview: React.FC<MetricPreviewProps> = ({
           }
         ];
       }
-      const _chartData = renderChart(data, list);
+      const _chartData = renderChart(partitioned.kept, list);
       setChartData(_chartData);
     } catch (error: any) {
       if (
         error?.name !== 'AbortError' &&
+        error?.name !== 'CanceledError' &&
+        error?.code !== 'ERR_CANCELED' &&
         currentRequestId === requestIdRef.current
       ) {
         setChartData([]);
         setPreviewWarnings([]);
-        setPreviewThreshold([]);
         setPreviewChartUnit(null);
+        setPreviewDisplayUnit('');
         setPreviewError(
           error?.response?.data?.message ||
             error?.message ||
@@ -403,9 +460,14 @@ const MetricPreview: React.FC<MetricPreviewProps> = ({
     periodUnit,
     groupAlgorithm,
     algorithm,
-    threshold,
     calculationUnit,
     thresholdUnit,
+    compareMode,
+    compareValueKind,
+    compareOffsetHours,
+    forecastTarget,
+    forecastTargetUnit,
+    forecastLookback,
     metricRows,
     metricExpressionMode,
     resultName,
@@ -433,19 +495,13 @@ const MetricPreview: React.FC<MetricPreviewProps> = ({
   }
 
   // 过滤掉空值的阈值
-  const validThreshold = previewThreshold.filter(
+  const validThreshold = threshold.filter(
     (item) => item.value !== null && item.value !== undefined
   );
-  const effectiveChartUnit = resolvePreviewChartUnit(
-    previewChartUnit,
-    thresholdUnit,
-    calculationUnit
-  );
-
-  const showUnit = (val) => {
-    const unitName = findUnitNameById(val);
-    return unitName ? `（${unitName}）` : '';
-  };
+  const effectiveChartUnit =
+    previewChartUnit != null
+      ? previewChartUnit || null
+      : resolvePreviewChartUnit(null, thresholdUnit, calculationUnit);
 
   return (
     <div
@@ -489,11 +545,11 @@ const MetricPreview: React.FC<MetricPreviewProps> = ({
           {metricExpressionMode === 'formula'
             ? resultName || currentMetric.display_name || metric
             : currentMetric.display_name || metric}
-          {effectiveChartUnit && (
+          {previewDisplayUnit ? (
             <span className="text-[var(--color-text-3)] ml-1">
-              {showUnit(effectiveChartUnit)}
+              （{previewDisplayUnit}）
             </span>
-          )}
+          ) : null}
         </div>
       )}
       {previewWarnings.length > 0 && (

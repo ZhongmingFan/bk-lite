@@ -1,12 +1,14 @@
 'use client';
 
 import React from 'react';
-import { Typography } from 'antd';
+import { Tag, Tooltip, Typography } from 'antd';
 import WithSideMenuLayout from '@/components/sub-layout';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import { useTranslation } from '@/utils/i18n';
 import type { MenuItem } from '@/types';
 import { getPluginBrandIcon } from '@/app/monitor/utils/common';
+import { resolvePluginSourceBadge } from '@/app/monitor/utils/pluginSourceBadge';
 
 const IntegrationDetailLayout = ({
   children
@@ -15,14 +17,19 @@ const IntegrationDetailLayout = ({
 }) => {
   const { t } = useTranslation();
   const searchParams = useSearchParams();
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const pluginDisplayName = searchParams.get('plugin_display_name');
   const desc = searchParams.get('plugin_description');
   const objId = searchParams.get('id') || '';
   const icon = searchParams.get('icon');
   const pluginName = searchParams.get('plugin_name') || '';
+  const packVersion = searchParams.get('pack_version') || '';
   const resolvedIcon = getPluginBrandIcon(pluginName) || icon || 'cc-default_默认';
   const templateType = searchParams.get('template_type') || '';
+  const sourceBadge = resolvePluginSourceBadge({
+    template_type: templateType,
+    pack_version: packVersion
+  });
 
   const handleBackButtonClick = () => {
     const params = new URLSearchParams({ objId });
@@ -44,7 +51,31 @@ const IntegrationDetailLayout = ({
         />
       </div>
       <div className="w-full min-w-0">
-        <h2 className="text-lg font-semibold mb-2">{pluginDisplayName}</h2>
+        <h2 className="text-lg font-semibold mb-2">
+          {pluginDisplayName}
+          {sourceBadge.showPackTag && (
+            <Tooltip
+              title={
+                sourceBadge.packKind === 'pinned'
+                  ? t('monitor.integrations.pinnedPackHint', '', {
+                    version: sourceBadge.packVersion
+                  })
+                  : t('monitor.integrations.builtinPackHint')
+              }
+            >
+              <Tag className="ml-2 align-middle">
+                {sourceBadge.packKind === 'pinned'
+                  ? sourceBadge.packVersion
+                  : t('monitor.integrations.builtinPack')}
+              </Tag>
+            </Tooltip>
+          )}
+          {sourceBadge.showSelfBuilt && (
+            <Tag className="ml-2 align-middle">
+              {t('monitor.integrations.selfBuilt')}
+            </Tag>
+          )}
+        </h2>
         <Typography.Paragraph
           className="!mb-0 text-sm text-[var(--color-text-3)]"
           ellipsis={{

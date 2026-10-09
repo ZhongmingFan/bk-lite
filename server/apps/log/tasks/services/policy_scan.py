@@ -27,7 +27,9 @@ from apps.log.constants.database import DatabaseConstants
 from apps.log.constants.web import WebConstants
 from apps.log.models.policy import Alert, AlertSnapshot, Event, EventRawData
 from apps.log.services.aggregate_group_identity import build_aggregate_group_identity
+from apps.log.services.alert_access import snapshot_policy_organization_ids
 from apps.log.services.alert_lifecycle_notify import LogAlertLifecycleNotifier
+from apps.log.services.alert_query_clue import freeze_log_alert_query_clue
 from apps.log.services.log_event_contract import to_logical_event
 from apps.log.services.search import SearchService
 from apps.log.tasks.utils.policy import period_to_seconds
@@ -46,6 +48,7 @@ class LogPolicyScan:
         self.window_end = window_end
         self.execution_key = execution_key
         self.cursor_time = cursor_time
+        self.organizations = snapshot_policy_organization_ids(policy)
 
     def _get_scan_window(self):
         window_start = getattr(self, "window_start", None)
@@ -67,7 +70,7 @@ class LogPolicyScan:
         return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
 
     def _find_existing_events(self, event_ids, source_ids):
-        existing_by_id = {event.id: event for event in Event.objects.filter(id__in=event_ids).select_related("alert")}
+        existing_by_id = {event.id: event for event in Event.objects.filter(id__in=event_ids, action="").select_related("alert")}
         source_id_candidates = [self._normalize_source_id_candidates(source_id) for source_id in source_ids]
         missing_source_ids = {
             candidate for event_id, candidates in zip(event_ids, source_id_candidates) if event_id not in existing_by_id for candidate in candidates
@@ -78,6 +81,7 @@ class LogPolicyScan:
         legacy_events = Event.objects.filter(
             policy_id=self.policy.id,
             source_id__in=missing_source_ids,
+            action="",
         ).select_related("alert")
         cursor_time = getattr(self, "cursor_time", None)
         if cursor_time is None:
@@ -114,7 +118,7 @@ class LogPolicyScan:
         claims_by_alias = {}
         current_alerts = {}
         claim_rows = (
-            Event.objects.filter(alert_id__in=alerts_by_id)
+            Event.objects.filter(alert_id__in=alerts_by_id, action="")
             .exclude(source_id=F("alert__source_id"))
             .values_list("alert_id", "source_id")
             .distinct()
@@ -614,7 +618,7 @@ class LogPolicyScan:
             logger.warning(f"unsupported rule mode: {mode}")
             return False
 
-    def _compare_values(self, actual_value, op, expected_value):
+    def _compare_values(self, actual_value, op, expected_value):  # noqa: C901
         """比较值"""
         try:
             # 数值比较优化：尝试转换为数值类型进行比较
@@ -707,7 +711,7 @@ class LogPolicyScan:
         self._create_snapshots_for_alerts(event_objs, new_alerts, events, event_id_to_raw_data)
         return event_objs
 
-    def _create_events(self, events, defer_snapshots=False):
+    def _create_events(self, events, defer_snapshots=False):  # noqa: C901
         """创建事件 - 优化版本，使用批量操作"""
         if not events:
             return []
@@ -731,6 +735,7 @@ class LogPolicyScan:
                     Event.objects.filter(
                         policy_id=self.policy.id,
                         source_id__in=source_ids,
+                        action="",
                         alert__status=AlertConstants.STATUS_NEW,
                     )
                     .values_list("alert_id", flat=True)
@@ -749,9 +754,7 @@ class LogPolicyScan:
                 source_id = alert.source_id
                 if source_id not in existing_alerts or alert.created_at > existing_alerts[source_id].created_at:
                     existing_alerts[source_id] = alert
-            claimed_source_ids_by_alias, claimed_alerts_by_source = self._load_persisted_alias_claims(
-                active_alerts, set(source_ids)
-            )
+            claimed_source_ids_by_alias, claimed_alerts_by_source = self._load_persisted_alias_claims(active_alerts, set(source_ids))
             existing_alerts.update(claimed_alerts_by_source)
 
             logger.debug(f"Found {len(existing_alerts)} existing alerts for policy {self.policy.id}")
@@ -861,6 +864,8 @@ class LogPolicyScan:
                         start_event_time=self.scan_time,
                         end_event_time=self.scan_time,
                         operator="",
+                        organizations=list(self.organizations),
+                        handlers=list(self.policy.handlers or []),
                     )
                     alerts_to_create.append(alert_obj)
                     # 更新映射表，供后续事件关联使用
@@ -896,26 +901,17 @@ class LogPolicyScan:
                     # 固定顺序加行锁并重新判定时间，避免旧 worker 的陈旧对象反向覆盖。
                     locked_events = {
                         event.id: event
-                        for event in Event.objects.select_for_update()
-                        .filter(id__in=[event.id for event in events_to_update])
-                        .order_by("id")
+                        for event in Event.objects.select_for_update().filter(id__in=[event.id for event in events_to_update]).order_by("id")
                     }
                     locked_alerts = {
                         alert.id: alert
-                        for alert in Alert.objects.select_for_update()
-                        .filter(id__in=[alert.id for alert in alerts_to_update])
-                        .order_by("id")
+                        for alert in Alert.objects.select_for_update().filter(id__in=[alert.id for alert in alerts_to_update]).order_by("id")
                     }
                     stale_alert_ids = {
                         alert.id
                         for alert in locked_alerts.values()
                         if alert.status != AlertConstants.STATUS_NEW
-                        or (
-                            self.execution_key is not None
-                            and alert.end_event_time
-                            and self.scan_time
-                            and alert.end_event_time > self.scan_time
-                        )
+                        or (self.execution_key is not None and alert.end_event_time and self.scan_time and alert.end_event_time > self.scan_time)
                     }
 
                     refreshed_events = []
@@ -962,9 +958,7 @@ class LogPolicyScan:
                     writable_event_ids = {event.id for event in create_events}
                     writable_event_ids.update(event.id for event in existing_event_objs)
                     event_id_to_raw_data = {
-                        event_id: raw_data
-                        for event_id, raw_data in event_id_to_raw_data.items()
-                        if event_id in writable_event_ids
+                        event_id: raw_data for event_id, raw_data in event_id_to_raw_data.items() if event_id in writable_event_ids
                     }
 
                     # 批量创建新告警
@@ -1144,6 +1138,8 @@ class LogPolicyScan:
                     existing_snapshots = {
                         item.get("event_id"): item for item in snapshot_obj.snapshots if item.get("type") == "event" and item.get("event_id")
                     }
+                    window_start, window_end = self._get_scan_window()
+                    query_clue = freeze_log_alert_query_clue(self.policy, window_start, window_end)
 
                     # 批量构建快照数据
                     new_snapshots = []
@@ -1154,9 +1150,7 @@ class LogPolicyScan:
                         if event_snapshot:
                             # 主数据事务与快照事务刻意分离；旧 worker 可能晚于新 worker
                             # 取得快照锁，只允许相同或更新的事件时间覆盖同一 event_id。
-                            persisted_time = parse_datetime(
-                                event_snapshot.get("event_time") or event_snapshot.get("snapshot_time") or ""
-                            )
+                            persisted_time = parse_datetime(event_snapshot.get("event_time") or event_snapshot.get("snapshot_time") or "")
                             candidate_time = event_obj.event_time or snapshot_time
                             if persisted_time and django_timezone.is_naive(persisted_time):
                                 persisted_time = django_timezone.make_aware(
@@ -1175,6 +1169,7 @@ class LogPolicyScan:
                                     "event_time": event_obj.event_time.isoformat() if event_obj.event_time else None,
                                     "snapshot_time": snapshot_time.isoformat(),
                                     "raw_data": raw_data,
+                                    "query_clue": query_clue,
                                 }
                             )
                             snapshots_changed = True
@@ -1186,6 +1181,7 @@ class LogPolicyScan:
                             "event_time": event_obj.event_time.isoformat() if event_obj.event_time else None,
                             "snapshot_time": snapshot_time.isoformat(),
                             "raw_data": raw_data,
+                            "query_clue": query_clue,
                         }
                         new_snapshots.append(event_snapshot)
 

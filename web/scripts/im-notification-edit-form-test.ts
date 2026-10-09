@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
+  coerceImNotificationTeamIds,
   getImNotificationUnavailableEditingInstance,
+  resolveExternalFieldOptionLabel,
   resolveImNotificationFieldPatches,
 } from '../src/app/system-manager/utils/imNotificationUtils';
 
@@ -42,5 +45,31 @@ assert.equal(
   ),
   null,
 );
+
+assert.equal(resolveExternalFieldOptionLabel('id', { id: 'Graph 用户 ID' }), 'Graph 用户 ID');
+assert.equal(resolveExternalFieldOptionLabel('mail', {}), 'mail');
+assert.equal(resolveExternalFieldOptionLabel('userPrincipalName'), 'userPrincipalName');
+
+const imModal = readFileSync(
+  new URL('../src/app/system-manager/components/channel/im-notification/IMNotificationConfigModal.tsx', import.meta.url),
+  'utf8',
+);
+assert.match(imModal, /GroupTreeSelect/);
+assert.match(imModal, /name="team"/);
+assert.match(imModal, /common\.organization/);
+const imPage = readFileSync(
+  new URL('../src/app/system-manager/(pages)/channel/im-notification/page.tsx', import.meta.url),
+  'utf8',
+);
+assert.match(imPage, /resolveExternalFieldOptionLabel/);
+assert.doesNotMatch(imPage, /externalFieldOption\.\$\{field\}/);
+assert.match(imPage, /coerceImNotificationTeamIds/);
+assert.match(imPage, /<Space wrap className="max-w-full">/);
+assert.deepEqual(coerceImNotificationTeamIds(['1', '', 0, 2, 'abc']), [1, 2]);
+assert.deepEqual(coerceImNotificationTeamIds(undefined), []);
+const zh = JSON.parse(
+  readFileSync(new URL('../src/app/system-manager/locales/zh.json', import.meta.url), 'utf8'),
+);
+assert.equal(zh.system.channel.imNotificationPage.externalFieldOption, undefined);
 
 console.log('im-notification edit form validation passed');

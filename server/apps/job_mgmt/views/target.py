@@ -10,6 +10,7 @@ from rest_framework.response import Response
 from apps.core.decorators.api_permission import HasPermission
 from apps.core.exceptions.base_app_exception import BaseAppException
 from apps.core.logger import job_logger as logger
+from apps.core.utils.team_utils import get_current_team
 from apps.core.utils.viewset_utils import AuthViewSet
 from apps.job_mgmt.constants import OSType, SSHCredentialType, WinRMTransport
 from apps.job_mgmt.filters.target import TargetFilter
@@ -17,6 +18,7 @@ from apps.job_mgmt.models import Target, TargetTeamConcurrentUpdateError
 from apps.job_mgmt.serializers.target import TargetBatchDeleteSerializer, TargetSerializer, TargetTestConnectionSerializer
 from apps.job_mgmt.services.error_response import exception_to_response
 from apps.job_mgmt.services.execution_base_service import ExecutionTaskBaseService
+from apps.job_mgmt.utils.i18n import job_message
 from apps.job_mgmt.views.mixins import BatchDeleteMixin
 from apps.node_mgmt.models import CloudRegion
 from apps.rpc.ansible import AnsibleExecutor
@@ -24,7 +26,6 @@ from apps.rpc.executor import Executor
 from apps.rpc.node_mgmt import NodeMgmt
 from apps.rpc.system_mgmt import SystemMgmt
 from apps.system_mgmt.utils.operation_log_utils import log_operation
-from apps.core.utils.team_utils import get_current_team
 
 
 def _get_executor_node(cloud_region_id: int) -> str:
@@ -126,7 +127,7 @@ class TargetViewSet(BatchDeleteMixin, AuthViewSet):
         try:
             return super().update(request, *args, **kwargs)
         except TargetTeamConcurrentUpdateError as error:
-            return exception_to_response(error, context="[target.update]")
+            return exception_to_response(error, context="[target.update]", request=request)
 
     @HasPermission("target-View")
     def list(self, request, *args, **kwargs):
@@ -155,6 +156,7 @@ class TargetViewSet(BatchDeleteMixin, AuthViewSet):
 
         查询参数:
             cloud_region_id: 云区域ID (可选)
+            keyword: 节点名称或IP，模糊匹配 (可选)
             name: 节点名称，模糊匹配 (可选)
             ip: IP地址，模糊匹配 (可选)
             os: 操作系统 linux/windows (可选)
@@ -190,6 +192,10 @@ class TargetViewSet(BatchDeleteMixin, AuthViewSet):
         cloud_region_id = request.query_params.get("cloud_region_id")
         if cloud_region_id:
             query_data["cloud_region_id"] = int(cloud_region_id)
+
+        keyword = request.query_params.get("keyword")
+        if keyword:
+            query_data["keyword"] = keyword
 
         name = request.query_params.get("name")
         if name:
@@ -251,7 +257,12 @@ class TargetViewSet(BatchDeleteMixin, AuthViewSet):
                 }
             )
         except Exception as e:
-            return exception_to_response(e, context="[query_nodes]", default_message="查询节点失败")
+            return exception_to_response(
+                e,
+                context="[query_nodes]",
+                default_message=job_message(request, "error.query_nodes_failed", "Failed to query nodes"),
+                request=request,
+            )
 
     @action(detail=False, methods=["get"])
     @HasPermission("target-View")
@@ -273,7 +284,12 @@ class TargetViewSet(BatchDeleteMixin, AuthViewSet):
             result = node_mgmt.cloud_region_list()
             return Response({"result": True, "data": result})
         except Exception as e:
-            return exception_to_response(e, context="[cloud_regions]", default_message="查询云区域失败")
+            return exception_to_response(
+                e,
+                context="[cloud_regions]",
+                default_message=job_message(request, "error.query_cloud_regions_failed", "Failed to query cloud regions"),
+                request=request,
+            )
 
     @action(detail=False, methods=["post"])
     @HasPermission("target-Delete")
@@ -354,7 +370,12 @@ class TargetViewSet(BatchDeleteMixin, AuthViewSet):
         if saved_target is not None:
             credentials = ExecutionTaskBaseService._build_host_credentials([saved_target])
             if not credentials:
-                return Response({"success": False, "message": "目标未配置可用凭据"})
+                return Response(
+                    {
+                        "success": False,
+                        "message": job_message(None, "error.target_credentials_missing", "Target has no usable credentials"),
+                    }
+                )
             stored_credential = credentials[0]
 
         password = None
@@ -389,15 +410,39 @@ class TargetViewSet(BatchDeleteMixin, AuthViewSet):
 
             if success and "success" in stdout:
                 logger.info(f"[test_connection] SSH connection test passed: {ssh_user}@{ip}:{ssh_port}")
-                return Response({"success": True, "message": "连接测试成功"})
+                return Response(
+                    {
+                        "success": True,
+                        "message": job_message(None, "message.connection_test_success", "Connection test succeeded"),
+                    }
+                )
             else:
                 error_msg = _build_ssh_test_failure_message(result_detail, error, stdout)
                 logger.warning(f"[test_connection] SSH connection test failed: {ssh_user}@{ip}:{ssh_port}, error: {error_msg}")
-                return Response({"success": False, "message": f"连接测试失败: {error_msg}"})
+                return Response(
+                    {
+                        "success": False,
+                        "message": job_message(
+                            None,
+                            "message.connection_test_failed",
+                            "Connection test failed: {detail}",
+                            detail=error_msg,
+                        ),
+                    }
+                )
 
         except Exception as e:
             logger.exception(f"[test_connection] SSH connection test error: {ssh_user}@{ip}:{ssh_port}, error: {e}")
-            return Response({"success": False, "message": "连接测试异常，请查看后端日志排查"})
+            return Response(
+                {
+                    "success": False,
+                    "message": job_message(
+                        None,
+                        "error.connection_test_exception",
+                        "Connection test failed unexpectedly; check backend logs",
+                    ),
+                }
+            )
 
     @staticmethod
     def _perform_windows_connection_test(validated_data, saved_target=None):
@@ -411,7 +456,12 @@ class TargetViewSet(BatchDeleteMixin, AuthViewSet):
         if saved_target is not None:
             credentials = ExecutionTaskBaseService._build_host_credentials([saved_target])
             if not credentials:
-                return Response({"success": False, "message": "目标未配置可用凭据"})
+                return Response(
+                    {
+                        "success": False,
+                        "message": job_message(None, "error.target_credentials_missing", "Target has no usable credentials"),
+                    }
+                )
             credential = credentials[0]
         else:
             credential = {
@@ -419,15 +469,17 @@ class TargetViewSet(BatchDeleteMixin, AuthViewSet):
                 "password": validated_data.get("winrm_password"),
             }
 
-        credential.update({
-            "host": str(validated_data.get("ip")),
-            "port": validated_data.get("winrm_port", 5986),
-            "user": validated_data.get("winrm_user", ""),
-            "connection": "winrm",
-            "winrm_scheme": validated_data.get("winrm_scheme", "https"),
-            "winrm_transport": validated_data.get("winrm_transport", WinRMTransport.NTLM),
-            "winrm_cert_validation": validated_data.get("winrm_cert_validation", True),
-        })
+        credential.update(
+            {
+                "host": str(validated_data.get("ip")),
+                "port": validated_data.get("winrm_port", 5986),
+                "user": validated_data.get("winrm_user", ""),
+                "connection": "winrm",
+                "winrm_scheme": validated_data.get("winrm_scheme", "https"),
+                "winrm_transport": validated_data.get("winrm_transport", WinRMTransport.NTLM),
+                "winrm_cert_validation": validated_data.get("winrm_cert_validation", True),
+            }
+        )
         if validated_data.get("winrm_password"):
             credential["password"] = validated_data["winrm_password"]
 
@@ -445,14 +497,47 @@ class TargetViewSet(BatchDeleteMixin, AuthViewSet):
             while time.monotonic() < deadline:
                 query_result = executor.task_query(accepted_task_id, timeout=5)
                 if not isinstance(query_result, dict):
-                    return Response({"success": False, "message": "WinRM 测试返回格式异常"})
+                    return Response(
+                        {
+                            "success": False,
+                            "message": job_message(None, "error.winrm_result_invalid", "Unexpected WinRM test result format"),
+                        }
+                    )
                 task_status = query_result.get("status")
                 if task_status == "success":
-                    return Response({"success": True, "message": "WinRM 连接测试成功"})
+                    return Response(
+                        {
+                            "success": True,
+                            "message": job_message(None, "message.winrm_connection_test_success", "WinRM connection test succeeded"),
+                        }
+                    )
                 if task_status in {"failed", "callback_failed"}:
-                    return Response({"success": False, "message": "WinRM 连接测试失败，请查看执行器日志"})
+                    return Response(
+                        {
+                            "success": False,
+                            "message": job_message(
+                                None,
+                                "error.winrm_connection_test_failed",
+                                "WinRM connection test failed; check executor logs",
+                            ),
+                        }
+                    )
                 time.sleep(0.2)
-            return Response({"success": False, "message": "WinRM 连接测试超时"})
+            return Response(
+                {
+                    "success": False,
+                    "message": job_message(None, "error.winrm_connection_test_timeout", "WinRM connection test timed out"),
+                }
+            )
         except Exception as e:
             logger.exception("[test_connection] WinRM connection test error: target=%s, error=%s", credential["host"], e)
-            return Response({"success": False, "message": "WinRM 连接测试异常，请查看后端日志排查"})
+            return Response(
+                {
+                    "success": False,
+                    "message": job_message(
+                        None,
+                        "error.winrm_connection_test_exception",
+                        "WinRM connection test failed unexpectedly; check backend logs",
+                    ),
+                }
+            )

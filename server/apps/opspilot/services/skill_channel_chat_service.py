@@ -8,27 +8,55 @@ import uuid
 from typing import Any
 
 from asgiref.sync import sync_to_async
+from django.core.paginator import Paginator
+from django.db.models import Count, Q
 from django.http import StreamingHttpResponse
+from django.utils import timezone as django_timezone
+from django.utils.dateparse import parse_datetime
 
 from apps.base.models import UserAPISecret
 from apps.core.logger import opspilot_logger as logger
 from apps.opspilot.enum import SKILL_CHANNEL_SKIP_ORG_CHECK, SkillChannelChoices
+from apps.opspilot.memory.identity import is_system_user_uuid, resolve_owner_identity, split_external_user_id
+from apps.opspilot.metis.llm.chain.entity import is_ephemeral_agui_custom_event
 from apps.opspilot.metis.llm.chain.token_utils import count_text_tokens
+from apps.opspilot.metis.llm.common.llm_client_factory import DEFAULT_CHAT_TEMPERATURE
 from apps.opspilot.models import LLMSkill, SkillChannel, SkillConversation, SkillConversationMessage
 from apps.opspilot.services.caller_identity import CALLER_IDENTITY_CONFIG_KEY, CallerIdentityError, capture_caller_identity
 from apps.opspilot.services.history_service import HistoryService
 from apps.opspilot.services.skill_channel_service import channel_allows_team, resolve_ops_pilot_guest_id
+from apps.opspilot.services.skill_memory_service import (
+    annotate_pending_memory_rounds,
+    inject_skill_memory_prompt,
+    maybe_schedule_skill_memory_write,
+    pending_rounds_for_conversation,
+    resolve_skill_conversation_memory_space,
+    resolve_skill_memory_model_id,
+    snapshot_pending_messages,
+)
 from apps.opspilot.services.skill_package.runtime import build_skill_package_prompt, build_skill_package_strategy, hydrate_skill_packages
+from apps.opspilot.services.wiki.parsed_media_service import (
+    _STORED_MEDIA_PROXY_URL_RE,
+    history_media_proxy_url,
+    locator_from_stored_media_url,
+    resign_stored_media_urls,
+)
 from apps.opspilot.utils.agui_chat import stream_agui_chat
 from apps.opspilot.utils.prompt_utils import merge_skill_params
 from apps.opspilot.utils.skill_execution_params import resolve_request_tools
 from apps.opspilot.utils.sse_chat import create_error_stream_response
+from apps.system_mgmt.models import User as SystemUser
 
 PAGE_CONTEXT_TEXT_BUDGET = 8000
 PAGE_CONTEXT_MAX_IMAGES = 6
 PAGE_CONTEXT_MAX_IMAGE_CHARS = 500 * 1024
 PAGE_CONTEXT_GUIDE = (
-    "以下是用户当前正在查看的页面快照，仅当问题与页面相关时参考。" "只回答用户这一轮提出的问题，不要复述历史里已分析过、且本轮未点名的图表。" "时间范围、横轴起止与 KPI 一律以 <current_page> 本轮快照为准，" "禁止沿用对话历史里过期的时间窗描述。"
+    "以下是用户当前正在查看的页面快照，仅当问题与页面相关时参考。"
+    "只回答用户这一轮提出的问题，不要复述历史里已分析过、且本轮未点名的图表。"
+    "时间范围、横轴起止与 KPI 一律以 <current_page> 本轮快照为准，"
+    "禁止沿用对话历史里过期的时间窗描述。"
+    "若缺少查询对象、对象类型、时间范围或要看的指标/告警类型，必须调用 request_user_choice 让用户选择，"
+    "禁止编造 uvx、CLI 或其它替代排查方案。"
 )
 PAGE_CONTEXT_FOCUSED_GUIDE = (
     "本轮用户问题是「{question}」，已定位到图表{names}。"
@@ -46,6 +74,16 @@ PAGE_CONTEXT_RANKING_GUIDE = (
     "问 Top 或排行时按图表列出各挂载点或设备及其数值，不要只用 KPI 快照里的单一占用百分比代替排行。"
     "禁止回答、复述或续写历史对话里已经分析过的其它图表。"
 )
+PAGE_CONTEXT_CREDENTIAL_GUIDE = "用户本轮在询问凭据或密钥。" "禁止回答、复述、猜测或生成密码、SNMP community、token、Access Key 或其它凭据内容。" "只能说明不能讨论凭据，可继续回答非密钥的接入事实。"
+PAGE_CONTEXT_METRIC_VALUE_CAP = 24
+_CREDENTIAL_QUESTION_RE = re.compile(
+    r"password|passwd|secret|token|community|access[_\s-]?key|api[_\s-]?key|密钥|密码|口令|凭据",
+    re.I,
+)
+_NOTICE_PEOPLE_QUESTION_RE = re.compile(
+    r"通知人|处理人|发给谁|通知谁|谁收|谁处理|谁通知|assignee|handler|notice.?user",
+    re.I,
+)
 # ~600px 截图按 OpenAI high-detail 估算：ceil(600/512)^2 * 170 + 85
 PAGE_CONTEXT_IMAGE_TOKEN_ESTIMATE = 765
 # 单轮页面内容（快照+图）估算超限：拒绝问答；会话累计超限：提示新开会话。测试可 patch。
@@ -53,6 +91,9 @@ PAGE_CONTEXT_SINGLE_TURN_MAX_TOKENS = 20000
 PAGE_CONTEXT_SESSION_MAX_TOKENS = 80000
 PAGE_CONTEXT_TOO_LARGE_MESSAGE = "当前页面内容过多，无法进行问答"
 PAGE_CONTEXT_SESSION_OVERFLOW_MESSAGE = "上下文过长，请新开会话"
+ADMIN_CONVERSATION_PAGE_SIZE_MAX = 100
+ADMIN_PERSON_LOOKUP_LIMIT = 200
+ADMIN_MESSAGE_FETCH_MAX = 2000
 
 
 class SkillChannelChatError(Exception):
@@ -62,11 +103,32 @@ class SkillChannelChatError(Exception):
         self.status = status
 
 
-def get_enabled_channel(channel_id: int, expected_types: set[str] | None = None) -> SkillChannel:
+def lookup_skill_channel(channel_ref: int | str | uuid.UUID | None) -> SkillChannel:
+    """按对外 public_id 或内部主键查找渠道；找不到则 404。"""
+    if channel_ref is None or channel_ref == "":
+        raise SkillChannelChatError("渠道不存在", status=404)
+    if isinstance(channel_ref, uuid.UUID):
+        try:
+            return SkillChannel.objects.select_related("skill").get(public_id=channel_ref)
+        except SkillChannel.DoesNotExist as exc:
+            raise SkillChannelChatError("渠道不存在", status=404) from exc
+    if isinstance(channel_ref, int) or (isinstance(channel_ref, str) and channel_ref.isdigit()):
+        try:
+            return SkillChannel.objects.select_related("skill").get(id=int(channel_ref))
+        except SkillChannel.DoesNotExist as exc:
+            raise SkillChannelChatError("渠道不存在", status=404) from exc
     try:
-        channel = SkillChannel.objects.select_related("skill").get(id=channel_id)
+        public_id = uuid.UUID(str(channel_ref))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise SkillChannelChatError("渠道不存在", status=404) from exc
+    try:
+        return SkillChannel.objects.select_related("skill").get(public_id=public_id)
     except SkillChannel.DoesNotExist as exc:
         raise SkillChannelChatError("渠道不存在", status=404) from exc
+
+
+def get_enabled_channel(channel_ref: int | str | uuid.UUID, expected_types: set[str] | None = None) -> SkillChannel:
+    channel = lookup_skill_channel(channel_ref)
     if not channel.enabled:
         raise SkillChannelChatError("渠道已下线", status=403)
     if expected_types and channel.channel_type not in expected_types:
@@ -97,14 +159,17 @@ def authenticate_embedded(request) -> tuple[Any, int]:
 
 
 def saas_external_user_id(user) -> str:
-    username = getattr(user, "username", "") or ""
-    domain = getattr(user, "domain", "") or ""
-    return f"{username}@{domain}" if domain else username
+    owner = resolve_owner_identity(user=user)
+    if owner.user_id:
+        return owner.user_id
+    if owner.domain:
+        return f"{owner.username}@{owner.domain}"
+    return owner.username or ""
 
 
 def get_or_create_conversation(channel: SkillChannel, external_user_id: str, session_id: str | None = None) -> SkillConversation:
     if session_id:
-        conv = SkillConversation.objects.select_related("channel", "skill").filter(session_id=session_id).first()
+        conv = SkillConversation.objects.select_related("channel", "skill", "skill__memory_space").filter(session_id=session_id).first()
         if conv:
             if (conv.external_user_id or "") != (external_user_id or ""):
                 raise SkillChannelChatError("无权使用该会话", status=403)
@@ -287,15 +352,29 @@ def _unique_titles(titles: list[str]) -> list[str]:
     return kept
 
 
-def _page_context_guide(focused_titles: list[str], question: str = "") -> str:
+def is_credential_question(question: str) -> bool:
+    return bool(_CREDENTIAL_QUESTION_RE.search(str(question or "")))
+
+
+def is_notice_people_question(question: str) -> bool:
+    return bool(_NOTICE_PEOPLE_QUESTION_RE.search(str(question or "")))
+
+
+def _page_context_guide(focused_titles: list[str], question: str = "", credential: bool = False) -> str:
+    parts: list[str] = []
+    if credential:
+        parts.append(PAGE_CONTEXT_CREDENTIAL_GUIDE)
     titles = _unique_titles(focused_titles)
     if not titles:
-        return PAGE_CONTEXT_GUIDE
+        parts.append(PAGE_CONTEXT_GUIDE)
+        return "\n".join(parts)
     names = "、".join(f"《{title}》" for title in titles)
     question_text = str(question or "").strip()
     if _has_ranking_marker(question_text) and any(_has_ranking_marker(title) for title in titles):
-        return PAGE_CONTEXT_RANKING_GUIDE.format(question=question_text, names=names)
-    return PAGE_CONTEXT_FOCUSED_GUIDE.format(question=question_text, names=names)
+        parts.append(PAGE_CONTEXT_RANKING_GUIDE.format(question=question_text, names=names))
+    else:
+        parts.append(PAGE_CONTEXT_FOCUSED_GUIDE.format(question=question_text, names=names))
+    return "\n".join(parts)
 
 
 def _focused_titles_from_page_context(question: str, page_context) -> list[str]:
@@ -317,53 +396,126 @@ def _history_for_focused_charts(history: list[dict], focused_titles: list[str]) 
     return []
 
 
+def _parse_metric_series(content: str) -> list[dict] | None:
+    text = str(content or "").strip()
+    if not text:
+        return []
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return None
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _metric_item_matches(item: dict, question: str) -> bool:
+    name = str(item.get("name") or "").strip()
+    metric = str(item.get("metric") or "").strip()
+    group = str(item.get("group") or "").strip()
+    if name and chart_title_matches_question(name, question):
+        return True
+    if metric and chart_title_matches_question(metric, question):
+        return True
+    if group and chart_title_matches_question(group, question):
+        if name and _qualifiers_conflict(_normalize_chart_text(name), _normalize_chart_text(question)):
+            return False
+        return True
+    return False
+
+
+def _without_metric_values(item: dict) -> dict:
+    return {key: value for key, value in item.items() if key != "value"}
+
+
+def _focus_metric_series_sections(question: str, sections: list[dict]) -> tuple[list[dict], list[str]]:
+    focused: list[str] = []
+    next_sections: list[dict] = []
+    for section in sections:
+        if section.get("id") != "metric-series":
+            next_sections.append(section)
+            continue
+        items = _parse_metric_series(str(section.get("content") or ""))
+        if items is None:
+            next_sections.append(section)
+            continue
+        matched_flags = [_metric_item_matches(item, question) for item in items]
+        any_hit = any(matched_flags)
+        kept: list[dict] = []
+        kept_with_value = 0
+        for item, matched in zip(items, matched_flags):
+            if not any_hit or not matched:
+                kept.append(_without_metric_values(item))
+                continue
+            if kept_with_value >= PAGE_CONTEXT_METRIC_VALUE_CAP:
+                kept.append(_without_metric_values(item))
+                continue
+            kept.append(item)
+            kept_with_value += 1
+            name = str(item.get("name") or item.get("metric") or "").strip()
+            if name:
+                focused.append(name)
+        next_sections.append({**section, "content": json.dumps(kept, ensure_ascii=False, separators=(",", ":"))})
+    return next_sections, _unique_titles(focused)
+
+
 def _focus_page_context(question: str, snapshot: dict) -> dict:
-    """问题点名了图表时，只保留对应截图与匹配的图表说明。"""
+    """问题点名了图表或指标时收口截图/曲线；凭据问法加拒绝约束；通知人仅点名保留。"""
     question_text = str(question or "").strip()
     if not question_text:
         return snapshot
-    captions = _visible_chart_captions(snapshot)
-    if not captions:
-        return snapshot
-    matched = _unique_titles([_caption_title(caption) for caption in captions if chart_matches_question(caption, question)])
-    if _has_ranking_marker(question_text):
-        ranked = [title for title in matched if _has_ranking_marker(title)]
-        if ranked:
-            matched = ranked
-    if not matched:
-        return snapshot
-    matched_keys = {_normalize_chart_text(title) for title in matched}
-    images = [item for item in (snapshot.get("images") or []) if isinstance(item, dict)]
-    kept_images = [image for image in images if _normalize_chart_text(_caption_title(str(image.get("caption") or ""))) in matched_keys]
-    kept_captions: list[str] = []
-    seen: set[str] = set()
-    for image in kept_images:
-        caption = str(image.get("caption") or "").strip()
-        title_key = _normalize_chart_text(_caption_title(caption))
-        if caption and title_key not in seen:
-            kept_captions.append(caption)
-            seen.add(title_key)
-    for caption in captions:
-        title_key = _normalize_chart_text(_caption_title(caption))
-        if title_key in matched_keys and title_key not in seen:
-            kept_captions.append(caption)
-            seen.add(title_key)
-    next_snapshot = {
-        **snapshot,
-        "images": kept_images,
-        "_focused_titles": matched,
-        "_focus_question": question_text,
-    }
-    sections = []
-    for section in snapshot.get("sections") or []:
-        if section.get("id") != "visible-charts":
-            sections.append(section)
-            continue
-        lines = [f"{idx}. {caption}" for idx, caption in enumerate(kept_captions, start=1)]
-        if not lines:
-            continue
-        sections.append({**section, "content": "\n".join(lines)})
+    next_snapshot = dict(snapshot)
+    sections = [section for section in (snapshot.get("sections") or []) if isinstance(section, dict)]
+    if is_credential_question(question_text):
+        next_snapshot["_credential_refused"] = True
+    if not is_notice_people_question(question_text):
+        sections = [section for section in sections if section.get("id") != "notice-people"]
+    sections, metric_titles = _focus_metric_series_sections(question_text, sections)
     next_snapshot["sections"] = sections
+
+    captions = _visible_chart_captions(next_snapshot)
+    matched: list[str] = []
+    if captions:
+        matched = _unique_titles([_caption_title(caption) for caption in captions if chart_matches_question(caption, question)])
+        if _has_ranking_marker(question_text):
+            ranked = [title for title in matched if _has_ranking_marker(title)]
+            if ranked:
+                matched = ranked
+        if matched:
+            matched_keys = {_normalize_chart_text(title) for title in matched}
+            images = [item for item in (snapshot.get("images") or []) if isinstance(item, dict)]
+            kept_images = [image for image in images if _normalize_chart_text(_caption_title(str(image.get("caption") or ""))) in matched_keys]
+            kept_captions: list[str] = []
+            seen: set[str] = set()
+            for image in kept_images:
+                caption = str(image.get("caption") or "").strip()
+                title_key = _normalize_chart_text(_caption_title(caption))
+                if caption and title_key not in seen:
+                    kept_captions.append(caption)
+                    seen.add(title_key)
+            for caption in captions:
+                title_key = _normalize_chart_text(_caption_title(caption))
+                if title_key in matched_keys and title_key not in seen:
+                    kept_captions.append(caption)
+                    seen.add(title_key)
+            next_snapshot["images"] = kept_images
+            rewritten = []
+            for section in next_snapshot.get("sections") or []:
+                if section.get("id") != "visible-charts":
+                    rewritten.append(section)
+                    continue
+                lines = [f"{idx}. {caption}" for idx, caption in enumerate(kept_captions, start=1)]
+                if not lines:
+                    continue
+                rewritten.append({**section, "content": "\n".join(lines)})
+            next_snapshot["sections"] = rewritten
+
+    focused = _unique_titles([*matched, *metric_titles])
+    if focused:
+        next_snapshot["_focused_titles"] = focused
+        next_snapshot["_focus_question"] = question_text
     return next_snapshot
 
 
@@ -424,7 +576,8 @@ def _sanitize_page_context(page_context) -> dict | None:
 def _render_page_context_block(snapshot: dict, question: str = "") -> str:
     focused = [str(title) for title in (snapshot.get("_focused_titles") or []) if title]
     q = str(question or snapshot.get("_focus_question") or "")
-    lines = [_page_context_guide(focused, q), "<current_page>"]
+    credential = bool(snapshot.get("_credential_refused"))
+    lines = [_page_context_guide(focused, q, credential=credential), "<current_page>"]
     if snapshot.get("url"):
         lines.append(f"url: {snapshot['url']}")
     if snapshot.get("app"):
@@ -624,7 +777,8 @@ def inject_page_context(user_message, page_context, mode: str = "inline"):
         if captions:
             block = block + "\n图表说明:\n" + "\n".join(f"- {caption}" for caption in captions)
         focused = [str(title) for title in (snapshot.get("_focused_titles") or []) if title]
-        constraint = _page_context_guide(focused, text) if focused else ""
+        credential = bool(snapshot.get("_credential_refused"))
+        constraint = _page_context_guide(focused, text, credential=credential) if (focused or credential) else ""
         head = "\n\n".join(part for part in (constraint, text) if part)
         merged_text = f"{head}\n\n{block}".strip() if head else block
         if not page_images and not existing_images:
@@ -637,11 +791,13 @@ def inject_page_context(user_message, page_context, mode: str = "inline"):
 
 def append_message(conversation: SkillConversation, role: str, content: str) -> SkillConversationMessage:
     msg = SkillConversationMessage.objects.create(conversation=conversation, role=role, content=content or "")
+    update_fields = ["updated_at"]
     if role == SkillConversationMessage.ROLE_USER and not (conversation.title or "").strip():
         text = (content or "").strip().replace("\n", " ")
         if text:
             conversation.title = f"{text[:50]}..." if len(text) > 50 else text
-            conversation.save(update_fields=["title", "updated_at"])
+            update_fields.append("title")
+    conversation.save(update_fields=update_fields)
     return msg
 
 
@@ -655,12 +811,141 @@ def conversation_display_title(conversation: SkillConversation) -> str:
     return f"{text[:50]}..." if len(text) > 50 else text
 
 
-def list_skill_conversations_for_user(*, skill_id: int, external_user_id: str) -> list[dict]:
-    qs = (
-        SkillConversation.objects.filter(skill_id=skill_id, external_user_id=external_user_id, is_active=True)
-        .select_related("channel")
-        .order_by("-updated_at", "-id")
+def _parse_admin_datetime(value: str):
+    text = (value or "").strip()
+    if not text:
+        return None
+    parsed = parse_datetime(text)
+    if parsed is None:
+        raise SkillChannelChatError("时间格式无效", status=400)
+    if django_timezone.is_naive(parsed):
+        return django_timezone.make_aware(parsed, django_timezone.get_current_timezone())
+    return parsed
+
+
+def _person_display_map(external_ids: list[str]) -> dict[str, str]:
+    unique_ids = [item for item in dict.fromkeys(external_ids) if item]
+    displays = {item: item for item in unique_ids}
+    uuids = [item for item in unique_ids if is_system_user_uuid(item)]
+    named = [item for item in unique_ids if item not in uuids]
+    if uuids:
+        for user in SystemUser.objects.filter(user_id__in=uuids).only("user_id", "display_name", "username"):
+            displays[user.user_id] = (user.display_name or user.username or user.user_id).strip()
+    named_q = Q()
+    for item in named:
+        username, domain = split_external_user_id(item)
+        if not username:
+            continue
+        named_q |= Q(username=username, domain=domain)
+    if named_q:
+        for user in SystemUser.objects.filter(named_q).only("username", "domain", "display_name"):
+            key = f"{user.username}@{user.domain}" if user.domain else user.username
+            displays[key] = (user.display_name or user.username or key).strip()
+    return displays
+
+
+def _append_person_ids(extras: list[str], user: SystemUser) -> None:
+    if user.user_id:
+        extras.append(user.user_id)
+    if user.username:
+        extras.append(user.username)
+        if user.domain:
+            extras.append(f"{user.username}@{user.domain}")
+
+
+def _filter_conversations_by_person(qs, person: str):
+    keyword = (person or "").strip()
+    if not keyword:
+        return qs
+    person_q = Q(external_user_id__icontains=keyword)
+    extras: list[str] = []
+    username, domain = split_external_user_id(keyword)
+    if "@" in keyword and username:
+        named_user = SystemUser.objects.filter(username=username, domain=domain).only("user_id", "username", "domain").first()
+        if named_user:
+            _append_person_ids(extras, named_user)
+    users = list(
+        SystemUser.objects.filter(Q(display_name__icontains=keyword) | Q(username__icontains=keyword)).only("user_id", "username", "domain")[
+            :ADMIN_PERSON_LOOKUP_LIMIT
+        ]
     )
+    for user in users:
+        _append_person_ids(extras, user)
+    if extras:
+        person_q |= Q(external_user_id__in=extras)
+    return qs.filter(person_q)
+
+
+def list_skill_conversations_for_admin(
+    *,
+    skill_id: int,
+    channel_id: int | None = None,
+    person: str = "",
+    title: str = "",
+    start_time: str = "",
+    end_time: str = "",
+    page: int = 1,
+    page_size: int = 10,
+) -> dict:
+    qs = SkillConversation.objects.filter(skill_id=skill_id).select_related("channel").annotate(message_count=Count("messages"))
+    if channel_id is not None:
+        qs = qs.filter(channel_id=channel_id)
+    title_keyword = (title or "").strip()
+    if title_keyword:
+        qs = qs.filter(title__icontains=title_keyword)
+    start_at = _parse_admin_datetime(start_time)
+    end_at = _parse_admin_datetime(end_time)
+    if start_at is not None:
+        qs = qs.filter(updated_at__gte=start_at)
+    if end_at is not None:
+        qs = qs.filter(updated_at__lte=end_at)
+    qs = _filter_conversations_by_person(qs, person)
+    qs = qs.order_by("-updated_at", "-id")
+    page = max(int(page or 1), 1)
+    page_size = min(max(int(page_size or 10), 1), ADMIN_CONVERSATION_PAGE_SIZE_MAX)
+    paginator = Paginator(qs, page_size)
+    page_obj = paginator.get_page(page)
+    rows = list(page_obj.object_list)
+    displays = _person_display_map([row.external_user_id for row in rows])
+    items = []
+    for conv in rows:
+        channel = conv.channel
+        external_user_id = conv.external_user_id or ""
+        items.append(
+            {
+                "session_id": conv.session_id,
+                "title": (conv.title or "").strip() or "新会话",
+                "skill_id": conv.skill_id,
+                "channel_id": conv.channel_id,
+                "channel_type": channel.channel_type if channel else "",
+                "channel_name": (channel.name if channel else "") or "",
+                "external_user_id": external_user_id,
+                "person_display": displays.get(external_user_id) or external_user_id,
+                "count": int(getattr(conv, "message_count", 0) or 0),
+                "created_at": conv.created_at.isoformat() if conv.created_at else None,
+                "updated_at": conv.updated_at.isoformat() if getattr(conv, "updated_at", None) else None,
+            }
+        )
+    return {"items": items, "count": paginator.count}
+
+
+def get_skill_conversation_for_admin(*, session_id: str) -> SkillConversation:
+    conv = SkillConversation.objects.filter(session_id=session_id).select_related("channel", "skill").first()
+    if not conv:
+        raise SkillChannelChatError("会话不存在", status=404)
+    return conv
+
+
+def get_skill_session_messages_for_admin(*, session_id: str) -> tuple[list[dict], SkillConversation]:
+    conv = get_skill_conversation_for_admin(session_id=session_id)
+    return serialize_skill_session_messages(conv), conv
+
+
+def list_skill_conversations_for_user(*, skill_id: int, external_user_id: str, channel_id: int | None = None) -> list[dict]:
+    qs = SkillConversation.objects.filter(skill_id=skill_id, external_user_id=external_user_id, is_active=True)
+    if channel_id is not None:
+        qs = qs.filter(channel_id=channel_id)
+    qs = annotate_pending_memory_rounds(qs.select_related("channel", "skill", "skill__memory_space").order_by("-updated_at", "-id"))
     result = []
     for conv in qs:
         channel = conv.channel
@@ -674,6 +959,7 @@ def list_skill_conversations_for_user(*, skill_id: int, external_user_id: str) -
                 "channel_name": (channel.name if channel else "") or "",
                 "created_at": conv.created_at.isoformat() if conv.created_at else None,
                 "updated_at": conv.updated_at.isoformat() if getattr(conv, "updated_at", None) else None,
+                "pending_memory_rounds": pending_rounds_for_conversation(conv, getattr(conv, "pending_count", None)),
             }
         )
     return result
@@ -688,20 +974,96 @@ def _owned_skill_conversation(*, session_id: str, external_user_id: str) -> Skil
     return conv
 
 
-def _serialize_session_messages(conv: SkillConversation) -> list[dict]:
+def _locate_joined_offset(bounds: list[int], offset: int) -> tuple[int, int]:
+    for index in range(len(bounds) - 1, -1, -1):
+        if offset >= bounds[index]:
+            return index, offset - bounds[index]
+    return 0, 0
+
+
+def refresh_history_message_media(content: str) -> str:
+    """重签历史正文里的知识库图片。
+
+    流式落库会把同一条图片 URL 拆进多个 TEXT_MESSAGE_CONTENT。
+    先按事件顺序拼回正文再重签，并把新链接放回原来的文本片段。
+    """
+    text = content or ""
+    if "wiki_mgmt/media" not in text:
+        return text
+    if not text.lstrip().startswith("["):
+        return resign_stored_media_urls(text)
+    try:
+        events = json.loads(text)
+    except json.JSONDecodeError:
+        return resign_stored_media_urls(text)
+    if not isinstance(events, list):
+        return resign_stored_media_urls(text)
+
+    pieces: list[str] = []
+    owners: list[int] = []
+    for index, event in enumerate(events):
+        if not isinstance(event, dict) or event.get("type") != "TEXT_MESSAGE_CONTENT":
+            continue
+        pieces.append(str(event.get("delta") or ""))
+        owners.append(index)
+    if not pieces:
+        return text
+
+    joined = "".join(pieces)
+    matches = list(_STORED_MEDIA_PROXY_URL_RE.finditer(joined))
+    if not matches:
+        return text
+
+    bounds: list[int] = []
+    cursor = 0
+    for piece in pieces:
+        bounds.append(cursor)
+        cursor += len(piece)
+
+    mutable = list(pieces)
+    changed = False
+    for match in reversed(matches):
+        locator = locator_from_stored_media_url(match.group(0))
+        if not locator:
+            continue
+        fresh = history_media_proxy_url(locator)
+        start_index, start_offset = _locate_joined_offset(bounds, match.start())
+        end_index, end_offset = _locate_joined_offset(bounds, match.end())
+        if start_index == end_index:
+            current = mutable[start_index]
+            mutable[start_index] = current[:start_offset] + fresh + current[end_offset:]
+        else:
+            mutable[start_index] = mutable[start_index][:start_offset] + fresh
+            for middle in range(start_index + 1, end_index):
+                mutable[middle] = ""
+            mutable[end_index] = mutable[end_index][end_offset:]
+        changed = True
+    if not changed:
+        return text
+
+    for piece, event_index in zip(mutable, owners):
+        events[event_index]["delta"] = piece
+    return json.dumps(events, ensure_ascii=False)
+
+
+def serialize_skill_session_messages(conv: SkillConversation) -> list[dict]:
     messages = []
-    for msg in conv.messages.order_by("created_at", "id"):
+    for msg in conv.messages.order_by("created_at", "id")[:ADMIN_MESSAGE_FETCH_MAX]:
         messages.append(
             {
                 "id": msg.id,
                 "conversation_role": msg.role,
-                "conversation_content": msg.content,
+                "conversation_content": refresh_history_message_media(msg.content or ""),
                 "conversation_time": msg.created_at.isoformat() if msg.created_at else None,
                 "session_id": conv.session_id,
                 "channel_type": conv.channel.channel_type if conv.channel_id else "",
             }
         )
     return messages
+
+
+def _serialize_session_messages(conv: SkillConversation) -> list[dict]:
+    return serialize_skill_session_messages(conv)
 
 
 def get_skill_session_messages(*, session_id: str, external_user_id: str) -> list[dict]:
@@ -713,13 +1075,42 @@ def get_skill_session_history(*, session_id: str, external_user_id: str) -> tupl
     return _serialize_session_messages(conv), conv
 
 
-def delete_skill_session(*, session_id: str, external_user_id: str) -> None:
-    conv = SkillConversation.objects.filter(session_id=session_id).first()
+def delete_skill_session(*, session_id: str, external_user_id: str, keep_memory: bool = False) -> None:
+    conv = SkillConversation.objects.select_related("skill", "skill__memory_space").filter(session_id=session_id).first()
     if not conv:
         raise SkillChannelChatError("会话不存在", status=404)
     if (conv.external_user_id or "") != (external_user_id or ""):
         raise SkillChannelChatError("无权删除该会话", status=403)
+    snapshot = snapshot_pending_messages(conv) if keep_memory else []
+    space = resolve_skill_conversation_memory_space(conv.skill)
+    if snapshot and space is not None:
+        from apps.opspilot.tasks.memory import write_skill_conversation_memory
+
+        owner = resolve_owner_identity(external_user_id=conv.external_user_id, assign_if_missing=True)
+        write_skill_conversation_memory.delay(
+            conv.id,
+            True,
+            snapshot,
+            space.id,
+            owner.username,
+            owner.domain,
+            resolve_skill_memory_model_id(conv.skill, space),
+            owner.user_id,
+        )
     conv.delete()
+
+
+def _request_user_timezone(request_user) -> str:
+    """当前请求用户的 IANA 时区。账号对象上没有时区时，按用户名和域再查一次。"""
+    timezone_name = str(getattr(request_user, "timezone", "") or "").strip()
+    if timezone_name:
+        return timezone_name
+    username = str(getattr(request_user, "username", "") or "").strip()
+    domain = str(getattr(request_user, "domain", "") or "").strip()
+    if not username or not domain:
+        return ""
+    stored = SystemUser.objects.filter(username=username, domain=domain).values_list("timezone", flat=True).first()
+    return str(stored or "").strip()
 
 
 def build_skill_chat_params(skill: LLMSkill, user_message: str, request_user, extra: dict | None = None) -> dict:
@@ -730,18 +1121,20 @@ def build_skill_chat_params(skill: LLMSkill, user_message: str, request_user, ex
         "llm_model": skill.llm_model_id,
         "skill_prompt": skill.skill_prompt or "",
         "conversation_window_size": skill.conversation_window_size,
-        "show_think": skill.show_think,
-        "enable_suggest": skill.enable_suggest,
-        "enable_query_rewrite": skill.enable_query_rewrite,
+        "show_think": False,
+        "enable_suggest": False,
+        "enable_query_rewrite": False,
         "skill_type": skill.skill_type,
         "tools": tools,
         "group": (skill.team or [0])[0],
         "wiki_kb_ids": list(skill.wiki_knowledge_bases.values_list("id", flat=True)),
+        "force_wiki_grounded": bool(getattr(skill, "force_wiki_grounded", False)),
         "skill_params": merge_skill_params([], skill.skill_params or []),
-        "temperature": getattr(skill, "temperature", 0.7),
+        "temperature": DEFAULT_CHAT_TEMPERATURE,
         "username": getattr(request_user, "username", "") or "",
         "user_id": getattr(request_user, "id", None),
         "locale": getattr(request_user, "locale", "en") or "en",
+        "user_timezone": _request_user_timezone(request_user),
     }
     skill_packages = hydrate_skill_packages(getattr(skill, "skill_packages", []) or [])
     tool_names = []
@@ -784,7 +1177,7 @@ def parse_sse_json_payloads(text: str) -> list[dict]:
 
 def assemble_assistant_persist_content(events: list[dict]) -> str:
     """助手落库：有 AG-UI type 时存事件数组，供前端分步回放；否则拼 OpenAI 正文。"""
-    typed = [item for item in events if item.get("type") and not (item.get("type") == "CUSTOM" and item.get("name") == "stream_keepalive")]
+    typed = [item for item in events if item.get("type") and not is_ephemeral_agui_custom_event(item)]
     if typed:
         return json.dumps(typed, ensure_ascii=False)
     parts = []
@@ -924,6 +1317,7 @@ def execute_skill_channel_im_sync(
 
     request_user = type("IMUser", (), {"username": external_user_id or "", "id": None, "locale": "en"})()
     params = build_skill_chat_params(skill, user_message, request_user)
+    inject_skill_memory_prompt(params, skill, external_user_id, user_message)
     params["chat_history"] = _history_from_conversation(conversation, skill.conversation_window_size or 10)
     result = chat_service.chat(params)
     content = ""
@@ -934,6 +1328,7 @@ def execute_skill_channel_im_sync(
     if not content:
         content = "处理完成，但未产生可展示内容"
     append_message(conversation, SkillConversationMessage.ROLE_ASSISTANT, content)
+    maybe_schedule_skill_memory_write(conversation)
     return content
 
 
@@ -954,6 +1349,7 @@ def stream_skill_channel_chat(
 
     user = identity_user or request.user
     params = build_skill_chat_params(skill, persist_text, user)
+    inject_skill_memory_prompt(params, skill, external_user_id, persist_text)
     params["chat_history"] = _history_from_conversation(conversation, skill.conversation_window_size or 10)
     focused_titles = _focused_titles_from_page_context(persist_text, page_context)
     params["chat_history"] = _history_for_focused_charts(params["chat_history"], focused_titles)
@@ -1031,11 +1427,13 @@ def _wrap_stream_persist_assistant(response: StreamingHttpResponse, conversation
             content = assemble_assistant_persist_content(events)
             if content:
                 try:
+                    conversation = await sync_to_async(SkillConversation.objects.select_related("skill").get)(id=conversation_id)
                     await sync_to_async(append_message)(
-                        await sync_to_async(SkillConversation.objects.get)(id=conversation_id),
+                        conversation,
                         SkillConversationMessage.ROLE_ASSISTANT,
                         content,
                     )
+                    await sync_to_async(maybe_schedule_skill_memory_write)(conversation)
                 except Exception:
                     logger.exception("persist skill channel assistant message failed: conversation_id=%s", conversation_id)
 

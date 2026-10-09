@@ -1,3 +1,4 @@
+import re
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
@@ -47,6 +48,7 @@ _MONITOR_TEMPLATE_ALLOWED_VARIABLES = {
     "disk_include_fstypes",
     "enable_ifmib",
     "endpoint",
+    "environment",
     "ews_url",
     "expect",
     "host",
@@ -58,6 +60,7 @@ _MONITOR_TEMPLATE_ALLOWED_VARIABLES = {
     "insecure_skip_verify",
     "instance_id",
     "instance_type",
+    "interpreter",
     "interval",
     "ip",
     "ip_version",
@@ -72,7 +75,9 @@ _MONITOR_TEMPLATE_ALLOWED_VARIABLES = {
     "namespace",
     "node_id",
     "os_type",
+    "operating_system",
     "owa_url",
+    "params",
     "password",
     "pattern",
     "plugin_id",
@@ -93,6 +98,8 @@ _MONITOR_TEMPLATE_ALLOWED_VARIABLES = {
     "response_timeout",
     "response_status_code",
     "response_string_match",
+    "run_as",
+    "region",
     "follow_redirects",
     "gather_binary_logs",
     "gather_global_variables",
@@ -108,6 +115,9 @@ _MONITOR_TEMPLATE_ALLOWED_VARIABLES = {
     "server",
     "server_url",
     "scheme",
+    "script",
+    "script_env",
+    "script_name",
     "sslmode",
     "storage_instance_key",
     "timeout",
@@ -189,6 +199,102 @@ def _is_rabbitmq_collect_config(config: dict) -> bool:
     return str(config.get("type") or config.get("instance_type") or "").lower() == "rabbitmq"
 
 
+def ensure_qcloud_region_jinja(template_content: str) -> str:
+    """确保腾讯云 Telegraf 子配置带有 region 请求头（兼容 DB 中旧模板）。"""
+    text = template_content or ""
+    if 'config_type = "qcloud"' not in text and "config_type = 'qcloud'" not in text:
+        return text
+    if re.search(r"(?m)^\s*region\s*=", text):
+        return text
+
+    password_line = re.search(
+        r'(?m)^(?P<indent>\s*)password\s*=\s*"[^"]*"\s*$',
+        text,
+    )
+    if not password_line:
+        return text
+
+    indent = password_line.group("indent")
+    insertion = f'{indent}region = "{{{{ region }}}}"\n'
+    return text[: password_line.end()] + "\n" + insertion + text[password_line.end() :]
+
+
+def _plugin_types(context: dict) -> set[str]:
+    types = {
+        str(context.get("instance_type") or "").strip().lower(),
+        str(context.get("type") or "").strip().lower(),
+        str(context.get("object_name") or "").strip().lower(),
+        str(context.get("name") or "").strip().lower(),
+        str(context.get("monitor_object_name") or "").strip().lower(),
+    }
+    config_type = context.get("config_type")
+    if isinstance(config_type, (list, tuple)):
+        types.update(str(item).strip().lower() for item in config_type)
+    elif config_type not in (None, ""):
+        types.add(str(config_type).strip().lower())
+    types.discard("")
+    return types
+
+
+def _is_aliyun_plugin(plugin_types: set[str]) -> bool:
+    return any("aliyun" in item or "阿里云" in item for item in plugin_types)
+
+
+def _is_qcloud_plugin(plugin_types: set[str]) -> bool:
+    return any("qcloud" in item or "tencent" in item or "腾讯云" in item for item in plugin_types)
+
+
+def _normalize_qcloud_region(value) -> str:
+    """表单多选为列表，Telegraf header 为逗号串；空值回落广州。"""
+    if isinstance(value, (list, tuple)):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        parts = [item.strip() for item in str(value or "").split(",") if item.strip()]
+    return ",".join(parts) or "ap-guangzhou"
+
+
+def _normalize_aliyun_region(value) -> str:
+    """阿里云监控一配置一地域；表单若误传列表则取第一项，空值回落杭州。"""
+    if isinstance(value, (list, tuple)):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+        return parts[0] if parts else "cn-hangzhou"
+    text = str(value or "").strip()
+    if "," in text:
+        text = text.split(",", 1)[0].strip()
+    return text or "cn-hangzhou"
+
+
+def resolve_operating_system(context: dict) -> str:
+    """Resolve linux/windows for Host Telegraf templates from context or Node.
+
+    Host child templates are shared across OS. Windows-only inputs such as
+    win_perf_counters must not render on Linux or Telegraf fails to start.
+    """
+    explicit = str(context.get("operating_system") or "").strip().lower()
+    if explicit in {"linux", "windows"}:
+        return explicit
+    node_id = context.get("node_id")
+    if not node_id:
+        return ""
+    from apps.node_mgmt.models import Node
+
+    os_value = Node.objects.filter(id=node_id).values_list("operating_system", flat=True).first()
+    text = str(os_value or "").strip().lower()
+    return text if text in {"linux", "windows"} else ""
+
+
+def operating_system_by_node_ids(node_ids) -> dict[str, str]:
+    ids = sorted({str(node_id) for node_id in node_ids if node_id not in (None, "")})
+    if not ids:
+        return {}
+    from apps.node_mgmt.models import Node
+
+    rows = Node.objects.filter(id__in=ids).values_list("id", "operating_system")
+    return {
+        str(node_id): str(os_value or "").strip().lower() for node_id, os_value in rows if str(os_value or "").strip().lower() in {"linux", "windows"}
+    }
+
+
 def _normalize_template_context(context: dict) -> dict:
     normalized = {**context}
     metrics_modules = normalized.get("metrics_modules")
@@ -203,6 +309,12 @@ def _normalize_template_context(context: dict) -> dict:
     normalized["ports"] = normalize_filter_list(normalized.get("ports"))
     if _is_rabbitmq_collect_config(normalized) and normalized.get("url") not in (None, ""):
         normalized["url"] = normalize_rabbitmq_management_url(normalized.get("url"))
+    plugin_types = _plugin_types(normalized)
+    # 阿里云对象即使 UI 残留 qcloud instance_type，也必须单选并回落杭州。
+    if _is_aliyun_plugin(plugin_types):
+        normalized["region"] = _normalize_aliyun_region(normalized.get("region"))
+    elif _is_qcloud_plugin(plugin_types):
+        normalized["region"] = _normalize_qcloud_region(normalized.get("region"))
     return normalized
 
 
@@ -271,6 +383,10 @@ class Controller:
         :raises ValueError: 当 instance_id 格式不正确时
         """
         _context = _normalize_template_context(context)
+        if not str(_context.get("operating_system") or "").strip():
+            resolved_os = resolve_operating_system(_context)
+            if resolved_os:
+                _context["operating_system"] = resolved_os
 
         # 优先使用显式 logical_instance_value（已规范化的逻辑实例值）。
         # 仅在缺失时才尝试解析 instance_id，保持向后兼容。
@@ -311,6 +427,10 @@ class Controller:
         # 即使模板含 ifDescr，也不得静默注入默认 ifType 排除。
         if is_ifmib_capable_render_context(_context) and needs_snmp_interface_filter_jinja(template_content):
             template_content = ensure_snmp_interface_filter_jinja(template_content)
+        template_content = ensure_qcloud_region_jinja(template_content)
+        if 'region = "{{ region }}"' in template_content and not str(_context.get("region") or "").strip():
+            plugin_types = _plugin_types(_context)
+            _context["region"] = "cn-hangzhou" if _is_aliyun_plugin(plugin_types) else "ap-guangzhou"
 
         safe_context = sanitize_template_context(_context)
         if escape_toml_strings:
@@ -377,6 +497,80 @@ class Controller:
 
         return configs
 
+    @staticmethod
+    def _is_script_collect(collect_type) -> bool:
+        return str(collect_type or "").casefold() == "script"
+
+    def _lookup_existing_script_collect_configs(self, configs, collect_type, plugin_id):
+        """脚本采集复用已有 CollectConfig：同一实例+script 不得再创建。
+
+        unique_together 是 (instance, collector, collect_type, config_type)，不含 plugin。
+        按 plugin 优先匹配，否则复用已有行做 update，避免再走创建撞唯一键。
+        """
+        if not self._is_script_collect(collect_type):
+            return {}
+        instance_ids = [item.get("instance_id") for item in configs if item.get("instance_id")]
+        config_types = {item.get("type") for item in configs if item.get("type")}
+        if not instance_ids or not config_types:
+            return {}
+        qs = CollectConfig.objects.select_for_update().filter(
+            monitor_instance_id__in=instance_ids,
+            collect_type__iexact=str(collect_type or ""),
+            config_type__in=config_types,
+        )
+        existing = {}
+        preferred_plugin_id = None if plugin_id in (None, "") else str(plugin_id)
+        for obj in qs:
+            key = (obj.monitor_instance_id, obj.config_type, bool(obj.is_child))
+            same_plugin = preferred_plugin_id is not None and str(obj.monitor_plugin_id or "") == preferred_plugin_id
+            if same_plugin or key not in existing:
+                existing[key] = obj
+        return existing
+
+    @staticmethod
+    def _apply_existing_collect_config_updates(child_updates, base_updates, plugin_obj):
+        if not child_updates and not base_updates:
+            return
+        from apps.monitor.services.collect_config_update import plugin_content_fingerprint, stamp_applied
+
+        node_mgmt = NodeMgmt(is_local_client=True)
+        plugin_fp = plugin_content_fingerprint(plugin_obj)
+        update_fields = [
+            "applied_content_sha256",
+            "applied_rendered_sha256",
+            "applied_pack_version",
+            "content_hand_edited",
+            "updated_at",
+        ]
+        plugin_pk = getattr(plugin_obj, "id", None)
+
+        def _save_updated(obj, extra_fields):
+            fields = list(update_fields)
+            if extra_fields:
+                fields.extend(extra_fields)
+            obj.save(update_fields=fields)
+
+        def _stamp_plugin(obj):
+            extra = []
+            if plugin_pk and obj.monitor_plugin_id != plugin_pk:
+                obj.monitor_plugin_id = plugin_pk
+                extra.append("monitor_plugin_id")
+            return extra
+
+        for obj, content, env_config in child_updates:
+            node_mgmt.update_child_config_content(obj.id, content, env_config)
+            stamp_applied(obj, plugin_fp=plugin_fp, rendered_content=content, hand_edited=False)
+            _save_updated(obj, _stamp_plugin(obj))
+        for obj, content, env_config in base_updates:
+            node_mgmt.update_config_content(obj.id, content, env_config)
+            stamp_applied(obj, plugin_fp=plugin_fp, rendered_content=content, hand_edited=False)
+            _save_updated(obj, _stamp_plugin(obj))
+        logger.info(
+            "event=script_collect_config_updated child=%s base=%s",
+            len(child_updates),
+            len(base_updates),
+        )
+
     def controller(self):  # noqa: C901
         """
         创建采集配置的控制器方法
@@ -413,8 +607,11 @@ class Controller:
                 plugin_template_id = plugin_obj.template_id
         configs = self.format_configs()
         node_configs, node_child_configs, collect_configs = [], [], []
+        existing_child_updates, existing_base_updates = [], []
 
         templates_by_type = self.get_templates_by_collector(collector, collect_type)
+        os_by_node = operating_system_by_node_ids(config_info.get("node_id") for config_info in configs)
+        existing_config_map = self._lookup_existing_script_collect_configs(configs, collect_type, plugin_id)
 
         if not templates_by_type:
             logger.warning(f"未找到任何模板：collector={collector}, collect_type={collect_type}")
@@ -446,7 +643,8 @@ class Controller:
             for template in templates:
                 is_child = template["config_type"] == "child"
                 collector_name = "Telegraf" if is_child else collector
-                config_id = str(uuid.uuid4().hex)
+                existing_obj = existing_config_map.get((config_info["instance_id"], type_name, is_child))
+                config_id = existing_obj.id if existing_obj else str(uuid.uuid4().hex)
 
                 try:
                     render_context = {
@@ -455,6 +653,9 @@ class Controller:
                         "plugin_id": plugin_template_id or plugin_id,
                         "monitor_plugin_id": plugin_id,
                     }
+                    node_os = os_by_node.get(str(config_info.get("node_id") or ""))
+                    if node_os and not str(render_context.get("operating_system") or "").strip():
+                        render_context["operating_system"] = node_os
                     from apps.monitor.utils.snmp_ifmib_capability import is_ifmib_capable_plugin
 
                     render_context["ifmib_capable"] = is_ifmib_capable_plugin(plugin_obj)
@@ -482,11 +683,18 @@ class Controller:
                             config_info.get("ENV_GROUP_METRICS_TIMEOUT") or env_config.get("GROUP_METRICS_TIMEOUT"),
                             config_info.get("interval"),
                         )
-                    template_config = self.render_template(
-                        template["content"],
-                        render_context,
-                        escape_toml_strings=template["file_type"] == "toml",
-                    )
+                    script_collect = str(collect_type or "") == "script"
+                    if script_collect and is_child:
+                        from apps.monitor.services.custom_script_plugin import CustomScriptPluginService, assert_script_interval
+
+                        assert_script_interval(config_info.get("interval"))
+                        template_config = CustomScriptPluginService.render_child_template(render_context)
+                    else:
+                        template_config = self.render_template(
+                            template["content"],
+                            render_context,
+                            escape_toml_strings=template["file_type"] == "toml",
+                        )
                 except ValidationAppException:
                     raise
                 except ValueError as e:
@@ -499,8 +707,15 @@ class Controller:
                     logger.error(f"渲染模板失败：type={type_name}, config_id={config_id}, instance_id={config_info.get('instance_id')}, 错误: {e}")
                     raise BaseAppException(f"渲染采集模板失败：type={type_name}, instance_id={config_info.get('instance_id')}") from e
 
+                child_env_config = {f"{k.upper()}__{config_id.upper()}": v for k, v in env_config.items()} if is_child else env_config
+                if existing_obj:
+                    if is_child:
+                        existing_child_updates.append((existing_obj, template_config, child_env_config))
+                    else:
+                        existing_base_updates.append((existing_obj, template_config, env_config))
+                    continue
+
                 if is_child:
-                    child_env_config = {f"{k.upper()}__{config_id.upper()}": v for k, v in env_config.items()}
                     node_child_configs.append(
                         dict(
                             id=config_id,
@@ -524,6 +739,8 @@ class Controller:
                         )
                     )
 
+                from apps.monitor.services.collect_config_update import plugin_content_fingerprint, sha256_text
+
                 collect_configs.append(
                     CollectConfig(
                         id=config_id,
@@ -534,20 +751,25 @@ class Controller:
                         config_type=config_info["type"],
                         file_type=template["file_type"],
                         is_child=is_child,
+                        applied_content_sha256=plugin_content_fingerprint(plugin_obj),
+                        applied_rendered_sha256=sha256_text(template_config),
+                        applied_pack_version=getattr(plugin_obj, "pack_version", "") or "",
+                        content_hand_edited=False,
                     )
                 )
 
-        if not collect_configs:
+        if not collect_configs and not existing_child_updates and not existing_base_updates:
             logger.warning(f"没有生成任何配置：collector={collector}, collect_type={collect_type}")
             raise BaseAppException(f"没有生成任何采集配置：collector={collector}, collect_type={collect_type}")
 
         # 步骤2：批量创建 CollectConfig（使用外层事务，不新建事务）
-        try:
-            CollectConfig.objects.bulk_create(collect_configs, batch_size=DatabaseConstants.COLLECT_CONFIG_BATCH_SIZE)
-            logger.info(f"创建 CollectConfig 成功，数量={len(collect_configs)}")
-        except Exception as e:
-            logger.error(f"批量创建 CollectConfig 失败：{e}")
-            raise
+        if collect_configs:
+            try:
+                CollectConfig.objects.bulk_create(collect_configs, batch_size=DatabaseConstants.COLLECT_CONFIG_BATCH_SIZE)
+                logger.info(f"创建 CollectConfig 成功，数量={len(collect_configs)}")
+            except Exception as e:
+                logger.error(f"批量创建 CollectConfig 失败：{e}")
+                raise
 
         # 必须本进程写入：Controller 常处于外层 atomic（节点推送还会锁 Node 行）。
         # 再 NATS 到另一连接写 NodeCollectorConfiguration 会与父行锁自死锁。
@@ -559,4 +781,11 @@ class Controller:
                 logger.error(f"本进程写入采集配置失败：node_configs={len(node_configs)}, child_configs={len(node_child_configs)}, 错误: {e}")
                 raise
 
-        logger.info(f"创建采集配置成功，共{len(collect_configs)}个配置")
+        self._apply_existing_collect_config_updates(existing_child_updates, existing_base_updates, plugin_obj)
+        logger.info(
+            "event=collect_config_apply_finished created=%s updated_child=%s updated_base=%s collect_type=%s",
+            len(collect_configs),
+            len(existing_child_updates),
+            len(existing_base_updates),
+            collect_type,
+        )

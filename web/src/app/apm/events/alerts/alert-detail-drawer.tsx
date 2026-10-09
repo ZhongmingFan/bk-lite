@@ -6,7 +6,6 @@ import {
   Button,
   Descriptions,
   Drawer,
-  Popconfirm,
   Space,
   Tabs,
   Tag,
@@ -39,8 +38,18 @@ import type {
   ApmPolicySeverity,
 } from '@/app/apm/types';
 import styles from '@/app/apm/events/event-workspace.module.scss';
+import AlertHandlerActions from '@/app/apm/events/alerts/alert-handler-actions';
+import { formatAlertHandlers } from '@/app/apm/events/alerts/alertHandlerUtils';
 
-const ACTION_KEY = { triggered: 'apm.alerts.trigger', escalated: 'apm.alerts.escalated', recovered: 'apm.alerts.recover', closed: 'apm.alerts.manuallyClosed' } as const;
+const ACTION_KEY = {
+  triggered: 'apm.alerts.trigger',
+  escalated: 'apm.alerts.escalated',
+  claimed: 'apm.alerts.claimed',
+  assigned: 'apm.alerts.assigned',
+  reassigned: 'apm.alerts.reassigned',
+  recovered: 'apm.alerts.recover',
+  closed: 'apm.alerts.manuallyClosed',
+} as const;
 const STATUS_KEY = { active: 'apm.status.firing', recovered: 'apm.status.recovered', closed: 'apm.alerts.statusClosed' } as const;
 const SEVERITY_KEY: Record<ApmPolicySeverity, string> = { critical: 'apm.severity.critical', error: 'apm.severity.error', warning: 'apm.severity.warning' };
 const METRIC_KEY: Record<ApmPolicyMetric, string> = {
@@ -371,13 +380,18 @@ interface AlertDetailDrawerProps {
   selectedEvent: ApmAlertEvent | null;
   eventEvidence: ApmEventSnapshot | null;
   eventEvidenceLoading: boolean;
+  eventEvidenceError?: CatalogStateKind | null;
   deliveries: ApmNotificationDelivery[];
+  deliveriesLoading?: boolean;
+  deliveriesError?: CatalogStateKind | null;
   retryingDeliveryId: string | null;
   onClose: () => void;
-  onCloseAlert: (alert: ApmAlert) => void;
+  onHandlerActionSuccess: () => void;
   onRetrySnapshot: (alert: ApmAlert) => void;
   onSelectEvent: (alert: ApmAlert, event: ApmAlertEvent) => void;
   onRetryDelivery: (deliveryId: string) => void;
+  onRetryEventEvidence?: () => void;
+  onRetryDeliveries?: () => void;
 }
 
 export default function AlertDetailDrawer({
@@ -388,13 +402,19 @@ export default function AlertDetailDrawer({
   metricSnapshotError,
   selectedEvent,
   eventEvidence,
+  eventEvidenceLoading,
+  eventEvidenceError = null,
   deliveries,
+  deliveriesLoading = false,
+  deliveriesError = null,
   retryingDeliveryId,
   onClose,
-  onCloseAlert,
+  onHandlerActionSuccess,
   onRetrySnapshot,
   onSelectEvent,
   onRetryDelivery,
+  onRetryEventEvidence,
+  onRetryDeliveries,
 }: AlertDetailDrawerProps) {
   const { t } = useTranslation();
   const { token } = theme.useToken();
@@ -441,13 +461,15 @@ export default function AlertDetailDrawer({
       };
     });
     lifecycleEvents.forEach((item) => {
-      if (item.action !== 'closed') return;
+      if (item.action !== 'closed' && item.action !== 'claimed' && item.action !== 'assigned' && item.action !== 'reassigned') return;
       if (rows.some((row) => row.eventId === item.event_id)) return;
       rows.push({
         id: item.id,
         occurredAt: item.occurred_at,
         content: t(ACTION_KEY[item.action]),
-        value: formatMetricDisplayValue(alert.metric_type, item.value, unit, t('apm.common.noData', '无数据'), t),
+        value: item.action === 'closed'
+          ? formatMetricDisplayValue(alert.metric_type, item.value, unit, t('apm.common.noData', '无数据'), t)
+          : (item.description || t(ACTION_KEY[item.action])),
         inAlertWindow: true,
         danger: false,
         eventId: item.event_id,
@@ -647,8 +669,8 @@ export default function AlertDetailDrawer({
                       </Tag>
                     )}
                   </Descriptions.Item>
-                  <Descriptions.Item label={t('apm.alerts.operator', '操作人')}>
-                    {alert.operator || '--'}
+                  <Descriptions.Item label={t('apm.alerts.handlers', '处理人')}>
+                    {formatAlertHandlers(alert.handlers, alert.handlers_display)}
                   </Descriptions.Item>
                   <Descriptions.Item label={t('apm.alerts.notifiedPeople', '通知人')} span={alert.status === 'active' ? 2 : 1}>
                     {notifiers.length ? notifiers.join(', ') : '--'}
@@ -656,15 +678,12 @@ export default function AlertDetailDrawer({
                 </Descriptions>
 
                 <div className={styles.alertDetailCloseRow}>
-                  <Popconfirm
-                    title={t('apm.alerts.manualCloseConfirm', '人工关闭会追加 closed 事件和不可变快照，确认继续？')}
-                    disabled={alert.status !== 'active'}
-                    onConfirm={() => onCloseAlert(alert)}
-                  >
-                    <Button type="primary" danger disabled={alert.status !== 'active'}>
-                      {t('apm.alerts.closeAlert', '关闭告警')}
-                    </Button>
-                  </Popconfirm>
+                  <AlertHandlerActions
+                    alert={alert}
+                    closeText={t('apm.common.close', '关闭')}
+                    size="middle"
+                    onSuccess={onHandlerActionSuccess}
+                  />
                 </div>
 
                 <div className={styles.alertDetailChartCard}>
@@ -796,35 +815,70 @@ export default function AlertDetailDrawer({
                   ) : null}
                 </div>
 
-                {deliveries.length ? (
+                {eventEvidenceLoading ? (
+                  <div className={styles.alertDetailEventCard}>
+                    <CatalogState compact kind="loading" />
+                  </div>
+                ) : eventEvidenceError ? (
+                  <div className={styles.alertDetailEventCard} role="alert">
+                    <div className={styles.alertDetailEventCardHead}>
+                      <Typography.Text className={styles.alertDetailEventCardTitle}>
+                        {t('apm.catalog.errorTitle', 'APM 数据加载失败')}
+                      </Typography.Text>
+                      {eventEvidenceError !== 'forbidden' && onRetryEventEvidence ? (
+                        <Button size="small" type="link" onClick={onRetryEventEvidence}>
+                          {t('apm.common.retry', '重试')}
+                        </Button>
+                      ) : null}
+                    </div>
+                    <Typography.Text type="secondary" className={styles.alertDetailChartHint}>
+                      {t('apm.catalog.errorDescription', '请检查筛选条件或网络状态后重试。')}
+                    </Typography.Text>
+                  </div>
+                ) : null}
+
+                {deliveriesLoading || deliveriesError || deliveries.length ? (
                   <div className={styles.alertDetailEventCard}>
                     <div className={styles.alertDetailEventCardHead}>
                       <Typography.Text className={styles.alertDetailEventCardTitle}>{t('apm.alerts.delivery', '通知投递')}</Typography.Text>
+                      {deliveriesError && deliveriesError !== 'forbidden' && onRetryDeliveries ? (
+                        <Button size="small" type="link" onClick={onRetryDeliveries}>
+                          {t('apm.common.retry', '重试')}
+                        </Button>
+                      ) : null}
                     </div>
-                    <div className="flex flex-col border border-[var(--color-border-1)] rounded-md" role="list" aria-label={t('apm.alerts.deliveryRecords', '通知投递记录')}>
-                      {deliveries.map((delivery) => (
-                        <div
-                          key={delivery.id}
-                          className="flex items-center gap-3 px-3 py-2 border-b border-[var(--color-border-1)] last:border-b-0"
-                          role="listitem"
-                        >
-                          <span className="min-w-0 flex-1 truncate">{delivery.channel_name || t('apm.alerts.unnamedChannel', '未命名渠道')}</span>
-                          <Tag color={delivery.status === 'delivered' ? 'success' : delivery.status === 'failed' ? 'error' : 'warning'}>
-                            {t(DELIVERY_STATUS_KEY[delivery.status])}
-                          </Tag>
-                          {delivery.status === 'failed' ? (
-                            <Button
-                              type="link"
-                              size="small"
-                              loading={retryingDeliveryId === delivery.id}
-                              onClick={() => onRetryDelivery(delivery.id)}
-                            >
-                              {t('apm.alerts.retryDelivery', '重投')}
-                            </Button>
-                          ) : null}
-                        </div>
-                      ))}
-                    </div>
+                    {deliveriesLoading ? (
+                      <CatalogState compact kind="loading" />
+                    ) : deliveriesError ? (
+                      <Typography.Text type="secondary" className={styles.alertDetailChartHint} role="alert">
+                        {t('apm.catalog.errorDescription', '请检查筛选条件或网络状态后重试。')}
+                      </Typography.Text>
+                    ) : (
+                      <div className="flex flex-col border border-[var(--color-border-1)] rounded-md" role="list" aria-label={t('apm.alerts.deliveryRecords', '通知投递记录')}>
+                        {deliveries.map((delivery) => (
+                          <div
+                            key={delivery.id}
+                            className="flex items-center gap-3 px-3 py-2 border-b border-[var(--color-border-1)] last:border-b-0"
+                            role="listitem"
+                          >
+                            <span className="min-w-0 flex-1 truncate">{delivery.channel_name || t('apm.alerts.unnamedChannel', '未命名渠道')}</span>
+                            <Tag color={delivery.status === 'delivered' ? 'success' : delivery.status === 'failed' ? 'error' : 'warning'}>
+                              {t(DELIVERY_STATUS_KEY[delivery.status])}
+                            </Tag>
+                            {delivery.status === 'failed' ? (
+                              <Button
+                                type="link"
+                                size="small"
+                                loading={retryingDeliveryId === delivery.id}
+                                onClick={() => onRetryDelivery(delivery.id)}
+                              >
+                                {t('apm.alerts.retryDelivery', '重投')}
+                              </Button>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ) : null}
               </div>

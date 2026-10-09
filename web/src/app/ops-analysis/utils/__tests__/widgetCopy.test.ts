@@ -86,20 +86,29 @@ describe('cloneAnalysisWidget', () => {
       ).title,
     ).toBe('副本');
   });
+
+  it('uses the translator for the copy suffix when one is provided', () => {
+    const t = (id: string, fallback?: string, values?: Record<string, string>) => {
+      if (id === 'dashboard.copySuffix') {
+        return `${values?.name} copy`;
+      }
+      return fallback || id;
+    };
+    expect(
+      cloneAnalysisWidget(
+        { id: 'named', title: 'CPU', valueConfig: { chartType: 'line' } },
+        { createId: () => 'named-copy', t },
+      ).title,
+    ).toBe('CPU copy');
+  });
 });
 
 describe('shouldShowAnalysisWidgetCopyAction', () => {
-  it('shows copy for data widgets in edit mode including room3D and topologyMap', () => {
+  it('shows copy for data widgets in edit mode including topologyMap', () => {
     expect(
       shouldShowAnalysisWidgetCopyAction({
         interaction: 'edit',
         chartType: 'line',
-      }),
-    ).toBe(true);
-    expect(
-      shouldShowAnalysisWidgetCopyAction({
-        interaction: 'edit',
-        chartType: 'room3D',
       }),
     ).toBe(true);
     expect(
@@ -146,6 +155,19 @@ describe('shouldShowAnalysisWidgetCopyAction', () => {
       shouldShowAnalysisWidgetCopyAction({
         interaction: 'edit',
         sceneWidgetType: 'application3D',
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowAnalysisWidgetCopyAction({
+        interaction: 'edit',
+        chartType: 'room3D',
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowAnalysisWidgetCopyAction({
+        interaction: 'edit',
+        sceneWidgetType: 'room3D',
+        chartType: 'room3D',
       }),
     ).toBe(false);
   });

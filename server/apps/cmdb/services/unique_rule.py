@@ -3,6 +3,8 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from apps.cmdb.graph.format_type import CLOUD_ID_FIELDS, parse_cloud_id_value
+from apps.cmdb.services.model_graph_query import parse_attrs, search_model_info
 from apps.core.exceptions.base_app_exception import BaseAppException
 from apps.core.logger import cmdb_logger as logger
 
@@ -17,6 +19,8 @@ def unique_rule_unsupported_attr_types() -> set:
     from apps.cmdb.model_ops.extensions import unsupported_unique_attr_types
 
     return UNIQUE_RULE_UNSUPPORTED_ATTR_TYPES | unsupported_unique_attr_types()
+
+
 UNIQUE_RULE_UNSUPPORTED_FIELD_IDS = {"inst_name", "organization"}
 
 
@@ -136,6 +140,14 @@ def _normalize_compare_value(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True)
 
 
+def _normalize_unique_field_value(field_id: str, value: Any) -> Any:
+    if field_id in CLOUD_ID_FIELDS:
+        parsed = parse_cloud_id_value(value)
+        if parsed is not None:
+            return parsed
+    return value
+
+
 def _format_value_for_message(value: Any) -> str:
     if isinstance(value, (dict, list, tuple, set)):
         normalized = list(value) if isinstance(value, set) else value
@@ -164,7 +176,7 @@ def _build_rule_signature(
         has_skipped_value = any(_is_empty_unique_rule_value(value) for value in values)
     if has_skipped_value:
         return None
-    return tuple(_normalize_compare_value(item.get(field_id)) for field_id in field_ids)
+    return tuple(_normalize_compare_value(_normalize_unique_field_value(field_id, item.get(field_id))) for field_id in field_ids)
 
 
 def _get_attr_name(attrs_by_id: dict[str, dict[str, Any]], field_id: str) -> str:
@@ -450,13 +462,11 @@ def build_unique_rule_context(model_id: str) -> UniqueRuleCheckContext:
         模型不存在时抛出 BaseAppException。
     """
 
-    from apps.cmdb.services.model import ModelManage
-
-    model_info = ModelManage.search_model_info(model_id)
+    model_info = search_model_info(model_id)
     if not model_info:
         raise BaseAppException("模型不存在")
 
-    attrs = ModelManage.parse_attrs(model_info.get("attrs", "[]"))
+    attrs = parse_attrs(model_info.get("attrs", "[]"))
     attrs_by_id = {attr.get("attr_id"): attr for attr in attrs if isinstance(attr, dict) and attr.get("attr_id") and not attr.get("is_display_field")}
     legacy_unique_fields = {attr_id for attr_id, attr in attrs_by_id.items() if attr.get("is_only") and attr_id != "inst_name"}
 
@@ -649,9 +659,8 @@ def _collect_existing_instance_conflicts(
 def _save_unique_rules(model_id: str, rules: list[ModelUniqueRule]) -> None:
     from apps.cmdb.constants.constants import MODEL
     from apps.cmdb.graph.drivers.graph_client import GraphClient
-    from apps.cmdb.services.model import ModelManage
 
-    model_info = ModelManage.search_model_info(model_id)
+    model_info = search_model_info(model_id)
     if not model_info:
         raise BaseAppException("模型不存在")
 
@@ -664,6 +673,10 @@ def _save_unique_rules(model_id: str, rules: list[ModelUniqueRule]) -> None:
             [],
             False,
         )
+
+    from apps.cmdb.display_field import ExcludeFieldsCache
+
+    ExcludeFieldsCache.invalidate_model_attrs(model_id)
 
 
 def _query_model_instances(model_id: str) -> list[dict[str, Any]]:

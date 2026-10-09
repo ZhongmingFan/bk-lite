@@ -31,6 +31,7 @@ export interface PolicyTemplateItem {
   plugin_name?: string;
   template_type?: 'builtin' | 'custom';
   deletable?: boolean;
+  related_policy_count?: number;
   [key: string]: unknown;
 }
 
@@ -70,6 +71,7 @@ export interface BulkConfig {
   notice_type?: string;
   notice_type_ids?: Array<string | number>;
   notice_users?: string[];
+  handlers?: Array<string | number>;
   enable_alerts?: string[];
   no_data_enabled?: boolean;
   no_data_period?: { type: string; value: number };
@@ -151,20 +153,28 @@ const METHOD_LABELS: Record<string, string> = {
 };
 
 const ALGORITHM_LABELS: Record<string, string> = {
-  avg_over_time: 'AVG_OVER_TIME',
-  max_over_time: 'MAX_OVER_TIME',
-  min_over_time: 'MIN_OVER_TIME',
-  sum_over_time: 'SUM_OVER_TIME',
-  count_over_time: 'COUNT_OVER_TIME',
-  last_over_time: 'LAST_OVER_TIME',
+  avg_over_time: '平均',
+  max_over_time: '最大',
+  min_over_time: '最小',
+  sum_over_time: '求和',
+  count_over_time: '点数',
+  last_over_time: '末值',
+  p90_over_time: 'P90',
+  p95_over_time: 'P95',
+  p99_over_time: 'P99',
+  stddev_over_time: '标准差',
+  count_if_over_time: '条件计数',
+  rate: '速率',
+  changes: '变化次数',
+  deriv: '斜率',
 };
 
 const GROUP_ALGORITHM_LABELS: Record<string, string> = {
-  avg: 'AVG',
-  max: 'MAX',
-  min: 'MIN',
-  sum: 'SUM',
-  count: 'COUNT',
+  avg: '平均',
+  max: '最大',
+  min: '最小',
+  sum: '求和',
+  count: '计数',
 };
 
 const formatUnitSuffix = (unit?: string | null): string => {
@@ -429,7 +439,7 @@ export const getPrimaryNoticeType = (
 ): string => {
   const firstId = noticeTypeIds[0];
   if (firstId === undefined) return '';
-  const channel = channels.find((item) => item.id === firstId);
+  const channel = channels.find((item) => String(item.id) === String(firstId));
   return channel?.channel_type || '';
 };
 
@@ -461,6 +471,8 @@ export const normalizeBulkConfig = (
     normalized.notice_users = [];
   }
 
+  normalized.handlers = [];
+
   if (noDataEnabled) {
     const noDataPeriod = config.no_data_period || { type: 'min', value: 5 };
     normalized.no_data_period = noDataPeriod;
@@ -477,28 +489,61 @@ export const normalizeBulkConfig = (
   return normalized;
 };
 
+export const TEMPLATE_DURATION_DEFAULT = { type: 'min', value: 5 } as const;
+
+export const resolveTemplateDuration = (
+  value: unknown
+): { type: string; value: number } => {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return { type: TEMPLATE_DURATION_DEFAULT.type, value };
+  }
+  if (value && typeof value === 'object') {
+    const item = value as { type?: unknown; value?: unknown };
+    const numeric =
+      typeof item.value === 'number' ? item.value : Number(item.value);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      return {
+        type:
+          typeof item.type === 'string' && item.type
+            ? item.type
+            : TEMPLATE_DURATION_DEFAULT.type,
+        value: numeric,
+      };
+    }
+  }
+  return {
+    type: TEMPLATE_DURATION_DEFAULT.type,
+    value: TEMPLATE_DURATION_DEFAULT.value,
+  };
+};
+
 export const COLLECTION_POLICY_BULK_CONFIG_DEFAULTS: BulkConfig = {
   // 与模板批量应用的「模板批量」区分，便于识别接入下发产生的策略
   name_prefix: '接入批量',
   enable: true,
-  schedule: { type: 'min', value: 5 },
-  period: { type: 'min', value: 5 },
+  schedule: { ...TEMPLATE_DURATION_DEFAULT },
+  period: { ...TEMPLATE_DURATION_DEFAULT },
   trigger_count: 1,
   notice: false,
   notice_type: '',
   notice_type_ids: [],
   notice_users: [],
+  handlers: [],
   enable_alerts: ['threshold'],
   no_data_enabled: false,
 };
 
 export const buildCollectionPolicyBulkConfig = (
-  overrides: Partial<BulkConfig> = {}
+  overrides: Partial<BulkConfig> = {},
+  channels: Array<{ id: string | number; channel_type?: string }> = []
 ): BulkConfig =>
-  normalizeBulkConfig({
-    ...COLLECTION_POLICY_BULK_CONFIG_DEFAULTS,
-    ...overrides,
-  });
+  normalizeBulkConfig(
+    {
+      ...COLLECTION_POLICY_BULK_CONFIG_DEFAULTS,
+      ...overrides,
+    },
+    channels
+  );
 
 interface OrganizationOption {
   value?: string | number;
@@ -567,5 +612,8 @@ export const buildBulkApplyPayload = ({
   monitor_object: monitorObjectId,
   template_keys: templates.map((template) => template.template_key),
   asset_ids: assets.map((asset) => asset.instance_id),
-  config,
+  config: {
+    ...config,
+    handlers: [],
+  },
 });

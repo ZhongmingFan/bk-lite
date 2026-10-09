@@ -7,6 +7,7 @@ QCloud 监控数据采集器
 """
 import asyncio
 import datetime
+import time
 
 from sanic.log import logger
 
@@ -51,6 +52,48 @@ def _cvm_resource_ip_map(resources):
     return mapping
 
 
+def _parse_qcloud_regions(value):
+    """表单多选为列表，Telegraf header 为逗号串；空值回落广州。"""
+    if isinstance(value, (list, tuple)):
+        parts = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        parts = [item.strip() for item in str(value or "").split(",") if item.strip()]
+    return parts or ["ap-guangzhou"]
+
+
+def _latest_sample(values):
+    """保留时间戳最大的一个点；并列时用后面的点。"""
+    latest = None
+    for item in values or ():
+        if not isinstance(item, (tuple, list)) or len(item) != 2:
+            continue
+        timestamp, value = item
+        if latest is None or (timestamp or 0) >= (latest[0] or 0):
+            latest = (timestamp, value)
+    return latest
+
+
+def _restamp_metrics(metrics, timestamp_ms):
+    """云监控周期点改写为当前毫秒，否则样本必然落在 5 分钟瞬时查询窗口外。"""
+    restamped = {}
+    for metric_name, metric_data in (metrics or {}).items():
+        if isinstance(metric_data, dict):
+            dim_samples = {}
+            for dims, values in metric_data.items():
+                latest = _latest_sample(values)
+                if latest is not None:
+                    dim_samples[dims] = [[timestamp_ms, latest[1]]]
+            if dim_samples:
+                restamped[metric_name] = dim_samples
+        elif isinstance(metric_data, list):
+            latest = _latest_sample(metric_data)
+            if latest is not None:
+                restamped[metric_name] = [[timestamp_ms, latest[1]]]
+        else:
+            restamped[metric_name] = metric_data
+    return restamped
+
+
 def _attach_ip_dimension(metrics, ip):
     """把 resource_ip 写成 convert_to_prometheus 已支持的维度，不改公共转换层。"""
     ip_dim = ("resource_ip", ip)
@@ -84,8 +127,10 @@ class QCloudCollector(BaseCollector):
         username = self.params["username"]
         password = self.params["password"]
         minutes = self.params.get("minutes", 5)
-
-        logger.info(f"[QCloud Collector] Minutes={minutes}")
+        host = self.params.get("host") or ""
+        task_id = self.params.get("collection_task_id") or self.params.get("task_id") or ""
+        # 与 API 缺省一致：旧配置未传地域时仍采广州，避免无数据行为突变。
+        regions = _parse_qcloud_regions(self.params.get("region"))
 
         # 获取时间范围
         end_time = datetime.datetime.now()
@@ -93,66 +138,136 @@ class QCloudCollector(BaseCollector):
         start_time_str = start_time.strftime("%Y-%m-%d %H:%M") + ":00"
         end_time_str = end_time.strftime("%Y-%m-%d %H:%M") + ":00"
 
-        logger.info(f"[QCloud Collector] Time range: {start_time_str} to {end_time_str}")
-
-        driver = CMPDriver(username, password, "qcloud")
-
-        try:
-            all_resources = driver.list_all_resources()
-
-            if not all_resources.get("data"):
-                logger.warning("[QCloud Collector] No resources found")
-                return ""
-
-            total_resource_count = sum(len(resources) if resources else 0 for resources in all_resources.get("data", {}).values())
-            logger.info(f"[QCloud Collector] Connected: {len(all_resources.get('data', {}))} object types, {total_resource_count} total resources")
-
-        except Exception as e:
-            logger.error(f"[QCloud Collector] Resource fetch failed: {str(e)}")
-            raise
-
         metric_dict = {}
         total_resources_processed = 0
+        listed_ok = False
+        object_type_count = 0
+        object_type_failed = 0
 
-        for object_id, resources in all_resources.get("data", {}).items():
-            if not resources:
+        for region in regions:
+            driver = CMPDriver(username, password, "qcloud", region=region)
+            try:
+                all_resources = driver.list_all_resources()
+            except Exception as err:
+                logger.exception(
+                    "event=qcloud_collect_failed host=%s task_id=%s region=%s failed_stage=%s error_type=%s",
+                    host,
+                    task_id,
+                    region,
+                    "list_all_resources",
+                    type(err).__name__,
+                )
                 continue
 
-            resource_ids = [resource["resource_id"] for resource in resources]
-            ip_by_resource = _cvm_resource_ip_map(resources) if object_id == QCLOUD_CVM_OBJECT_ID else {}
-            logger.info(f"[QCloud Collector] Processing '{object_id}': {len(resource_ids)} resources")
-
-            try:
-                data = driver.get_weops_monitor_data(
-                    resourceId=",".join(resource_ids),
-                    StartTime=start_time_str,
-                    EndTime=end_time_str,
-                    Period=300,
-                    Metrics=[],
-                    context={"resources": [{"bk_obj_id": object_id}]},
+            listed_ok = True
+            if not all_resources.get("data"):
+                logger.warning(
+                    "event=qcloud_collect_empty host=%s task_id=%s region=%s failed_stage=%s",
+                    host,
+                    task_id,
+                    region,
+                    "list_all_resources",
                 )
+                continue
 
-                if not data["result"]:
-                    logger.error(f"[QCloud Collector] Monitor data failed for '{object_id}': {data.get('message')}")
+            for object_id, resources in all_resources.get("data", {}).items():
+                if not resources:
                     continue
 
-                for resource_id, metrics in data["data"].items():
-                    ip = ip_by_resource.get(resource_id)
-                    if ip:
-                        metrics = _attach_ip_dimension(metrics, ip)
-                    metric_dict[(resource_id, object_id)] = metrics
+                object_type_count += 1
+                resource_ids = [resource.get("resource_id") for resource in resources if resource.get("resource_id")]
+                if not resource_ids:
+                    logger.warning(
+                        "event=qcloud_collect_skip host=%s task_id=%s region=%s object_type=%s failed_stage=%s",
+                        host,
+                        task_id,
+                        region,
+                        object_id,
+                        "missing_resource_id",
+                    )
+                    continue
+                ip_by_resource = _cvm_resource_ip_map(resources) if object_id == QCLOUD_CVM_OBJECT_ID else {}
+                logger.debug(
+                    "event=qcloud_collect_object_debug host=%s task_id=%s region=%s object_type=%s count=%s",
+                    host,
+                    task_id,
+                    region,
+                    object_id,
+                    len(resource_ids),
+                )
 
-                total_resources_processed += len(data["data"])
-                logger.info(f"[QCloud Collector] '{object_id}' processed: {len(data['data'])} resources")
+                try:
+                    data = driver.get_weops_monitor_data(
+                        resourceId=",".join(resource_ids),
+                        StartTime=start_time_str,
+                        EndTime=end_time_str,
+                        Period=300,
+                        Metrics=[],
+                        context={"resources": [{"bk_obj_id": object_id}]},
+                    )
 
-            except Exception as e:
-                logger.error(f"[QCloud Collector] Error processing '{object_id}': {str(e)}")
-                continue
+                    if not data["result"]:
+                        object_type_failed += 1
+                        logger.error(
+                            "event=qcloud_collect_failed host=%s task_id=%s region=%s object_type=%s failed_stage=%s error_type=%s",
+                            host,
+                            task_id,
+                            region,
+                            object_id,
+                            "get_weops_monitor_data",
+                            "result_false",
+                        )
+                        continue
 
-        # 转换为 Prometheus 格式
-        metric_list = convert_to_prometheus(metric_dict)
-        influxdb_data = "\n".join(metric_list) + "\n"
+                    for resource_id, metrics in data["data"].items():
+                        ip = ip_by_resource.get(resource_id)
+                        if ip:
+                            metrics = _attach_ip_dimension(metrics, ip)
+                        metric_dict[(resource_id, object_id)] = metrics
 
-        logger.info(f"[QCloud Collector] Completed: {total_resources_processed} resources, {len(influxdb_data)} bytes")
+                    total_resources_processed += len(data["data"])
+                except Exception as err:
+                    object_type_failed += 1
+                    logger.exception(
+                        "event=qcloud_collect_failed host=%s task_id=%s region=%s object_type=%s failed_stage=%s error_type=%s",
+                        host,
+                        task_id,
+                        region,
+                        object_id,
+                        "get_weops_monitor_data",
+                        type(err).__name__,
+                    )
+                    continue
+
+        publish_ms = int(time.time() * 1000)
+        metric_dict = {key: _restamp_metrics(metrics, publish_ms) for key, metrics in metric_dict.items()}
+        metric_list = convert_to_prometheus(metric_dict) if metric_dict else []
+        connect_lines = self._connect_status_lines(connected=listed_ok, timestamp_ms=publish_ms)
+        influxdb_data = "\n".join(connect_lines + metric_list) + "\n"
+
+        logger.info(
+            "event=qcloud_collect_summary host=%s task_id=%s object_types=%s object_type_failed=%s resources=%s bytes=%s connected=%s",
+            host,
+            task_id,
+            object_type_count,
+            object_type_failed,
+            total_resources_processed,
+            len(influxdb_data),
+            listed_ok,
+        )
 
         return influxdb_data
+
+    def _connect_status_lines(self, *, connected: bool, timestamp_ms: int | None = None) -> list[str]:
+        """账号级连通性。NATS 会把 Prometheus gauge 写成 ConnectStatus_gauge。"""
+        tags = self.params.get("tags") if isinstance(self.params.get("tags"), dict) else {}
+        instance_id = tags.get("instance_id") or self.params.get("instance_id") or "qcloud"
+        safe_instance_id = str(instance_id).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+        value = 1 if connected else 0
+        if timestamp_ms is None:
+            timestamp_ms = int(time.time() * 1000)
+        return [
+            "# HELP ConnectStatus QCloud API connectivity",
+            "# TYPE ConnectStatus gauge",
+            (f'ConnectStatus{{instance_id="{safe_instance_id}",' f'instance_type="qcloud"}} {value} {timestamp_ms}'),
+        ]

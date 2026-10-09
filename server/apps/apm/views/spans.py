@@ -5,7 +5,7 @@ from dataclasses import replace
 from rest_framework import status, viewsets
 from rest_framework.response import Response
 
-from apps.apm.adapters import TelemetryStoreUnavailable, VictoriaTracesTelemetryStore
+from apps.apm.adapters import TelemetryStoreUnavailable, VictoriaTracesTelemetryStore, telemetry_error_payload
 from apps.apm.adapters.victoriatraces import _encode_cursor
 from apps.apm.renderers import ApmRenderer
 from apps.apm.serializers import SpanSearchSerializer
@@ -47,7 +47,7 @@ class ApmSpanViewSet(viewsets.ViewSet):
         organization_ids = visible_organization_ids(request)
         if not organization_ids:
             return Response({"items": [], "next_cursor": None})
-        serializer = SpanSearchSerializer(data=request.query_params)
+        serializer = SpanSearchSerializer(data=request.query_params, context={"request": request})
         if not serializer.is_valid():
             return Response(
                 {"code": "invalid_query", "detail": serializer.errors},
@@ -81,7 +81,7 @@ class ApmSpanViewSet(viewsets.ViewSet):
                 filter_items=lambda items: self.access.filter_span_summaries(items, organization_ids),
                 cursor=query.cursor,
                 limit=query.limit,
-                encode_cursor=lambda item: _encode_cursor(item.started_at),
+                encode_cursor=lambda item: _encode_cursor(item.started_at, item.span_id),
             )
         except ValueError as exc:
             return Response(
@@ -89,8 +89,5 @@ class ApmSpanViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
         except TelemetryStoreUnavailable as exc:
-            return Response(
-                {"detail": str(exc), "code": "telemetry_unavailable"},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
+            return Response(telemetry_error_payload(exc), status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response({"items": [_span_summary_data(item) for item in visible], "next_cursor": next_cursor})

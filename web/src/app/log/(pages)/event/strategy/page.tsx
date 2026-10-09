@@ -21,7 +21,7 @@ import {
   FileSearchOutlined,
   PlusOutlined
 } from '@ant-design/icons';
-import { useRouter } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import Permission from '@/components/permission';
 import {
   buildStrategyDetailUrl,
@@ -38,7 +38,7 @@ const Strategy: React.FC = () => {
   const { convertToLocalizedTime } = useLocalizedTime();
   const commonContext = useCommon();
   const userList: UserItem[] = commonContext?.userList || [];
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const tableAbortControllerRef = useRef<AbortController | null>(null);
   const tableRequestIdRef = useRef<number>(0);
   const [pagination, setPagination] = useState<Pagination>({
@@ -291,7 +291,7 @@ const Strategy: React.FC = () => {
           </Permission>
         </div>
         <CustomTable
-          scroll={{ y: 'calc(100vh - 336px)', x: 'calc(100vw - 500px)' }}
+          scroll={{ y: 'calc(100vh - 336px)', x: 'max-content' }}
           columns={columns}
           dataSource={tableData}
           pagination={pagination}

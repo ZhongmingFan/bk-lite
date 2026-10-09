@@ -10,7 +10,10 @@ from apps.core.utils.internal_event_auth import (
     sign_internal_event,
     verify_internal_event,
 )
+from apps.system_mgmt.models.im_notification_channel import IMNotificationChannel
+from apps.system_mgmt.services.im_notification_service import send_im_notification
 from apps.system_mgmt.utils.group_utils import GroupUtils
+from apps.system_mgmt.utils.i18n import OPSPILOT_NATS_DESCRIPTION_MARKER, localized_channel_description, system_mgmt_message
 
 from .common import *  # noqa: F401,F403
 from .users import _actor_scope_response
@@ -22,13 +25,13 @@ except (ImportError, ModuleNotFoundError):
 
 
 @nats_client.register
-def get_channel_detail(channel_id):
+def get_channel_detail(channel_id, locale=None):
     channel_obj = Channel.objects.filter(id=channel_id).first()
     if not channel_obj:
-        return {"result": False, "message": "传入的channel_id无法匹配到channel"}
+        return {"result": False, "message": system_mgmt_message(locale, "error.channel_id_not_found")}
     return_data = {
         "name": channel_obj.name,
-        "description": channel_obj.description,
+        "description": localized_channel_description(channel_obj.description, locale),
         "config": channel_obj.config,
         "team": channel_obj.team,
         "channel_type": channel_obj.channel_type,
@@ -77,7 +80,7 @@ def search_channel_list(channel_type="", teams=None, include_children=False, cha
             "id": channel.id,
             "name": channel.name,
             "channel_type": channel.channel_type,
-            "description": channel.description,
+            "description": localized_channel_description(channel.description),
         }
         if channel.channel_type == ChannelChoices.NATS:
             item["supports_notify_person"] = _supports_notify_person(channel.config)
@@ -178,11 +181,16 @@ def _normalize_nats_content(content):
         if normalized_user_id:
             normalized_user_ids.append(normalized_user_id)
 
-    return {
+    normalized = {
         "message": message.strip(),
         "team": normalized_team,
         "user_ids": normalized_user_ids,
-    }, None
+    }
+    for field in ("event_id", "occurred_at", "producer", "object_id", "scene"):
+        value = content.get(field)
+        if value is not None:
+            normalized[field] = str(value).strip()
+    return normalized, None
 
 
 RAW_PASSTHROUGH_NATS_METHODS = {"receive_alert_events"}
@@ -216,7 +224,7 @@ def _notification_channel_capabilities(channel):
         "id": channel.id,
         "name": channel.name,
         "channel_type": channel.channel_type,
-        "description": channel.description,
+        "description": localized_channel_description(channel.description),
         "delivery_mode": delivery_mode,
         "recipient_mode": recipient_mode,
         "availability": "available",
@@ -273,6 +281,7 @@ def search_notification_recipients_scoped(
     include_children=False,
     search="",
     limit=100,
+    recipient_ids=None,
 ):
     """返回通知配置可引用的组织内系统用户稳定 ID，不暴露用户敏感字段。"""
     user_obj, authorized_groups, error_response = _actor_scope_response(actor_context, include_children=include_children)
@@ -283,14 +292,24 @@ def search_notification_recipients_scoped(
     try:
         requested = {int(value) for value in teams} if teams else set(authorized_groups)
         bounded_limit = min(max(int(limit), 1), 100)
+        requested_recipient_ids = None
+        if recipient_ids is not None:
+            if not isinstance(recipient_ids, list) or not 1 <= len(recipient_ids) <= 100:
+                raise ValueError
+            requested_recipient_ids = {int(value) for value in recipient_ids}
+            if len(requested_recipient_ids) != len(recipient_ids) or any(value <= 0 for value in requested_recipient_ids):
+                raise ValueError
     except (TypeError, ValueError):
         return _notification_failure("invalid_payload", "接收人查询参数无效。")
     scoped_groups = set(authorized_groups).intersection(requested)
     if not scoped_groups:
         return {"result": True, "data": []}
     needle = str(search or "").strip().casefold()[:100]
+    users = User.objects.order_by("id")
+    if requested_recipient_ids is not None:
+        users = users.filter(id__in=requested_recipient_ids)
     result = []
-    for user in User.objects.order_by("id").only("id", "username", "display_name", "group_list"):
+    for user in users.only("id", "username", "display_name", "group_list"):
         group_ids = set()
         for value in user.group_list or []:
             try:
@@ -564,7 +583,7 @@ def dispatch_notification(
 
 
 @nats_client.register
-def send_msg_with_channel(channel_id, title, content, receivers, attachments=None, internal_auth=None):
+def send_msg_with_channel(channel_id, title, content, receivers, attachments=None, internal_auth=None, append_receivers=True, channel_type=None):
     """
     通过指定通道发送消息
     :param channel_id: 通道ID
@@ -574,10 +593,15 @@ def send_msg_with_channel(channel_id, title, content, receivers, attachments=Non
     :param attachments: 附件列表（仅email通道支持），格式为:
         [{"filename": "文件名.pdf", "content": "base64编码的文件内容"}, ...]
         注意: 附件内容必须是base64编码的字符串，因为NATS使用JSON序列化传输
+    :param channel_type: 可选，用于区分 Channel 与 IMNotificationChannel 的同号主键
     """
+    if channel_type == IMNotificationChannel.CHANNEL_TYPE:
+        return send_im_notification(channel_id, title, content, receivers)
     channel_obj = Channel.objects.filter(id=channel_id).first()
     if not channel_obj:
         return {"result": False, "message": "Channel not found"}
+    if channel_type and channel_obj.channel_type != channel_type:
+        return {"result": False, "message": "Channel type mismatch"}
     method_name = (channel_obj.config or {}).get("method_name")
     if channel_obj.channel_type == ChannelChoices.NATS and method_name in RAW_PASSTHROUGH_NATS_METHODS:
         if not isinstance(content, dict) or not isinstance(content.get("pusher"), str) or not content["pusher"]:
@@ -585,13 +609,13 @@ def send_msg_with_channel(channel_id, title, content, receivers, attachments=Non
         organizations = _alert_event_organizations(content)
         trusted_caller = content["pusher"] in TRUSTED_INTERNAL_EVENT_CALLERS
         if trusted_caller:
-            if organizations is None or (
-                organizations and _channel_delivery_organizations(channel_obj, organizations) != sorted(set(organizations))
-            ):
+            if organizations is None or (organizations and _channel_delivery_organizations(channel_obj, organizations) != sorted(set(organizations))):
                 return _notification_failure("channel_forbidden", "告警事件组织不属于通知渠道范围。")
         request_payload = build_internal_event_payload("system_mgmt.send_msg_with_channel", locals())
-        if organizations and trusted_caller and not _accept_internal_request(
-            "system_mgmt.send_msg_with_channel", request_payload, internal_auth, caller=content.get("pusher")
+        if (
+            organizations
+            and trusted_caller
+            and not _accept_internal_request("system_mgmt.send_msg_with_channel", request_payload, internal_auth, caller=content.get("pusher"))
         ):
             return _internal_auth_failure()
     # 兼容用户ID列表和用户名列表两种情况
@@ -601,26 +625,30 @@ def send_msg_with_channel(channel_id, title, content, receivers, attachments=Non
         if not user_list or not user_list.exists():
             return {"result": False, "message": "No valid recipients found"}
         return send_email(channel_obj, title, content, user_list, attachments)
+    elif channel_obj.channel_type == ChannelChoices.ENTERPRISE_WECHAT:
+        if not user_list or not user_list.exists():
+            return {"result": False, "message": "No valid recipients found"}
+        return send_wechat(channel_obj, content, user_list)
     elif channel_obj.channel_type == ChannelChoices.ENTERPRISE_WECHAT_BOT:
         if user_list is not None:
             display_names = list(user_list.values_list("display_name", flat=True))
         else:
             display_names = receivers if isinstance(receivers, list) else [receivers]
-        return send_by_wecom_bot(channel_obj, content, display_names)
+        return send_by_wecom_bot(channel_obj, content, display_names if append_receivers else [])
     elif channel_obj.channel_type == ChannelChoices.FEISHU_BOT:
         if user_list is not None:
             display_names = list(user_list.values_list("display_name", flat=True))
         else:
             display_names = receivers if isinstance(receivers, list) else [receivers]
-        return send_by_feishu_bot(channel_obj, title, content, display_names)
+        return send_by_feishu_bot(channel_obj, title, content, display_names if append_receivers else [])
     elif channel_obj.channel_type == ChannelChoices.DINGTALK_BOT:
         if user_list is not None:
             display_names = list(user_list.values_list("display_name", flat=True))
         else:
             display_names = receivers if isinstance(receivers, list) else [receivers]
-        return send_by_dingtalk_bot(channel_obj, title, content, display_names)
+        return send_by_dingtalk_bot(channel_obj, title, content, display_names if append_receivers else [])
     elif channel_obj.channel_type == ChannelChoices.CUSTOM_WEBHOOK:
-        return send_by_custom_webhook(channel_obj, content, receivers)
+        return send_by_custom_webhook(channel_obj, content, receivers if append_receivers else [])
     elif channel_obj.channel_type == ChannelChoices.NATS:
         if nats_notifications is not None and nats_notifications.handles_config(channel_obj.config or {}):
             return send_nats_message(channel_obj, content, title=title)
@@ -651,6 +679,12 @@ OPSPILOT_NATS_NAMESPACE = os.getenv("NATS_NAMESPACE", "bklite")
 OPSPILOT_NATS_METHOD = "trigger_workflow_by_nats"
 
 
+WORKFLOW_ORCHESTRATION_CHANNEL_SOURCE = "workflow_orchestration"
+
+
+WORKFLOW_ORCHESTRATION_NATS_METHOD = "trigger_orchestration_workflow_by_nats"
+
+
 def _list_opspilot_nats_channels(bot_id):
     """返回某个 bot 名下、由 OpsPilot 托管的 NATS 通道（DB 无关，Python 侧过滤 config）。"""
     channels = Channel.objects.filter(channel_type=ChannelChoices.NATS)
@@ -679,7 +713,7 @@ def sync_opspilot_nats_channels(bot_id, bot_name, team, nodes, timeout=60):
 
     team = team or []
     nodes = nodes or []
-    description = "OpsPilot 工作流自动创建的 NATS 触发通道"
+    description = OPSPILOT_NATS_DESCRIPTION_MARKER
 
     existing_by_node = {(ch.config or {}).get("node_id"): ch for ch in _list_opspilot_nats_channels(bot_id)}
 
@@ -744,6 +778,132 @@ def delete_opspilot_nats_channels(bot_id):
     return {"result": True, "data": {"deleted": deleted}}
 
 
+def _list_workflow_orchestration_nats_channels(workflow_id):
+    """返回单个编排流程名下的托管 NATS 通道。"""
+    result = []
+    for channel in Channel.objects.filter(channel_type=ChannelChoices.NATS):
+        config = channel.config or {}
+        if config.get("source") == WORKFLOW_ORCHESTRATION_CHANNEL_SOURCE and str(config.get("workflow_id")) == str(workflow_id):
+            result.append(channel)
+    return result
+
+
+@nats_client.register
+def sync_workflow_orchestration_nats_channels(workflow_id, workflow_name, team, nodes, active, timeout=60):
+    """对账编排中心某个流程的 NATS 触发通道（增、改、删）。"""
+    try:
+        workflow_id = int(workflow_id)
+    except (TypeError, ValueError):
+        return {"result": False, "message": "workflow_id must be an integer"}
+    if not isinstance(active, bool):
+        return {"result": False, "message": "active must be a boolean"}
+
+    team = team or []
+    nodes = nodes or []
+    existing_by_node = {(channel.config or {}).get("node_key"): channel for channel in _list_workflow_orchestration_nats_channels(workflow_id)}
+    incoming_node_keys = set()
+    created = updated = 0
+    for node in nodes:
+        node_key = str((node or {}).get("node_key") or "").strip()
+        trigger_id = str((node or {}).get("trigger_id") or "").strip()
+        subject = str((node or {}).get("subject") or "").strip()
+        if not node_key or not trigger_id or not subject:
+            continue
+        incoming_node_keys.add(node_key)
+        label = str((node or {}).get("name") or node_key).strip()
+        config = {
+            "namespace": OPSPILOT_NATS_NAMESPACE,
+            "method_name": WORKFLOW_ORCHESTRATION_NATS_METHOD,
+            "workflow_id": workflow_id,
+            "trigger_id": trigger_id,
+            "node_key": node_key,
+            "subject": subject,
+            "timeout": timeout,
+            "source": WORKFLOW_ORCHESTRATION_CHANNEL_SOURCE,
+            "active": active,
+        }
+        values = {
+            "name": f"{workflow_name} - {label}"[:100],
+            "config": config,
+            "team": team,
+            "description": "编排中心流程自动创建的 NATS 触发通道",
+        }
+        channel = existing_by_node.get(node_key)
+        if channel is None:
+            Channel.objects.create(channel_type=ChannelChoices.NATS, **values)
+            created += 1
+        else:
+            for field, value in values.items():
+                setattr(channel, field, value)
+            channel.save()
+            updated += 1
+
+    deleted = 0
+    for node_key, channel in existing_by_node.items():
+        if node_key not in incoming_node_keys:
+            channel.delete()
+            deleted += 1
+    return {"result": True, "data": {"created": created, "updated": updated, "deleted": deleted}}
+
+
+@nats_client.register
+def delete_workflow_orchestration_nats_channels(workflow_id):
+    """删除单个编排流程的全部托管 NATS 通道。"""
+    try:
+        workflow_id = int(workflow_id)
+    except (TypeError, ValueError):
+        return {"result": False, "message": "workflow_id must be an integer"}
+    deleted = 0
+    for channel in _list_workflow_orchestration_nats_channels(workflow_id):
+        channel.delete()
+        deleted += 1
+    return {"result": True, "data": {"deleted": deleted}}
+
+
+@nats_client.register
+def search_workflow_orchestration_nats_channels(teams=None, workflow_id=None, include_children=False, active_only=True):
+    """查询编排中心托管的 NATS 触发通道。"""
+    normalized_team_ids = None
+    if teams:
+        normalized_teams = []
+        for team_id in teams:
+            try:
+                normalized_teams.append(int(team_id))
+            except (TypeError, ValueError):
+                continue
+        if include_children and normalized_teams:
+            normalized_teams = GroupUtils.get_group_with_descendants(normalized_teams)
+        if not normalized_teams:
+            return {"result": True, "data": []}
+        normalized_team_ids = {str(team_id) for team_id in normalized_teams}
+
+    data = []
+    for channel in Channel.objects.filter(channel_type=ChannelChoices.NATS):
+        config = channel.config or {}
+        if config.get("source") != WORKFLOW_ORCHESTRATION_CHANNEL_SOURCE:
+            continue
+        if workflow_id is not None and str(config.get("workflow_id")) != str(workflow_id):
+            continue
+        if active_only and config.get("active") is not True:
+            continue
+        if normalized_team_ids is not None and not normalized_team_ids.intersection(str(team_id) for team_id in (channel.team or [])):
+            continue
+        data.append(
+            {
+                "id": channel.id,
+                "name": channel.name,
+                "description": channel.description,
+                "team": channel.team,
+                "workflow_id": config.get("workflow_id"),
+                "trigger_id": config.get("trigger_id"),
+                "node_key": config.get("node_key"),
+                "active": config.get("active") is True,
+                "supports_notify_person": _supports_notify_person(config),
+            }
+        )
+    return {"result": True, "data": data}
+
+
 @nats_client.register
 def search_opspilot_nats_channels(teams=None, bot_id=None, include_children=False):
     """查询 OpsPilot 托管的 NATS 触发通道（config.source == "opspilot"）。
@@ -773,14 +933,15 @@ def search_opspilot_nats_channels(teams=None, bot_id=None, include_children=Fals
         if not normalized_teams:
             return {"result": True, "data": []}
 
-        team_filter = Q(team__contains=normalized_teams[0])
-        for team_id in normalized_teams[1:]:
-            team_filter |= Q(team__contains=team_id)
-        channels = channels.filter(team_filter)
+        allowed_team_ids = {str(team_id) for team_id in normalized_teams}
+    else:
+        allowed_team_ids = None
 
     # DB 无关：在 Python 侧按 config.source（及可选 bot_id）过滤
     data = []
     for channel in channels:
+        if allowed_team_ids is not None and not allowed_team_ids.intersection(str(team_id) for team_id in (channel.team or [])):
+            continue
         config = channel.config or {}
         if config.get("source") != OPSPILOT_CHANNEL_SOURCE:
             continue
@@ -789,7 +950,7 @@ def search_opspilot_nats_channels(teams=None, bot_id=None, include_children=Fals
         item = {
             "id": channel.id,
             "name": channel.name,
-            "description": channel.description,
+            "description": localized_channel_description(channel.description),
             "team": channel.team,
             "bot_id": config.get("bot_id"),
             "node_id": config.get("node_id"),

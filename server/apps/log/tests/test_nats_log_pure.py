@@ -11,6 +11,18 @@ RFC3339_TIME_RANGE = (
     "2026-08-03T04:17:25.000Z",
     "2026-08-03T05:17:25.000Z",
 )
+SEVEN_DAY_TIME_RANGE = (
+    "2026-04-01T00:00:00.000Z",
+    "2026-04-08T00:00:00.000Z",
+)
+THIRTY_DAY_TIME_RANGE = (
+    "2026-04-01T00:00:00.000Z",
+    "2026-05-01T00:00:00.000Z",
+)
+OVERSIZED_TIME_RANGE = (
+    "2026-01-01T00:00:00.000Z",
+    "2026-02-02T00:00:00.000Z",
+)
 
 # ----------------------- _normalize_positive_int -----------------------
 
@@ -427,6 +439,44 @@ def test_log_query_rejects_invalid_time_range_without_vm_query(
     victoria_logs.assert_not_called()
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("endpoint", ["search", "hits"])
+def test_log_query_rejects_oversized_time_range_without_vm_query(mocker, endpoint):
+    mocker.patch.object(nats_log, "_apply_log_group_scope", return_value="SCOPED")
+    victoria_logs = mocker.patch.object(nats_log, "VictoriaMetricsAPI")
+
+    if endpoint == "search":
+        result = nats_log.log_search("q", OVERSIZED_TIME_RANGE)
+    else:
+        result = nats_log.log_hits("q", OVERSIZED_TIME_RANGE, "host")
+
+    assert result["result"] is False
+    assert result["data"] == []
+    assert result["message"]
+    victoria_logs.assert_not_called()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("endpoint", ["search", "hits"])
+@pytest.mark.parametrize("time_range", [SEVEN_DAY_TIME_RANGE, THIRTY_DAY_TIME_RANGE])
+def test_log_query_accepts_seven_and_thirty_day_range(mocker, endpoint, time_range):
+    mocker.patch.object(nats_log, "_apply_log_group_scope", return_value="SCOPED")
+    vm = mocker.patch.object(nats_log, "VictoriaMetricsAPI").return_value
+    vm.query.return_value = []
+    vm.hits.return_value = {"hits": []}
+
+    if endpoint == "search":
+        result = nats_log.log_search("q", time_range)
+    else:
+        result = nats_log.log_hits("q", time_range, "host")
+
+    assert result["result"] is True
+    if endpoint == "search":
+        vm.query.assert_called_once()
+    else:
+        vm.hits.assert_called_once()
+
+
 @pytest.mark.parametrize("user_info", [None, {}, {"user": "incomplete"}])
 def test_log_search_denied_scope_returns_empty_without_victorialogs(
     mocker,
@@ -542,6 +592,16 @@ def test_query_log_alert_segments_page_size_too_large():
 
 def test_query_log_alert_segments_empty_policy_ids_returns_empty_page(mocker):
     mocker.patch.object(nats_log, "_get_log_policy_ids", return_value=([], None))
+    mocker.patch.object(nats_log, "_get_log_actor_scope", return_value=([1], {"is_superuser": True}, None))
+    mocker.patch.object(nats_log, "orphaned_log_policy_q", return_value=Q(pk__in=[]))
+    queryset = mocker.MagicMock()
+    queryset.filter.return_value = queryset
+    mocker.patch.object(nats_log.Alert.objects, "filter", return_value=queryset)
+    mocker.patch.object(
+        nats_log,
+        "_build_paginated_alert_segments",
+        return_value={"count": 0, "page": 1, "page_size": 100, "items": []},
+    )
     out = nats_log.query_log_alert_segments(
         {
             "collect_type_id": "ct",
@@ -569,8 +629,10 @@ def test_query_log_alert_segments_propagates_policy_error(mocker):
 
 def test_query_log_alert_segments_filters_by_overlapping_event_time(mocker):
     mocker.patch.object(nats_log, "_get_log_policy_ids", return_value=(["policy-1"], None))
+    mocker.patch.object(nats_log, "_get_log_actor_scope", return_value=([1], {"is_superuser": True}, None))
+    mocker.patch.object(nats_log, "orphaned_log_policy_q", return_value=Q())
     queryset = mocker.MagicMock()
-    filtered_queryset = queryset.filter.return_value
+    queryset.filter.return_value = queryset
     mocker.patch.object(nats_log.Alert.objects, "filter", return_value=queryset)
     mocker.patch.object(
         nats_log,
@@ -587,8 +649,8 @@ def test_query_log_alert_segments_filters_by_overlapping_event_time(mocker):
     )
 
     assert out["result"] is True
-    queryset.filter.assert_called_once_with(
+    queryset.filter.assert_any_call(
         Q(end_event_time__isnull=True) | Q(end_event_time__gte=datetime(2024, 1, 1, 1, 0, 0)),
         start_event_time__lte=datetime(2024, 1, 1, 2, 0, 0),
     )
-    nats_log._build_paginated_alert_segments.assert_called_once_with(filtered_queryset, 1, 100)
+    nats_log._build_paginated_alert_segments.assert_called_once_with(queryset, 1, 100)

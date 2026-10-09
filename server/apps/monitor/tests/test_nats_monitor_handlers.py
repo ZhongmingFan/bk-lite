@@ -12,7 +12,7 @@ from django.conf import settings
 
 from apps.monitor.models.monitor_metrics import Metric, MetricGroup
 from apps.monitor.models.monitor_object import MonitorInstance, MonitorInstanceOrganization, MonitorObject, MonitorObjectType
-from apps.monitor.models.monitor_policy import MonitorPolicy, PolicyOrganization
+from apps.monitor.models.monitor_policy import MonitorAlert, MonitorPolicy, PolicyOrganization
 from apps.monitor.models.plugin import MonitorPlugin
 from apps.monitor.nats import monitor as nm
 from apps.monitor.nats.contracts import MONITOR_NATS_HANDLER_NAMES
@@ -35,10 +35,15 @@ EXPECTED_MONITOR_NATS_HANDLER_NAMES = frozenset(
         "get_host_metric_range",
         "get_host_resource_snapshot",
         "get_host_resource_top",
+        "get_host_resource_top_by_time",
+        "get_zombie_host_report",
         "get_monitor_instance_list",
         "get_monitor_statistics",
         "get_network_device_resource_top",
+        "monitor_bind_cmdb_id",
+        "monitor_clear_cmdb_id",
         "monitor_ingest_from_source",
+        "monitor_list_cmdb_bind_candidates",
         "monitor_instance_metrics",
         "monitor_metrics",
         "monitor_object_instance_count",
@@ -53,6 +58,7 @@ EXPECTED_MONITOR_NATS_HANDLER_NAMES = frozenset(
         "query_metric_range_scoped",
         "query_metric_series",
         "search_monitor_policies",
+        "get_monitor_instance_alert_ranking",
     }
 )
 MONITOR_NATS_PERMISSION_HANDLER_NAMES = frozenset(
@@ -112,6 +118,32 @@ class TestMonitorObjectInstanceCount:
         MonitorInstance.objects.create(id="('c',)", name="c", monitor_object=obj, is_deleted=True)
         out = nm.monitor_object_instance_count()
         assert out["data"]["NMCntObj"] == 2
+
+    def test_user_info_counts_only_authorized_org(self, mocker):
+        obj = MonitorObject.objects.create(name="NMCntScope", level="base")
+        inst1 = MonitorInstance.objects.create(id="('s1',)", name="s1", monitor_object=obj, is_active=True)
+        inst2 = MonitorInstance.objects.create(id="('s2',)", name="s2", monitor_object=obj, is_active=True)
+        MonitorInstanceOrganization.objects.create(monitor_instance=inst1, organization=1)
+        MonitorInstanceOrganization.objects.create(monitor_instance=inst2, organization=2)
+        mocker.patch("apps.monitor.nats.monitor.get_permissions_rules", return_value={"data": {}})
+
+        unscoped = nm.monitor_object_instance_count()
+        scoped = nm.monitor_object_instance_count(
+            user_info={"user": "u", "domain": "domain.com", "team": 1},
+        )
+
+        assert unscoped["result"] is True
+        assert unscoped["data"]["NMCntScope"] == 2
+        assert scoped["result"] is True
+        assert scoped["data"].get("NMCntScope") == 1
+
+    def test_locale_only_user_info_keeps_global_count(self):
+        obj = MonitorObject.objects.create(name="NMCntLocale", level="base")
+        MonitorInstance.objects.create(id="('l1',)", name="l1", monitor_object=obj)
+        MonitorInstance.objects.create(id="('l2',)", name="l2", monitor_object=obj)
+        out = nm.monitor_object_instance_count(user_info={"locale": "en"})
+        assert out["result"] is True
+        assert out["data"]["NMCntLocale"] == 2
 
 
 class TestLicenseMonitorInstanceCount:
@@ -204,6 +236,88 @@ class TestMonitorObjectInstancesHandler:
         assert out["result"] is True
         assert out["data"][0]["id"] == "('h1',)"
         assert out["data"][0]["permission"] == ["View"]
+        assert out["data"][0]["ip"] is None
+        assert out["data"][0]["instance_id"] == "h1"
+        assert "cmdb_id" not in out["data"][0]
+
+    def test_returns_logical_instance_id_for_tuple_storage_key(self, mocker):
+        obj = MonitorObject.objects.create(name="NMIObjLogical", level="base")
+        MonitorInstance.objects.create(
+            id="('MTVmOTFiYTM5ODZk',)",
+            name="local",
+            ip="10.10.41.149",
+            monitor_object=obj,
+            is_active=True,
+            is_deleted=False,
+        )
+        mocker.patch(
+            "apps.monitor.nats.monitor.get_permission_rules",
+            return_value={"team": [1], "instance": [{"id": "('MTVmOTFiYTM5ODZk',)", "permission": ["View"]}]},
+        )
+        mocker.patch(
+            "apps.monitor.nats.monitor.permission_filter",
+            side_effect=lambda model, perm, **kw: model.objects.all(),
+        )
+        out = nm.monitor_object_instances(
+            obj.id,
+            user_info={"user": SimpleNamespace(username="u", domain="domain.com"), "team": 1},
+        )
+        assert out["result"] is True
+        assert out["data"][0]["id"] == "('MTVmOTFiYTM5ODZk',)"
+        assert out["data"][0]["instance_id"] == "MTVmOTFiYTM5ODZk"
+        assert out["data"][0]["ip"] == "10.10.41.149"
+
+    def test_returns_bound_cmdb_id(self, mocker):
+        obj = MonitorObject.objects.create(name="NMIObjCmdb", level="base")
+        MonitorInstance.objects.create(
+            id="('h-cmdb',)",
+            name="local",
+            monitor_object=obj,
+            cmdb_id="63e4a531-b6bb-43cc-9eae-8eb8a09f795e",
+            is_active=True,
+            is_deleted=False,
+        )
+        mocker.patch(
+            "apps.monitor.nats.monitor.get_permission_rules",
+            return_value={"team": [1], "instance": [{"id": "('h-cmdb',)", "permission": ["View"]}]},
+        )
+        mocker.patch(
+            "apps.monitor.nats.monitor.permission_filter",
+            side_effect=lambda model, perm, **kw: model.objects.all(),
+        )
+        out = nm.monitor_object_instances(
+            obj.id,
+            user_info={"user": SimpleNamespace(username="u", domain="domain.com"), "team": 1},
+        )
+        assert out["result"] is True
+        assert out["data"][0]["cmdb_id"] == "63e4a531-b6bb-43cc-9eae-8eb8a09f795e"
+
+    def test_returns_resolved_ip_from_model_and_asset_fact(self, mocker):
+        obj = MonitorObject.objects.create(name="NMIObjIp", level="base")
+        MonitorInstance.objects.create(
+            id="('local',)",
+            name="local",
+            ip="1.1.1.1",
+            summary_facts={"asset.ip": "10.10.41.149"},
+            monitor_object=obj,
+            is_active=True,
+            is_deleted=False,
+        )
+        mocker.patch(
+            "apps.monitor.nats.monitor.get_permission_rules",
+            return_value={"team": [1], "instance": [{"id": "('local',)", "permission": ["View"]}]},
+        )
+        mocker.patch(
+            "apps.monitor.nats.monitor.permission_filter",
+            side_effect=lambda model, perm, **kw: model.objects.all(),
+        )
+        out = nm.monitor_object_instances(
+            obj.id,
+            user_info={"user": SimpleNamespace(username="u", domain="domain.com"), "team": 1},
+        )
+        assert out["result"] is True
+        assert out["data"][0]["name"] == "local"
+        assert out["data"][0]["ip"] == "10.10.41.149"
 
 
 class TestHostResourceTop:
@@ -226,7 +340,7 @@ class TestHostResourceTop:
         out = nm.get_host_resource_top("cpu", user_info={"user": "u", "team": 1})
 
         assert out["result"] is True
-        assert out["data"][0]["usage_percent"] == 42.0
+        assert out["data"][0]["usage_percent"] == 58.0
 
     def test_rejects_invalid_metric_type_without_query(self, mocker):
         vm = mocker.patch("apps.monitor.nats.monitor.VictoriaMetricsAPI")
@@ -397,6 +511,151 @@ class TestQueryMonitorDataByMetric:
         ids = {d["metric"]["instance_id"] for d in out["data"]["data"]["result"]}
         # 只保留有权限实例 ('h1',)
         assert ids == {"('h1',)"}
+
+    def test_logical_instance_id_is_authorized(self, mocker):
+        obj, metric = self._setup()
+        MonitorInstance.objects.create(id="('MTVmOTFiYTM5ODZk',)", name="local", monitor_object=obj, is_deleted=False)
+        mocker.patch("apps.monitor.nats.monitor.get_permission_rules", return_value={"team": [1]})
+        mocker.patch(
+            "apps.monitor.nats.monitor.permission_filter",
+            side_effect=lambda model, perm, **kw: model.objects.all(),
+        )
+        captured = {}
+
+        def fake_range(query, start, end, step, fill_missing=False):
+            captured["query"] = query
+            return {"data": {"result": [{"metric": {"instance_id": "MTVmOTFiYTM5ODZk"}, "values": [[0, "31"]]}]}}
+
+        mocker.patch("apps.monitor.nats.monitor.Metrics.get_metrics_range", side_effect=fake_range)
+        out = nm.query_monitor_data_by_metric(
+            {
+                "monitor_obj_id": obj.id,
+                "metric": "cpu",
+                "start": 1,
+                "end": 2,
+                "instance_ids": ["MTVmOTFiYTM5ODZk"],
+            },
+            user_info={"user": SimpleNamespace(username="u", domain="d"), "team": 1},
+        )
+        assert out["result"] is True
+        assert "MTVmOTFiYTM5ODZk" in captured["query"]
+        assert out["data"]["data"]["result"][0]["metric"]["instance_id"] == "MTVmOTFiYTM5ODZk"
+
+    def test_instance_name_is_authorized(self, mocker):
+        obj, _metric = self._setup()
+        MonitorInstance.objects.create(
+            id="('1_10.10.41.149_3306',)",
+            name="10.10.41.149-mysql-3306",
+            monitor_object=obj,
+            ip="10.10.41.149",
+            is_deleted=False,
+        )
+        mocker.patch("apps.monitor.nats.monitor.get_permission_rules", return_value={"team": [1]})
+        mocker.patch(
+            "apps.monitor.nats.monitor.permission_filter",
+            side_effect=lambda model, perm, **kw: model.objects.all(),
+        )
+        captured = {}
+
+        def fake_range(query, start, end, step, fill_missing=False):
+            captured["query"] = query
+            return {"data": {"result": [{"metric": {"instance_id": "1_10.10.41.149_3306"}, "values": [[0, "18"]]}]}}
+
+        mocker.patch("apps.monitor.nats.monitor.Metrics.get_metrics_range", side_effect=fake_range)
+        out = nm.query_monitor_data_by_metric(
+            {
+                "monitor_obj_id": obj.id,
+                "metric": "cpu",
+                "start": 1,
+                "end": 2,
+                "instance_ids": ["10.10.41.149-mysql-3306"],
+            },
+            user_info={"user": SimpleNamespace(username="u", domain="d"), "team": 1},
+        )
+        assert out["result"] is True
+        assert "1_10.10.41.149_3306" in captured["query"]
+
+    def test_unknown_logical_instance_id_is_denied(self, mocker):
+        obj, _metric = self._setup()
+        MonitorInstance.objects.create(id="('h1',)", name="h1", monitor_object=obj, is_deleted=False)
+        mocker.patch("apps.monitor.nats.monitor.get_permission_rules", return_value={"team": [1]})
+        mocker.patch(
+            "apps.monitor.nats.monitor.permission_filter",
+            side_effect=lambda model, perm, **kw: model.objects.all(),
+        )
+        vm = mocker.patch("apps.monitor.nats.monitor.Metrics.get_metrics_range")
+        out = nm.query_monitor_data_by_metric(
+            {
+                "monitor_obj_id": obj.id,
+                "metric": "cpu",
+                "start": 1,
+                "end": 2,
+                "instance_ids": ["MTVmOTFiYTM5ODZk"],
+            },
+            user_info={"user": SimpleNamespace(username="u", domain="d"), "team": 1},
+        )
+        assert out["result"] is False
+        assert out["message"] == "没有权限访问指定的实例"
+        vm.assert_not_called()
+
+    def test_cmdb_numeric_instance_id_is_rejected_with_linkage_message(self, mocker):
+        from apps.monitor.services.host_dashboard import CMDB_LOCATOR_USED_AS_MONITOR_INSTANCE_MESSAGE
+
+        obj, _metric = self._setup()
+        MonitorInstance.objects.create(id="('h1',)", name="h1", monitor_object=obj, is_deleted=False)
+        mocker.patch("apps.monitor.nats.monitor.get_permission_rules", return_value={"team": [1]})
+        mocker.patch(
+            "apps.monitor.nats.monitor.permission_filter",
+            side_effect=lambda model, perm, **kw: model.objects.all(),
+        )
+        vm = mocker.patch("apps.monitor.nats.monitor.Metrics.get_metrics_range")
+        out = nm.query_monitor_data_by_metric(
+            {
+                "monitor_obj_id": obj.id,
+                "metric": "cpu",
+                "start": 1,
+                "end": 2,
+                "instance_ids": ["100000000001", "100000000002"],
+            },
+            user_info={"user": SimpleNamespace(username="u", domain="d"), "team": 1},
+        )
+        assert out["result"] is False
+        assert out["message"] == CMDB_LOCATOR_USED_AS_MONITOR_INSTANCE_MESSAGE
+        vm.assert_not_called()
+
+    def test_bound_cmdb_id_is_authorized(self, mocker):
+        obj, _metric = self._setup()
+        MonitorInstance.objects.create(
+            id="('MTVmOTFiYTM5ODZk',)",
+            name="local",
+            monitor_object=obj,
+            cmdb_id="63e4a531-b6bb-43cc-9eae-8eb8a09f795e",
+            is_deleted=False,
+        )
+        mocker.patch("apps.monitor.nats.monitor.get_permission_rules", return_value={"team": [1]})
+        mocker.patch(
+            "apps.monitor.nats.monitor.permission_filter",
+            side_effect=lambda model, perm, **kw: model.objects.all(),
+        )
+        captured = {}
+
+        def fake_range(query, start, end, step, fill_missing=False):
+            captured["query"] = query
+            return {"data": {"result": [{"metric": {"instance_id": "MTVmOTFiYTM5ODZk"}, "values": [[0, "31"]]}]}}
+
+        mocker.patch("apps.monitor.nats.monitor.Metrics.get_metrics_range", side_effect=fake_range)
+        out = nm.query_monitor_data_by_metric(
+            {
+                "monitor_obj_id": obj.id,
+                "metric": "cpu",
+                "start": 1,
+                "end": 2,
+                "instance_ids": ["63e4a531-b6bb-43cc-9eae-8eb8a09f795e"],
+            },
+            user_info={"user": SimpleNamespace(username="u", domain="d"), "team": 1},
+        )
+        assert out["result"] is True
+        assert "MTVmOTFiYTM5ODZk" in captured["query"]
 
     def test_budget_error_keeps_structured_failure(self, mocker):
         obj, _ = self._setup()
@@ -601,6 +860,39 @@ class TestMonitorInstanceMetrics:
         )
         out = nm.monitor_instance_metrics(
             {"monitor_obj_id": obj.id, "instance_id": "('h1',)"},
+            user_info={"user": SimpleNamespace(username="u", domain="d"), "team": 1},
+        )
+        assert out["result"] is True
+        assert out["data"]["count"] == 1
+        assert out["data"]["items"][0]["metric"] == "cpu"
+
+    def test_logical_instance_id_lists_metrics(self, mocker):
+        obj = MonitorObject.objects.create(name="MIMLogical", level="base")
+        plugin = MonitorPlugin.objects.create(name="MIMPluginLogical")
+        group = MetricGroup.objects.create(monitor_object=obj, monitor_plugin=plugin, name="g")
+        Metric.objects.create(
+            monitor_object=obj,
+            monitor_plugin=plugin,
+            metric_group=group,
+            name="cpu",
+            display_name="CPU",
+            unit="percent",
+            data_type="Number",
+        )
+        MonitorInstance.objects.create(
+            id="('MTVmOTFiYTM5ODZk',)",
+            name="local",
+            monitor_object=obj,
+            is_active=True,
+            is_deleted=False,
+        )
+        mocker.patch("apps.monitor.nats.monitor.get_permission_rules", return_value={"team": [1]})
+        mocker.patch(
+            "apps.monitor.nats.monitor.permission_filter",
+            side_effect=lambda model, perm, **kw: model.objects.all(),
+        )
+        out = nm.monitor_instance_metrics(
+            {"monitor_obj_id": obj.id, "instance_id": "MTVmOTFiYTM5ODZk"},
             user_info={"user": SimpleNamespace(username="u", domain="d"), "team": 1},
         )
         assert out["result"] is True
@@ -853,6 +1145,7 @@ class TestQueryMonitorAlertSegments:
             monitor_instance_id="('h1',)",
             status="new",
             level="critical",
+            organizations=[1],
             start_event_time=datetime(2026, 1, 1, 12, tzinfo=timezone.utc),
         )
         mocker.patch("apps.monitor.nats.monitor.get_permission_rules", return_value={"team": [1]})
@@ -909,6 +1202,7 @@ class TestQueryMonitorAlertSegments:
                 monitor_instance_id="('h1',)",
                 status="new",
                 level="critical",
+                organizations=[1],
                 start_event_time=datetime(2026, 1, 1, hour, tzinfo=timezone.utc),
             )
         mocker.patch("apps.monitor.nats.monitor.get_permission_rules", return_value={"team": [1]})
@@ -1058,3 +1352,103 @@ class TestGetMonitorStatistics:
         out = nm.get_monitor_statistics(user_info={"is_superuser": False, "team": None})
         assert out["result"] is False
         assert out["data"] == {}
+
+
+class TestGetMonitorInstanceAlertRanking:
+    def _user_info(self):
+        return {
+            "user": SimpleNamespace(username="admin", domain="domain.com"),
+            "team": 1,
+            "is_superuser": False,
+            "include_children": False,
+        }
+
+    def _grant(self, mocker):
+        mocker.patch(
+            "apps.monitor.nats.monitor.get_permissions_rules",
+            return_value={"data": {"all": {"team": [1]}}, "team": [1]},
+        )
+
+    def test_most_alerts_and_least_policy_alerts(self, mocker):
+        from datetime import datetime, timedelta
+        from datetime import timezone as dt_timezone
+
+        self._grant(mocker)
+        obj = MonitorObject.objects.create(name="RankObj", level="base")
+        noisy = MonitorInstance.objects.create(id="noisy", name="noisy-host", monitor_object=obj)
+        quiet = MonitorInstance.objects.create(id="quiet", name="quiet-host", monitor_object=obj)
+        uncovered = MonitorInstance.objects.create(id="bare", name="bare-host", monitor_object=obj)
+        foreign = MonitorInstance.objects.create(id="foreign", name="foreign-host", monitor_object=obj)
+        MonitorInstanceOrganization.objects.create(monitor_instance=noisy, organization=1)
+        MonitorInstanceOrganization.objects.create(monitor_instance=quiet, organization=1)
+        MonitorInstanceOrganization.objects.create(monitor_instance=uncovered, organization=1)
+        MonitorInstanceOrganization.objects.create(monitor_instance=foreign, organization=2)
+        policy = MonitorPolicy.objects.create(
+            monitor_object=obj,
+            name="rank-policy",
+            algorithm="max",
+            query_condition={},
+            source={"type": "instance", "values": ["noisy", "quiet"]},
+            group_by=[],
+            enable=True,
+            threshold=[{"method": ">", "value": 1, "level": "warning"}],
+        )
+        PolicyOrganization.objects.create(policy=policy, organization=1)
+        start = datetime(2026, 1, 1, tzinfo=dt_timezone.utc)
+        end = start + timedelta(days=1)
+        noisy_alerts = [
+            MonitorAlert.objects.create(
+                policy_id=policy.id,
+                monitor_instance_id="noisy",
+                status="new",
+            )
+            for _ in range(3)
+        ]
+        for index, alert in enumerate(noisy_alerts):
+            MonitorAlert.objects.filter(pk=alert.pk).update(created_at=start + timedelta(hours=index + 1))
+        foreign_alert = MonitorAlert.objects.create(
+            policy_id=policy.id,
+            monitor_instance_id="foreign",
+            status="new",
+        )
+        MonitorAlert.objects.filter(pk=foreign_alert.pk).update(created_at=start + timedelta(hours=1))
+        time_range = [start.isoformat().replace("+00:00", "Z"), end.isoformat().replace("+00:00", "Z")]
+
+        most = nm.get_monitor_instance_alert_ranking(
+            user_info=self._user_info(),
+            ranking="most_alerts",
+            limit=10,
+            time=time_range,
+        )
+        least = nm.get_monitor_instance_alert_ranking(
+            user_info=self._user_info(),
+            ranking="least_policy_alerts",
+            limit=10,
+            time=time_range,
+        )
+
+        assert most["result"] is True
+        assert most["data"] == [{"instance_id": "noisy", "instance_name": "noisy-host", "count": 3}]
+        assert least["result"] is True
+        assert least["data"] == [
+            {"instance_id": "quiet", "instance_name": "quiet-host", "count": 0},
+            {"instance_id": "noisy", "instance_name": "noisy-host", "count": 3},
+        ]
+
+    def test_other_org_is_empty(self, mocker):
+        from datetime import datetime, timedelta
+        from datetime import timezone as dt_timezone
+
+        self._grant(mocker)
+        obj = MonitorObject.objects.create(name="RankObj2", level="base")
+        instance = MonitorInstance.objects.create(id="only-two", name="t2", monitor_object=obj)
+        MonitorInstanceOrganization.objects.create(monitor_instance=instance, organization=2)
+        start = datetime(2026, 1, 1, tzinfo=dt_timezone.utc)
+        end = start + timedelta(days=1)
+        out = nm.get_monitor_instance_alert_ranking(
+            user_info=self._user_info(),
+            ranking="most_alerts",
+            time=[start.isoformat().replace("+00:00", "Z"), end.isoformat().replace("+00:00", "Z")],
+        )
+        assert out["result"] is True
+        assert out["data"] == []

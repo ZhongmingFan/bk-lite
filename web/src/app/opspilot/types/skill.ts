@@ -104,6 +104,9 @@ export interface SkillDetail extends Skill {
   conversation_window_size?: number;
   tools?: unknown[];
   wiki_knowledge_bases?: number[];
+  force_wiki_grounded?: boolean;
+  memory_space?: number | null;
+  memory_write_rounds?: number;
   desc?: string;
   skill_packages?: SkillPackage[];
 }
@@ -181,6 +184,8 @@ export interface SkillDetailPayload {
   tool_ids?: number[];
   prompt_template?: string;
   skill_packages?: Partial<SkillPackage>[];
+  wiki_knowledge_bases?: number[];
+  force_wiki_grounded?: boolean;
   [key: string]: unknown;
 }
 
@@ -233,6 +238,8 @@ export interface SkillPackage {
   name: string;
   version: string;
   description?: string;
+  display_name?: string;
+  description_tr?: string;
   category?: string;
   source_type?: string;
   source_url?: string;
@@ -243,6 +250,7 @@ export interface SkillPackage {
   triggers?: string[];
   team?: string[];
   is_enabled?: boolean;
+  is_build_in?: boolean;
   permissions?: string[];
   created_at?: string;
   updated_at?: string;

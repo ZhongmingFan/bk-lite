@@ -1,6 +1,6 @@
 'use client';
-import React, { useRef, useState } from 'react';
-import { Descriptions } from 'antd';
+import React, { useRef } from 'react';
+import { Button, Descriptions } from 'antd';
 import { TableDataItem, Organization } from '@/app/monitor/types';
 import { useTranslation } from '@/utils/i18n';
 import informationStyle from './index.module.scss';
@@ -10,8 +10,6 @@ import { ObjectItem } from '@/app/monitor/types';
 import { showGroupName } from '@/app/monitor/utils/common';
 import { useUnitTransform } from '@/app/monitor/hooks/useUnitTransform';
 import { useCommon } from '@/app/monitor/context/common';
-import { Popconfirm, message, Button } from 'antd';
-import useMonitorApi from '@/app/monitor/api';
 import { useLevelList } from '@/app/monitor/hooks';
 import { OBJECT_DEFAULT_ICON, LEVEL_MAP } from '@/app/monitor/constants';
 import Permission from '@/components/permission';
@@ -19,32 +17,36 @@ import { formatUserDisplayName } from '@/utils/userDisplay';
 import { getPolicySecondaryContext } from '@/app/monitor/utils/policyDisplayName';
 import { buildMonitorStrategyDetailUrl } from '@/app/monitor/utils/policyRouteUtils';
 import { buildAlertDimensionDisplayItems } from './alertDimensionUtils';
+import AlertHandlerActions from './alertHandlerActions';
+import { formatAlertHandlers } from './alertHandlerUtils';
+import type { AlertSnapshotOverlay } from './alertDetailUtils';
 
 interface InformationProps extends TableDataItem {
   eventData?: TableDataItem[];
   chartUnit?: string | null;
   chartXAxisDomain?: [number, number] | null;
+  chartOverlay?: AlertSnapshotOverlay;
 }
 
 const Information: React.FC<InformationProps> = ({
   formData,
   chartData,
-  objects,
+  objects: objectsProp,
   userList,
   onClose,
   trapData,
   chartUnit,
-  chartXAxisDomain
+  chartXAxisDomain,
+  chartOverlay
 }) => {
   const { t } = useTranslation();
   const { convertToLocalizedTime } = useLocalizedTime();
   const { findUnitNameById } = useUnitTransform();
   const LEVEL_LIST = useLevelList();
-  const { patchMonitorAlert } = useMonitorApi();
   const commonContext = useCommon();
   const authList = useRef(commonContext?.authOrganizations || []);
   const organizationList: Organization[] = authList.current;
-  const [confirmLoading, setConfirmLoading] = useState(false);
+  const objects = objectsProp ?? [];
   const dimensionItems = buildAlertDimensionDisplayItems(
     formData.metric?.dimensions,
     formData.dimensions
@@ -80,19 +82,6 @@ const Information: React.FC<InformationProps> = ({
       name: row.policy.name || ''
     });
     window.open(url, '_blank', 'noopener,noreferrer');
-  };
-
-  const handleCloseConfirm = async (row: TableDataItem) => {
-    setConfirmLoading(true);
-    try {
-      await patchMonitorAlert(row.id as string, {
-        status: 'closed'
-      });
-      message.success(t('monitor.events.successfullyClosed'));
-      onClose();
-    } finally {
-      setConfirmLoading(false);
-    }
   };
 
   const showNotifiers = (row: TableDataItem) => {
@@ -245,31 +234,21 @@ const Information: React.FC<InformationProps> = ({
             }`
           )}
         </Descriptions.Item>
-        <Descriptions.Item label={t('common.operator')}>
-          {formatUserDisplayName(formData.operator, userList)}
+        <Descriptions.Item label={t('monitor.events.handler')}>
+          {formatAlertHandlers(formData.handlers, formData.handlers_display, userList)}
         </Descriptions.Item>
         <Descriptions.Item label={t('monitor.events.notifier')}>
           {showNotifiers(formData)}
         </Descriptions.Item>
       </Descriptions>
       <div className="mt-4">
-        <Permission
+        <AlertHandlerActions
+          record={formData}
+          closeText={t('common.close')}
           requiredPermissions={['Operate', 'Detail']}
-          instPermissions={formData.permission}
-        >
-          <Popconfirm
-            title={t('monitor.events.closeTitle')}
-            description={t('monitor.events.closeContent')}
-            okText={t('common.confirm')}
-            cancelText={t('common.cancel')}
-            okButtonProps={{ loading: confirmLoading }}
-            onConfirm={() => handleCloseConfirm(formData)}
-          >
-            <Button type="link" disabled={formData.status !== 'new'}>
-              {t('monitor.events.closeAlert')}
-            </Button>
-          </Popconfirm>
-        </Permission>
+          size="middle"
+          onSuccess={onClose}
+        />
       </div>
       <div className="mt-4">
         {formData.policy?.query_condition?.type === 'pmq' ? (
@@ -302,6 +281,22 @@ const Information: React.FC<InformationProps> = ({
             <div className="text-[12px]">{`${
               formData.metric?.display_name
             }（${findUnitNameById(chartUnit || '')}）`}</div>
+            {chartOverlay &&
+              (chartOverlay.currentValue != null ||
+                chartOverlay.baselineValue != null ||
+                chartOverlay.comparedValue != null) && (
+              <div className="text-[12px] text-[var(--color-text-3)] mt-[4px]">
+                {t('monitor.events.dryRunCurrentValue')}
+                {': '}
+                {chartOverlay.currentValue ?? '—'}
+                {chartOverlay.baselineValue != null
+                  ? ` · ${t('monitor.events.dryRunBaselineValue')}: ${chartOverlay.baselineValue}`
+                  : ''}
+                {chartOverlay.comparedValue != null
+                  ? ` · ${t('monitor.events.dryRunComparedValue')}: ${chartOverlay.comparedValue}`
+                  : ''}
+              </div>
+            )}
             <div className="h-[250px]">
               <LineChart
                 allowSelect={false}

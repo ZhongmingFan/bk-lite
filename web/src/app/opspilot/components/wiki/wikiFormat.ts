@@ -26,6 +26,7 @@ export const TRIGGER_LABEL: Record<string, string> = {
   material_queue: "wiki.triggerMaterialQueue",
   material_queue_item: "wiki.triggerMaterialQueueItem",
   rebuild: "wiki.triggerRebuild",
+  markdown_import: "wiki.triggerMarkdownImport",
   build: "wiki.triggerBuildCascade",
   maintenance_retry: "wiki.triggerMaintenanceRetry",
   page_delete: "wiki.triggerPageDelete",
@@ -142,9 +143,79 @@ export const PAGE_TYPE_LABEL: Record<string, string> = {
   other: "wiki.pageTypeOther",
 };
 
+/** 冻结骨架目录 key → 已有页面类型文案。用户自建目录不在此表，显示库存原名。 */
+export const FROZEN_DIRECTORY_LABEL: Record<string, string> = {
+  __unclassified__: "wiki.directoryUnclassified",
+  schema_entity: "wiki.pageTypeEntity",
+  schema_concept: "wiki.pageTypeConcept",
+  schema_query: "wiki.pageTypeQuery",
+  schema_comparison: "wiki.pageTypeComparison",
+  schema_synthesis: "wiki.pageTypeSynthesis",
+  schema_source: "wiki.pageTypeSource",
+};
+
+export const formatWikiDirectoryLabel = (
+  t: (id: string) => string,
+  directory: { key?: string | null; name?: string | null },
+): string => {
+  const mapped = FROZEN_DIRECTORY_LABEL[String(directory.key || "")];
+  if (mapped) return t(mapped);
+  return String(directory.name ?? "");
+};
+
 export const pageTypeLabelKey = (pageType?: string | null): string => {
   const normalized = String(pageType || "")
     .trim()
     .toLowerCase();
   return PAGE_TYPE_LABEL[normalized] || "";
+};
+
+export const formatPageTypeLabel = (
+  t: (id: string) => string,
+  pageType?: string | null,
+  empty = "",
+): string => {
+  const raw = String(pageType ?? "").trim();
+  if (!raw) return empty;
+  const key = pageTypeLabelKey(raw);
+  return key ? t(key) : raw;
+};
+
+export const pageTypeSelectOption = (
+  t: (id: string) => string,
+  pageType: string,
+) => ({
+  value: pageType,
+  label: formatPageTypeLabel(t, pageType),
+});
+
+/** 导入器写入的系统标签（okf:unverified 等）；文档/LLM 自由标签不在此表。 */
+export const WIKI_SYSTEM_TAG_LABEL: Record<string, string> = {
+  "okf:unverified": "wiki.tagOkfUnverified",
+  "okf:machine_confirmed": "wiki.tagOkfMachineConfirmed",
+  "okf:human_reviewed": "wiki.tagOkfHumanReviewed",
+  "okf:deprecated": "wiki.tagOkfDeprecated",
+};
+
+type Translate = (
+  id: string,
+  defaultMessage?: string,
+  values?: Record<string, string | number>,
+) => string;
+
+export const formatWikiTagLabel = (
+  t: Translate,
+  tag?: string | null,
+  empty = "",
+): string => {
+  const raw = String(tag ?? "").trim();
+  if (!raw) return empty;
+  const identity = raw.toLowerCase();
+  const mapped = WIKI_SYSTEM_TAG_LABEL[identity];
+  if (mapped) return t(mapped);
+  if (identity.startsWith("okf:")) {
+    const okfType = raw.slice(raw.indexOf(":") + 1).trim();
+    if (okfType) return t("wiki.tagOkfType", undefined, { type: okfType });
+  }
+  return raw;
 };

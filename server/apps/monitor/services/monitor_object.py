@@ -4,8 +4,6 @@ import time
 import uuid
 
 from django.db import transaction
-from django.db.models import Q
-from django.db.models.fields.json import KeyTextTransform
 
 from apps.core.exceptions.base_app_exception import BaseAppException
 from apps.core.logger import monitor_logger as logger
@@ -182,6 +180,26 @@ class MonitorObjectService:
             else:
                 conf_info["status"] = "unavailable"
 
+        MonitorObjectService._attach_operating_system(items)
+
+    @staticmethod
+    def _attach_operating_system(items: list) -> None:
+        """Fill linux/windows from the bound Node so Host dashboards can hide Linux-only cards."""
+        node_ids = [item.get("node_id") for item in items if item.get("node_id")]
+        os_map = {}
+        if node_ids:
+            from apps.node_mgmt.models import Node
+
+            os_map = {
+                str(node_id): str(os_value or "").strip().lower()
+                for node_id, os_value in Node.objects.filter(id__in=node_ids).values_list("id", "operating_system")
+                if str(os_value or "").strip().lower() in {"linux", "windows"}
+            }
+        for item in items:
+            if item.get("operating_system") in {"linux", "windows"}:
+                continue
+            item["operating_system"] = os_map.get(str(item.get("node_id") or ""), "")
+
     @staticmethod
     def get_monitor_instance(
         monitor_object_id,
@@ -203,6 +221,10 @@ class MonitorObjectService:
 
         ordering_key, order_dir = parse_ordering_params(ordering, order)
 
+        monitor_obj = MonitorObject.objects.filter(id=monitor_object_id).first()
+        if not monitor_obj:
+            raise BaseAppException("Monitor object does not exist")
+
         qs = qs.filter(
             monitor_object_id=monitor_object_id,
             is_deleted=False,
@@ -214,15 +236,9 @@ class MonitorObjectService:
             qs = qs.filter(id__in=list(instance_ids))
         elif instance_id:
             qs = qs.filter(id=instance_id)
-        if name:
-            # 与列表「IP信息」/ ${resource_ip} 同源：summary_facts['asset.ip'] 优先字段。
-            qs = qs.annotate(_asset_ip_fact=KeyTextTransform("asset.ip", "summary_facts")).filter(
-                Q(name__icontains=name) | Q(ip__icontains=name) | Q(_asset_ip_fact__icontains=name)
-            )
+        from apps.monitor.services.monitor_instance import InstanceSearch
 
-        monitor_obj = MonitorObject.objects.filter(id=monitor_object_id).first()
-        if not monitor_obj:
-            raise BaseAppException("Monitor object does not exist")
+        qs = InstanceSearch.apply_keyword_search(qs, monitor_obj, name)
         monitor_objs = MonitorObject.objects.all().values(*MonitorObjConstants.OBJ_KEYS)
         obj_metric_map = {i["name"]: i for i in monitor_objs}
         obj_metric_map = obj_metric_map.get(monitor_obj.name)
@@ -230,8 +246,6 @@ class MonitorObjectService:
             raise BaseAppException("Monitor object default metric does not exist")
 
         # Process 主机 / asset.ip / Enum 指标过滤在 list 与 search 共用同一套规则。
-        from apps.monitor.services.monitor_instance import InstanceSearch
-
         qs = InstanceSearch.apply_process_instance_filters(
             qs,
             monitor_obj.name,
@@ -354,11 +368,14 @@ class MonitorObjectService:
         metrics = vm_api.query(query)
         metric_results = metrics.get("data", {}).get("result", [])
         timestamp_map = MonitorObjectService._query_enum_metric_sample_timestamps(vm_api, query, metric_obj, metric_results)
+        target_instance_ids = {inst["instance_id"] for inst in target_instances}
         selected_map = {}
         for metric in metric_results:
-            instance_id = str(tuple(metric["metric"].get(i) for i in metric_obj.instance_id_keys))
+            labels = metric.get("metric") or {}
+            raw_id = str(tuple(labels.get(i) for i in metric_obj.instance_id_keys))
+            instance_id = MonitorObjectService._resolve_vm_result_instance_id(metric_obj, labels, target_instance_ids)
             value = metric["value"][1]
-            sample_time = timestamp_map.get((instance_id, MonitorObjectService._vm_metric_signature(metric)))
+            sample_time = timestamp_map.get((raw_id, MonitorObjectService._vm_metric_signature(metric)))
             if MonitorObjectService._should_replace_display_metric_value(selected_map.get(instance_id), value, sample_time):
                 selected_map[instance_id] = {"value": value, "sample_time": sample_time}
         return {instance_id: item["value"] for instance_id, item in selected_map.items()}
@@ -388,6 +405,22 @@ class MonitorObjectService:
     @staticmethod
     def _vm_metric_signature(metric):
         return tuple(sorted((key, value) for key, value in metric.get("metric", {}).items() if key != "__name__"))
+
+    @staticmethod
+    def _resolve_vm_result_instance_id(metric_obj, labels, target_instance_ids):
+        """把 VM 标签还原成列表行的 instance_id，兼容裸值与 tuple 存储键。"""
+        label_values = tuple(labels.get(key) for key in metric_obj.instance_id_keys)
+        instance_id = str(label_values)
+        if instance_id in target_instance_ids:
+            return instance_id
+        for value in label_values:
+            value_str = str(value)
+            if value_str in target_instance_ids:
+                return value_str
+            parsed_key = str(parse_instance_id(value_str))
+            if parsed_key in target_instance_ids:
+                return parsed_key
+        return instance_id
 
     @staticmethod
     def _should_replace_display_metric_value(current, new_value, new_sample_time):
@@ -466,18 +499,7 @@ class MonitorObjectService:
             field_value = labels.get(field)
             if field_value in (None, ""):
                 continue
-            label_values = tuple(labels.get(i) for i in metric_obj.instance_id_keys)
-            instance_id = str(label_values)
-            if instance_id not in target_instance_ids:
-                for value in label_values:
-                    value_str = str(value)
-                    if value_str in target_instance_ids:
-                        instance_id = value_str
-                        break
-                    parsed_key = str(parse_instance_id(value_str))
-                    if parsed_key in target_instance_ids:
-                        instance_id = parsed_key
-                        break
+            instance_id = MonitorObjectService._resolve_vm_result_instance_id(metric_obj, labels, target_instance_ids)
             timestamp = metric.get("value", [0])[0]
             if instance_id not in value_map or timestamp >= time_map.get(instance_id, 0):
                 value_map[instance_id] = field_value
@@ -485,26 +507,66 @@ class MonitorObjectService:
         return value_map
 
     @staticmethod
-    def _merge_reported_plugin_coverage(monitor_object_id, result, instance_plugin_map):
-        """把无 CollectConfig 但已上报的实例并入插件归属，供展示列隔离使用。"""
-        uncovered = [inst for inst in result if inst["instance_id"] not in instance_plugin_map]
-        if not uncovered:
+    def _scope_status_query_to_instances(query, instances, label_key="instance_id"):
+        """把 status_query 限制在本页缺该插件的实例上，避免无 instance_id 的全局 any()。"""
+        primaries = set()
+        for inst in instances:
+            parsed = parse_instance_id(inst["instance_id"])
+            if parsed and parsed[0] not in (None, ""):
+                primaries.add(re.escape(str(parsed[0])))
+        if not primaries:
+            return query
+        values = MonitorObjectService._escape_promql_label_value("|".join(sorted(primaries)))
+        matcher = f'{label_key}=~"{values}"'
+        key_pattern = re.compile(rf"(?:^|,)\s*{re.escape(label_key)}\s*(=~?|!=)")
+
+        def _replacer(match):
+            body = match.group(1).strip()
+            if key_pattern.search(body):
+                return match.group(0)
+            if not body:
+                return "{" + matcher + "}"
+            return "{" + matcher + "," + body + "}"
+
+        return re.sub(r"\{([^{}]*)\}", _replacer, query)
+
+    @staticmethod
+    def _merge_reported_plugin_coverage(monitor_object_id, result, instance_plugin_map, needed_plugins=None):
+        """把已上报但无对应 CollectConfig 的插件并入归属，供展示列隔离使用。
+
+        实例只要缺某个展示列插件的 CollectConfig，就要按该插件 status_query 补归属。
+        不能因为已经有「别的」插件配置（如本机 Host / WMI）就整行跳过，否则仅上报的
+        Host Remote 会在列表留空，详情却仍能凭上报状态画出图表。
+
+        热路径约束：只查展示列真正用到的插件，且 status_query 必须带上本页缺该插件
+        的 instance_id=~。交换机对象下几十个品牌插件不能对每个未全覆盖的插件打一次
+        无界全局 any()。
+        """
+        if not result:
+            return
+        if needed_plugins is not None and not needed_plugins:
             return
 
-        plugin_status_qs = (
-            MonitorPlugin.objects.filter(monitor_object=monitor_object_id).exclude(status_query="").values_list("name", "status_query").distinct()
-        )
+        plugin_status_qs = MonitorPlugin.objects.filter(monitor_object=monitor_object_id).exclude(status_query="")
+        if needed_plugins is not None:
+            plugin_status_qs = plugin_status_qs.filter(name__in=needed_plugins)
+
         plugin_queries = []
-        for plugin_name, status_query in plugin_status_qs:
+        for plugin_name, status_query in plugin_status_qs.values_list("name", "status_query").distinct():
             query = (status_query or "").strip()
             if not query:
                 continue
-            plugin_queries.append((plugin_name, query))
+            missing = [inst for inst in result if plugin_name not in instance_plugin_map.get(inst["instance_id"], set())]
+            if not missing:
+                continue
+            plugin_queries.append((plugin_name, MonitorObjectService._scope_status_query_to_instances(query, missing)))
+        if not plugin_queries:
+            return
 
         vm_api = VictoriaMetricsAPI()
         responses, errors = run_unique_vm_queries(
             (query for _, query in plugin_queries),
-            vm_api.query,
+            lambda query: vm_api.query(query, step=LAST_SAMPLE_LOOKBACK),
         )
         for plugin_name, query in plugin_queries:
             if query in errors:
@@ -520,7 +582,9 @@ class MonitorObjectService:
             reported_primary_ids.discard(None)
             if not reported_primary_ids:
                 continue
-            for inst in uncovered:
+            for inst in result:
+                if plugin_name in instance_plugin_map.get(inst["instance_id"], set()):
+                    continue
                 parsed = parse_instance_id(inst["instance_id"])
                 primary = str(parsed[0]) if parsed else None
                 if primary in reported_primary_ids:
@@ -532,8 +596,10 @@ class MonitorObjectService:
 
         - 回填 key 用复合 key ``<plugin>::<metric>``(见 display_field_key),避免不同插件的同名
           指标互相覆盖;
-        - 按插件(模板)隔离:只把“采集配置归属该插件”的实例纳入该绑定取数,别的插件的实例该列留空。
-          无采集配置的实例无法判定插件归属,不展示带插件的绑定指标(显示 --)。
+        - 按插件(模板)隔离:只把“采集配置或上报状态归属该插件”的实例纳入该绑定取数,
+          别的插件的实例该列留空。无 CollectConfig 但已上报的插件仍回填；已有其它插件
+          配置时，也不跳过仅上报的插件。上报状态只查展示列用到的插件，并按本页缺该
+          插件的实例加上 instance_id=~，避免交换机等多插件对象打无界全局查询。
         - 兼容:绑定缺 plugin(遗留配置)时按指标名匹配、不做隔离、用裸指标名回填;display_fields
           为空时退回 supplementary_indicators(裸指标名,不区分插件)。
         - ``skip_out_keys``: 排序阶段已写入的 out_key，本页补数时跳过同列重复 VM 查询。
@@ -566,7 +632,8 @@ class MonitorObjectService:
 
         # 派生/上报型实例(如 K8s 集群/Pod/Node 经集群内采集器上报,但 bk-lite 侧无 CollectConfig)
         # 也应纳入其「上报插件」的展示列取数;否则插件隔离会把它们一律判为 --。
-        MonitorObjectService._merge_reported_plugin_coverage(monitor_object_id, result, instance_plugin_map)
+        needed_plugins = {binding["plugin"] for binding in bindings + field_bindings if binding.get("plugin")}
+        MonitorObjectService._merge_reported_plugin_coverage(monitor_object_id, result, instance_plugin_map, needed_plugins=needed_plugins)
 
         # 同名指标可能分属多个插件,按 (plugin, name) 精确取;另留 name 兜底给遗留无 plugin 的绑定
         metric_by_plugin = {}
@@ -777,6 +844,8 @@ class MonitorObjectService:
 
         # 更新组织信息
         if organizations is not None:
+            if not organizations:
+                raise BaseAppException("至少保留一个组织")
             instance.monitorinstanceorganization_set.all().delete()
             for org in organizations:
                 instance.monitorinstanceorganization_set.create(organization=org)
@@ -787,7 +856,21 @@ class MonitorObjectService:
         if not instance_ids or not organizations:
             return
 
-        MonitorInstanceOrganization.objects.filter(monitor_instance_id__in=instance_ids, organization__in=organizations).delete()
+        with transaction.atomic():
+            existing = list(
+                MonitorInstanceOrganization.objects.select_for_update()
+                .filter(monitor_instance_id__in=instance_ids)
+                .values_list("monitor_instance_id", "organization")
+            )
+            remaining = {}
+            remove_set = set(organizations)
+            for instance_id, organization in existing:
+                if organization not in remove_set:
+                    remaining[str(instance_id)] = remaining.get(str(instance_id), 0) + 1
+            for instance_id in instance_ids:
+                if remaining.get(str(instance_id), 0) < 1:
+                    raise BaseAppException("不能移除最后一个组织")
+            MonitorInstanceOrganization.objects.filter(monitor_instance_id__in=instance_ids, organization__in=organizations).delete()
 
     @staticmethod
     def add_instances_organizations(instance_ids, organizations):
@@ -806,7 +889,8 @@ class MonitorObjectService:
         """设置监控对象实例组织"""
         if not instance_ids:
             return
-        organizations = organizations or []
+        if not organizations:
+            raise BaseAppException("至少保留一个组织")
 
         with transaction.atomic():
             # 删除旧的组织关联

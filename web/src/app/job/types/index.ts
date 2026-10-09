@@ -152,12 +152,18 @@ export interface TargetFormData {
 // Script types
 export type ScriptType = 'shell' | 'bat' | 'python' | 'powershell';
 
+export type ScriptParamType = 'text' | 'enum';
+
 export interface ScriptParam {
   name: string;
   description?: string;
   default?: string;
   is_encrypted?: boolean;
   is_required?: boolean;
+  /** 缺省视为 text，兼容存量脚本 */
+  type?: ScriptParamType;
+  /** type=enum 时的单选选项 */
+  options?: string[];
 }
 
 export interface Script {
@@ -331,6 +337,7 @@ export interface PlaybookFilePreview {
 // Scheduled Task types
 export type JobType = 'script' | 'playbook' | 'file';
 export type ScheduleType = 'once' | 'cron';
+export type ScheduledTaskConcurrencyPolicy = 'skip' | 'run' | 'queue';
 
 export interface ScheduledTask {
   id: number;
@@ -383,8 +390,8 @@ export interface ScheduledTaskFormData {
   schedule_type: ScheduleType;
   cron_expression?: string;
   scheduled_time?: string;
-  script?: number;
-  playbook?: number;
+  script?: number | null;
+  playbook?: number | null;
   target_source: ExecutionTargetSource;
   target_list: TargetListItem[];
   params?: Record<string, unknown>;
@@ -394,6 +401,7 @@ export interface ScheduledTaskFormData {
   target_path?: string;
   timeout?: number;
   is_enabled?: boolean;
+  concurrency_policy?: ScheduledTaskConcurrencyPolicy;
   team?: number[];
 }
 
@@ -453,7 +461,7 @@ export interface JobRecordDetail extends JobRecord {
   script?: number;
   playbook?: number;
   playbook_version?: string;
-  params?: Record<string, unknown>;
+  params?: string | Record<string, unknown> | Array<{ name?: string; value?: unknown }>;
   script_type?: ScriptType;
   script_type_display?: string;
   script_content?: string;

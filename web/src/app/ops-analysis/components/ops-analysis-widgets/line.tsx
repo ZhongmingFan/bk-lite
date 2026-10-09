@@ -20,6 +20,10 @@ import {
   formatVisibleChartValue,
   getLineBarYAxisName,
 } from '@/app/ops-analysis/utils/chartValueFormat';
+import {
+  countRenderableLinePoints,
+  resolveLineSeriesPointMark,
+} from '@/app/ops-analysis/utils/lineSeriesSymbol';
 
 interface EChartsInstance {
   dispatchAction: (payload: Record<string, any>) => void;
@@ -33,6 +37,16 @@ export interface OpsAnalysisLineProps {
 }
 
 const LINE_SMOOTHNESS = 0.36;
+
+const linePointMark = (data: unknown) => {
+  const mark = resolveLineSeriesPointMark(countRenderableLinePoints(data));
+  return {
+    showSymbol: mark.showSymbol,
+    showAllSymbol: mark.showAllSymbol,
+    symbol: mark.symbol,
+    symbolSize: mark.symbolSize,
+  };
+};
 
 const withAlpha = (color: string, alpha: number) => {
   const normalized = color.trim();
@@ -100,7 +114,10 @@ const OpsAnalysisLine: React.FC<OpsAnalysisLineProps> = ({
     setLegendSelected(selected);
   }, []);
 
-  const chartData = ChartDataTransformer.transformToLineBarData(rawData);
+  const chartData = ChartDataTransformer.transformToLineBarData(rawData, {
+    dimensionField: config?.dimensionField,
+    valueField: config?.valueField,
+  });
   const isDataReady = chartData.categories.length > 0;
 
   useEffect(() => {
@@ -378,7 +395,7 @@ const OpsAnalysisLine: React.FC<OpsAnalysisLineProps> = ({
       data: item.data,
       smooth: LINE_SMOOTHNESS,
       smoothMonotone: 'x',
-      symbol: 'none',
+      ...linePointMark(item.data),
       ...(config?.stack ? { stack: 'total' } : {}),
       yAxisIndex: useDualAxis ? (largeSeriesIndices.includes(index) ? 0 : 1) : 0,
       lineStyle: {
@@ -410,7 +427,7 @@ const OpsAnalysisLine: React.FC<OpsAnalysisLineProps> = ({
         data: chartData && chartData.values ? chartData.values : [],
         smooth: LINE_SMOOTHNESS,
         smoothMonotone: 'x',
-        symbol: 'none',
+        ...linePointMark(chartData?.values),
         lineStyle: {
           width: chartTheme.lineWidth,
           opacity: chartTheme.lineOpacity,

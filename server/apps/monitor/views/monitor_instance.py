@@ -4,7 +4,14 @@ from rest_framework import viewsets
 from rest_framework.decorators import action
 
 from apps.core.exceptions.base_app_exception import BaseAppException, UnauthorizedException
-from apps.core.utils.current_team_scope import resolve_current_team_data_scope, scope_permission_queryset, validate_assignable_organizations
+from apps.core.utils.current_team_scope import (
+    assert_unassigned_catalog_access,
+    is_persisted_superuser,
+    missing_organization_q,
+    resolve_current_team_data_scope,
+    scope_permission_queryset,
+    validate_assignable_organizations,
+)
 from apps.core.utils.permission_utils import get_permission_rules
 from apps.core.utils.user_group import normalize_user_group_ids
 from apps.core.utils.web_utils import WebUtils
@@ -17,7 +24,7 @@ from apps.monitor.services.monitor_instance import InstanceSearch
 from apps.monitor.services.monitor_instance_removal import MonitorInstanceRemovalService
 from apps.monitor.services.monitor_object import MonitorObjectService
 from apps.monitor.services.node_mgmt import InstanceConfigService
-from apps.monitor.utils.dimension import normalize_instance_identity
+from apps.monitor.utils.dimension import normalize_instance_identity, parse_instance_id
 from apps.monitor.utils.pagination import parse_page_params
 
 # 已选资产回填等批量精确查询的单次上限，避免超长 URL / 过大 IN 子句。
@@ -73,6 +80,24 @@ def _parse_instance_id_filters(query_params):
         return normalize_instance_identity(raw_instance_id)["storage_instance_key"], None, False
     except ValueError:
         return None, None, True
+
+
+def _candidate_instance_ids(raw_instance_id):
+    """Lookup 候选主键：存储键优先，其次原始输入（兼容未补齐 tuple 的遗留 PK）。"""
+    text = str(raw_instance_id or "").strip()
+    if not text:
+        return []
+    try:
+        storage_key = normalize_instance_identity(text)["storage_instance_key"]
+    except ValueError:
+        return []
+    keys = []
+    seen = set()
+    for key in (storage_key, text):
+        if key and key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
 
 
 def _build_actor_context(request):
@@ -149,7 +174,10 @@ def _ensure_instance_scope(instance_ids, actor_context):
 
     unauthorized_ids = [instance_id for instance_id in normalized_ids if not instance_org_map.get(instance_id, set()).intersection(allowed_groups)]
     if unauthorized_ids:
-        raise UnauthorizedException("无权限操作跨组织监控实例")
+        if actor_context.get("is_superuser"):
+            unauthorized_ids = [instance_id for instance_id in unauthorized_ids if instance_org_map.get(instance_id)]
+        if unauthorized_ids:
+            raise UnauthorizedException("无权限操作跨组织监控实例")
 
     return normalized_ids
 
@@ -190,12 +218,35 @@ def _ensure_operate_instances(request, instance_ids, actor_context=None, allow_m
             .filter(id__in=requested_ids)
             .values_list("id", flat=True)
         }
-        if requested_ids - allowed_ids:
-            raise UnauthorizedException("无权限操作指定监控实例")
+        unauthorized_ids = requested_ids - allowed_ids
+        if unauthorized_ids:
+            if not actor_context.get("is_superuser"):
+                raise UnauthorizedException("无权限操作指定监控实例")
+            assigned_ids = {
+                str(instance_id)
+                for instance_id in MonitorInstanceOrganization.objects.filter(monitor_instance_id__in=unauthorized_ids).values_list(
+                    "monitor_instance_id",
+                    flat=True,
+                )
+            }
+            if unauthorized_ids & assigned_ids:
+                raise UnauthorizedException("无权限操作指定监控实例")
 
     if found_ids:
         _ensure_instance_scope(found_ids, actor_context)
     return normalized_ids
+
+
+def _monitor_catalog_queryset(request, permission, scope):
+    if assert_unassigned_catalog_access(request):
+        return MonitorInstance.objects.filter(missing_organization_q(MonitorInstanceOrganization, fk_name="monitor_instance_id"))
+    return scope_permission_queryset(
+        MonitorInstance,
+        permission,
+        scope,
+        team_key="monitorinstanceorganization__organization__in",
+        id_key="id__in",
+    )
 
 
 class MonitorInstanceViewSet(viewsets.ViewSet):
@@ -203,6 +254,101 @@ class MonitorInstanceViewSet(viewsets.ViewSet):
     def get_query_params_enum(self, request, name):
         data = InstanceSearch.get_query_params_enum(name, request.GET.get("monitor_object_id"))
         return WebUtils.response_success(data)
+
+    @action(methods=["get"], detail=False, url_path="lookup")
+    def lookup_monitor_instance(self, request):
+        """按 instance_id 一次定位所属监控对象，避免公开组件按对象类型逐个试探 list。"""
+        raw_instance_id = (request.GET.get("instance_id") or "").strip()
+        if not raw_instance_id:
+            raise BaseAppException("instance_id is required")
+
+        candidate_ids = _candidate_instance_ids(raw_instance_id)
+        if not candidate_ids:
+            return WebUtils.response_success(None)
+
+        scope = resolve_current_team_data_scope(request)
+        org_matches = list(
+            MonitorInstance.objects.filter(
+                id__in=candidate_ids,
+                is_deleted=False,
+                is_active=True,
+                monitorinstanceorganization__organization__in=list(scope.data_team_ids),
+            )
+            .select_related("monitor_object")
+            .distinct()
+        )
+        by_id = {instance.id: instance for instance in org_matches}
+        instance = next((by_id[key] for key in candidate_ids if key in by_id), None)
+        if instance is None and is_persisted_superuser(request.user):
+            org_matches = list(
+                MonitorInstance.objects.filter(
+                    id__in=candidate_ids,
+                    is_deleted=False,
+                    is_active=True,
+                )
+                .filter(missing_organization_q(MonitorInstanceOrganization, fk_name="monitor_instance_id"))
+                .select_related("monitor_object")
+            )
+            by_id = {row.id: row for row in org_matches}
+            instance = next((by_id[key] for key in candidate_ids if key in by_id), None)
+        if instance is None:
+            return WebUtils.response_success(None)
+
+        monitor_object_id = instance.monitor_object_id
+        permission = (
+            {"team": list(scope.data_team_ids), "instance": []}
+            if request.user.is_superuser
+            else get_permission_rules(
+                request.user,
+                scope.current_team,
+                "monitor",
+                f"{PermissionConstants.INSTANCE_MODULE}.{monitor_object_id}",
+                include_children=scope.include_children,
+            )
+        )
+        unassigned = is_persisted_superuser(request.user) and not MonitorInstanceOrganization.objects.filter(
+            monitor_instance_id=instance.pk
+        ).exists()
+        if not unassigned:
+            qs = scope_permission_queryset(
+                MonitorInstance,
+                permission,
+                scope,
+                team_key="monitorinstanceorganization__organization__in",
+                id_key="id__in",
+            )
+            if not qs.filter(pk=instance.pk).exists():
+                return WebUtils.response_success(None)
+
+        monitor_object = instance.monitor_object
+        instance_id_keys = list(monitor_object.instance_id_keys) if monitor_object.instance_id_keys else ["instance_id"]
+        operating_system = ""
+        if instance.node_id:
+            from apps.node_mgmt.models import Node
+
+            os_value = Node.objects.filter(id=instance.node_id).values_list("operating_system", flat=True).first()
+            text = str(os_value or "").strip().lower()
+            if text in {"linux", "windows"}:
+                operating_system = text
+        return WebUtils.response_success(
+            {
+                "monitor_object": {
+                    "id": monitor_object.id,
+                    "name": monitor_object.name,
+                    "display_name": monitor_object.display_name,
+                    "instance_id_keys": instance_id_keys,
+                },
+                "instance": {
+                    "instance_id": instance.id,
+                    "instance_name": instance.name or instance.id,
+                    "instance_id_values": list(parse_instance_id(instance.id)),
+                    "instance_id_keys": instance_id_keys,
+                    "cmdb_id": instance.cmdb_id or "",
+                    "node_id": instance.node_id or "",
+                    "operating_system": operating_system,
+                },
+            }
+        )
 
     @action(methods=["get"], detail=False, url_path="(?P<monitor_object_id>[^/.]+)/list")
     def monitor_instance_list(self, request, monitor_object_id):
@@ -220,13 +366,7 @@ class MonitorInstanceViewSet(viewsets.ViewSet):
             )
         )
 
-        qs = scope_permission_queryset(
-            MonitorInstance,
-            permission,
-            scope,
-            team_key="monitorinstanceorganization__organization__in",
-            id_key="id__in",
-        )
+        qs = _monitor_catalog_queryset(request, permission, scope)
         page, page_size = parse_page_params(
             request.GET,
             default_page=1,
@@ -291,13 +431,7 @@ class MonitorInstanceViewSet(viewsets.ViewSet):
                 include_children=scope.include_children,
             )
         )
-        qs = scope_permission_queryset(
-            MonitorInstance,
-            permission,
-            scope,
-            team_key="monitorinstanceorganization__organization__in",
-            id_key="id__in",
-        )
+        qs = _monitor_catalog_queryset(request, permission, scope)
 
         search_obj = InstanceSearch(
             monitor_obj,
@@ -369,13 +503,7 @@ class MonitorInstanceViewSet(viewsets.ViewSet):
                 include_children=scope.include_children,
             )
         )
-        qs = scope_permission_queryset(
-            MonitorInstance,
-            permission,
-            scope,
-            team_key="monitorinstanceorganization__organization__in",
-            id_key="id__in",
-        )
+        qs = _monitor_catalog_queryset(request, permission, scope)
 
         search_obj = InstanceSearch(
             monitor_obj,

@@ -1,7 +1,6 @@
 Wireless Cambium SNMP:
   name: Wireless Cambium SNMP
-  desc: SNMP monitoring template for Cambium wireless device. It reports system uptime,
-    per-port inbound traffic rate, and per-port outbound traffic rate
+  desc: "SNMP monitoring template for Cambium wireless device. It reports uptime, CPU utilization, interface traffic, and wireless clients/radio (enterprise PEN 17713)."
 monitor_object:
   Wireless: Wireless
 monitor_object_type:
@@ -55,6 +54,9 @@ monitor_object_metric:
         with no scaling. Only models equipped with a temperature sensor report a real
         value; fanless access points return 0. High temperatures can indicate cooling
         failure or poor airflow and risk thermal shutdown.
+    wireless_cambium_sta_count:
+      name: Connected Station Count
+      desc: Optional ePMP AP connected-station count.
 monitor_object_metric_group:
   Wireless:
     Base: Base

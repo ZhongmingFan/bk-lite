@@ -27,9 +27,17 @@ from apps.operation_analysis.serializers.directory_serializers import (
     ScreenModelSerializer,
     TopologyModelSerializer,
 )
+from apps.operation_analysis.services.canvas.copy_service import copy_canvas
 from apps.operation_analysis.services.directory_service import DictDirectoryService
 from apps.operation_analysis.services.share_service import SharePermissionDenied, create_or_get_share
+from apps.operation_analysis.services.user_messages import oa_message
 from config.drf.pagination import CustomPageNumberPagination
+
+_BUILTIN_ACTION_KEYS = {
+    "修改": "messages.action_update",
+    "编辑": "messages.action_edit",
+    "删除": "messages.action_delete",
+}
 
 
 def _raise_if_builtin(instance, action_name="修改"):
@@ -37,7 +45,9 @@ def _raise_if_builtin(instance, action_name="修改"):
     if getattr(instance, "is_build_in", False):
         from rest_framework.exceptions import PermissionDenied
 
-        raise PermissionDenied(f"内置对象不允许{action_name}")
+        action_key = _BUILTIN_ACTION_KEYS.get(action_name)
+        action = oa_message(action_key, action_name) if action_key else action_name
+        raise PermissionDenied(oa_message("messages.builtin_action_denied", "内置对象不允许{action}", action=action))
 
 
 def _raise_if_builtin_content_update(instance, request):
@@ -68,6 +78,32 @@ def _destroy_subscribable_canvas(viewset, request, *, resource_type: str, log_ac
     return response
 
 
+def _copy_canvas_response(viewset, request, *, log_action: str):
+    source = viewset.get_object()
+    instance = copy_canvas(viewset=viewset, request=request, source=source)
+    response = Response(viewset.get_serializer(instance).data, status=201)
+    log_ops_analysis_success(request, response, "create", log_action.format(name=instance.name))
+    return response
+
+
+_SHARE_DENIED_MESSAGES = {
+    "dashboard": ("messages.share_denied_dashboard", "无权分享该仪表盘"),
+    "topology": ("messages.share_denied_topology", "无权分享该拓扑图"),
+    "architecture": ("messages.share_denied_architecture", "无权分享该架构图"),
+    "screen": ("messages.share_denied_screen", "无权分享该大屏"),
+    "report": ("messages.share_denied_report", "无权分享该报表"),
+    "networkTopology": ("messages.share_denied_network_topology", "无权分享该网络拓扑"),
+}
+
+
+def _share_denied_message(resource_type, resource_label):
+    mapped = _SHARE_DENIED_MESSAGES.get(resource_type)
+    if mapped is None:
+        return f"无权分享该{resource_label}"
+    key, default = mapped
+    return oa_message(key, default)
+
+
 def _create_canvas_share_response(viewset, request, *, resource_type, resource_label):
     from rest_framework.exceptions import PermissionDenied
 
@@ -92,7 +128,7 @@ def _create_canvas_share_response(viewset, request, *, resource_type, resource_l
             result="reject",
             reason="permission_denied",
         )
-        raise PermissionDenied(f"无权分享该{resource_label}") from exc
+        raise PermissionDenied(_share_denied_message(resource_type, resource_label)) from exc
     response = Response(
         {
             "id": result.link.id,
@@ -151,7 +187,7 @@ def _build_validation_error_response(error):
 
     message = detail.get("detail")
     if isinstance(message, list):
-        message = message[0] if message else "请求失败"
+        message = message[0] if message else oa_message("messages.request_failed", "请求失败")
 
     return Response({"detail": str(message), "data": detail.get("data")}, status=400)
 
@@ -336,6 +372,13 @@ class DashboardModelViewSet(BuiltinVisibleMixin, AuthViewSet):
             resource_label="仪表盘",
         )
 
+    @HasPermission("view-AddChart")
+    @action(detail=True, methods=["post"], url_path="copy")
+    def copy(self, request, *args, **kwargs):
+        return _execute_with_clean_validation_error(
+            lambda: _copy_canvas_response(self, request, log_action="复制仪表盘: {name}"),
+        )
+
 
 class TopologyModelViewSet(BuiltinVisibleMixin, AuthViewSet):
     """
@@ -401,6 +444,13 @@ class TopologyModelViewSet(BuiltinVisibleMixin, AuthViewSet):
             request,
             resource_type="topology",
             resource_label="拓扑图",
+        )
+
+    @HasPermission("view-AddChart")
+    @action(detail=True, methods=["post"], url_path="copy")
+    def copy(self, request, *args, **kwargs):
+        return _execute_with_clean_validation_error(
+            lambda: _copy_canvas_response(self, request, log_action="复制拓扑图: {name}"),
         )
 
 
@@ -470,6 +520,13 @@ class ArchitectureModelViewSet(BuiltinVisibleMixin, AuthViewSet):
             resource_label="架构图",
         )
 
+    @HasPermission("view-AddChart")
+    @action(detail=True, methods=["post"], url_path="copy")
+    def copy(self, request, *args, **kwargs):
+        return _execute_with_clean_validation_error(
+            lambda: _copy_canvas_response(self, request, log_action="复制架构图: {name}"),
+        )
+
 
 class CanvasModelViewSet(BuiltinVisibleMixin, AuthViewSet):
     """
@@ -537,6 +594,13 @@ class CanvasModelViewSet(BuiltinVisibleMixin, AuthViewSet):
             request,
             resource_type=self.share_resource_type,
             resource_label=self.canvas_label,
+        )
+
+    @HasPermission("view-AddChart")
+    @action(detail=True, methods=["post"], url_path="copy")
+    def copy(self, request, *args, **kwargs):
+        return _execute_with_clean_validation_error(
+            lambda: _copy_canvas_response(self, request, log_action=f"复制{self.canvas_label}: {{name}}"),
         )
 
 

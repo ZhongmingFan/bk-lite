@@ -1,7 +1,6 @@
 Access FiberHome OLT SNMP:
   name: Access FiberHome OLT SNMP
-  desc: SNMP monitoring template for FiberHome OLT access device. It reports per-port
-    inbound traffic rate, per-port outbound traffic rate, and system uptime
+  desc: "SNMP monitoring template for FiberHome OLT access device. It reports uptime, CPU utilization, memory utilization, and interface traffic, for FiberHome OLT and GPON access devices (enterprise PEN 5875)."
 monitor_object:
   Access: Access
 monitor_object_type:

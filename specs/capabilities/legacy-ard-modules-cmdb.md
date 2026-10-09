@@ -19,7 +19,7 @@
 | NodeMgmtSyncConfig / NodeMgmtSyncRun | `models/node_mgmt_sync.py:7,22` | 节点管理同步配置与运行记录（两个独立模型） |
 | CollectTaskCredentialHit | `models/collect_task_credential_hit.py` | 采集任务凭据使用审计 |
 | IPAMReconcileSource | `models/ipam_models.py:7` | IPAM 自动对账来源登记表，记录参与对账的 `(model_id, ip_attr_id)`，默认由迁移预置 `host.ip_addr` 与 `network.ip` |
-| ScanTask / ScanExecution / ScanFamilyRun / ScanHit | `models/scan_model.py:39,115,148,177` | 网段扫描任务、执行、家族运行与命中；任务勾选 `network/host/physcial_server/database/influxdb`（读取旧 mysql/postgresql/mssql 合并为 database）；触发时 database 按端口指纹拆 mysql/postgresql/mssql 三枪；网段前缀下限 /21 |
+| ScanTask / ScanExecution / ScanFamilyRun / ScanHit | `models/scan_model.py:39,115,148,177` | 网段扫描任务、执行、家族运行与命中；任务勾选 `network/host/physcial_server/database/middleware/influxdb`（读取旧 mysql/postgresql/mssql 合并为 database）；触发时 database 按端口指纹拆 mysql/postgresql/mssql 三枪，协议族一次接纳，JOB 族（主机/中间件）按执行 `schedule` 切批排队；`ScanFamilyRun` 以 `(execution, model_id, driver_type, batch_index)` 区分同模型多批；网段前缀下限 /21。中间件收口可按 VM `listen_port` 拆行，但 JOB success 命中不得因指标尚未可读而删除（`scan_finalize_service.explode_middleware_hits`）；路径字段晚到时由 `enrich_scan_middleware_snapshots` 异步补齐 snapshot |
 
 **存储**：PostgreSQL（ORM）；**Neo4j / FalkorDB**（关系图谱，驱动实现 `graph/{neo4j,falkordb}.py`，运行期由 `graph/drivers/graph_client.py:46-52` 按环境变量 `FALKORDB_HOST` 动态二选一——设置则用 FalkorDB，否则回落 Neo4j，并非两者并存【已实现/已存在】）；Neo4j 搜索/过滤路径已参数化（`graph/neo4j.py:10,301`，引入 `FORMAT_TYPE_PARAMS + ParameterCollector`，`format_search_params/format_final_params` 返回 `(params_str, query_params)` 元组并以 `session.run(**query_params)` 执行，权限过滤条件同步参数化，该路径的 Cypher 注入风险已消除【已实现/已存在】；但写入与按 id 取详情等路径仍为 f-string 拼接、未参数化——`create_entity` `CREATE (n:{label} {properties_str})`（`:197`）、`MATCH (n) WHERE id(n) = {id}`（`:408`），属局部加固而非全面消除【已实现/待确认风险】）；MinIO（配置文件，`cmdb-config-file` bucket）；VictoriaMetrics（K8s 指标查询，`collection/query_vm.py`）。
 
@@ -65,7 +65,7 @@
 | `GET instance/room_layout/<model_id>/<inst_id>` | `InstanceViewSet.room_layout` | 机房俯视平面图：返回该机房下机柜的 row/col/类型/U 占用率供前端布局渲染 |
 | `GET instance/rack_layout/<model_id>/<inst_id>` | `InstanceViewSet.rack_layout` | 机柜正视 U 图：返回机柜总 U 数及其 contains 设备的 U 位排布 |
 | `POST instance/ipam_reconcile` | `InstanceViewSet.ipam_reconcile` | 手动触发一次 IPAM 与 CMDB 自动对账，内部调用 `services/ipam_reconcile.run_reconciliation` |
-| 3D 机房大屏数据源（**非 ViewSet REST 端点**）【已实现/已存在】：运营分析 3D 大屏组件通过内置数据源 `cmdb/get_room3d_layout`（注册于 `server/apps/operation_analysis/support-files/source_api.json:406`，`rest_api` 类型，`chartType: room3D`）消费 CMDB NATS `get_room3d_layout`（`nats/nats.py:951`），由通用取数器按 path 动态解析调用，不在 ViewSet 路由表内 |
+| 3D 机房大屏场景取数（**非 ViewSet REST 数据源**）【已实现/已存在】：运营分析 3D 机房是 Screen-only 自取数场景组件，经 `scene_widgets/room3d` 包装 CMDB NATS `get_room_list` / `get_room3d_layout`（`nats/nats.py`），不再注册用户可选内置数据源 |
 
 **instance / collect 路由组增量端点**【已实现/已存在】：
 | 端点 | 方法 | 说明 |
@@ -88,7 +88,7 @@
   - **实例 CRUD / 显示字段**：`update_instance`(:396)、`sync_display_fields`(:736)。
   - **采集结果回传（Stargazer→CMDB）**：`receive_config_file_result`(:696，配置文件落库为 ConfigFileVersion)、`receive_collect_credential_result`(:711，凭据探测命中)。**注：原 `receive_ip_discovery_result` handler 已下线，IP 发现结果回写由服务层 `services/ipam_discovery.py:205` `apply_discovery_result`（落库 `ip` 台账并更新在线/离线状态）与 `:299` `apply_ip_discovery_vm_rows`（回写 VictoriaMetrics 离线 IP 行）协同完成。**
   - **运营分析统计取数**：`get_cmdb_statistics`(:758)、`get_change_trend`(:887)、`get_instance_group_by`(:960)、`get_model_inst_statistics`(:1024)、`get_cmdb_model_instance_top`(:1075)、`get_cmdb_collect_statistics`(:1120)。
-  - **机房 3D 布局取数**【已实现/已存在】：`get_room3d_layout` 返回机房的 row/col 网格、U 占用与设备摘要；payload 中 `rack_type`（`datacenter_type` 枚举 id）解析为可读名称 `rack_type_name`（无值时不带该字段）；已上架设备附加告警摘要字段 `monitor_bound` / `alarm_unavailable` / `active_alarm_count` / `highest_severity`（经 Monitor `query_active_alert_summaries_by_monitor_ids`，不下发 `monitor_id`；告警失败软降级）。`rack_id`/`rack_name` 取自 `item['rack_id']` / `item['rack_name']`（`instance_name` 缺失时 fallback 到 `rack_id`）。
+  - **机房 3D 布局取数**【已实现/已存在】：`get_room3d_layout` 返回机房的 row/col 网格、U 占用与设备摘要；payload 中 `rack_type`（`datacenter_type` 枚举 id）解析为可读名称 `rack_type_name`（无值时不带该字段），`rack_state`（`datacenter_state` 枚举 id）解析为可读名称 `rack_state_name`（无值时不带该字段）；已上架设备附加告警摘要字段 `monitor_bound` / `alarm_unavailable` / `active_alarm_count` / `highest_severity`（经 Monitor `query_active_alert_summaries_by_monitor_ids`，不下发 `monitor_id`；告警失败软降级）。`rack_id`/`rack_name` 取自 `item['rack_id']` / `item['rack_name']`（`instance_name` 缺失时 fallback 到 `rack_id`）。
   - **实例/模型/关联通用查询与 CRUD（对外 RPC 供数与维护）**【已实现/已存在】（`nats/nats.py:453-679`，供跨模块经 RPC 调用）：
     | handler | 行号 | 说明 |
     |---------|------|------|
@@ -105,7 +105,7 @@
 - **RPC 客户端**（`apps/rpc/cmdb.py:44-94`）：为上述第五类 NATS handler 中的 8 个新增 RPC 包装方法供跨模块调用：`list_instances`、`search_model_attrs`、`search_models`、`search_classifications`、`search_model_associations`、`search_instance_associations`、`create_instance_association`、`delete_instance_association`；`search_instances`/`search_instances_batch` 为原有包装方法。注意：第五类 NATS handler 中的 `create_instance`、`delete_instance` 暂无对应 RPC 包装方法，仅可经 NATS 主题直接调用【已实现/已存在】。
 - Celery：`tasks/celery_tasks.py` 注册 14 个 `@shared_task`，详见 §5。
 
-**主机跨模块联动**【已实现】：CMDB、监控与节点管理以包含三方关联标识的联动信封进行双向接入。CMDB 接收端优先按节点标识更新，未命中时才认领或新建，并拒绝在存量认领时用另一节点标识覆盖既有关联；监控接收端分别按节点和 CMDB 标识匹配，两类标识命中不同实例时返回冲突。CMDB 主机创建后以尽力而为方式通知节点管理和监控并回填已建立的关联；用户亦可在具备资产编辑权限时显式将单个资产推送至监控。CMDB 主机删除或监控实例删除时，CMDB 侧仅清理相应关联标识；节点退役时，CMDB 侧解除关联，而监控侧会停用并软删除关联监控实例。携带来源链路的回传被抑制，避免循环通知。相关模块：[[legacy-ard-modules-monitor.md#5. 数据流【已实现/已存在】]]、[[legacy-ard-modules-node-mgmt.md#4. 通信机制【已实现/已存在】]]。
+**主机跨模块联动**【已实现】：CMDB、监控与节点管理以包含三方关联标识的联动信封进行双向接入。CMDB 接收端优先按节点标识更新，未命中时才认领或新建，并拒绝在存量认领时用另一节点标识覆盖既有关联；监控接收端分别按节点和 CMDB 标识匹配，两类标识命中不同实例时返回冲突。CMDB 主机创建后以尽力而为方式通知节点管理和监控并回填已建立的关联；其它已纳入监控关联名单的模型（网络设备、库、中间件、Docker 等）创建时同样无凭据探测监控，命中则回填 `monitor_id`，未命中或冲突则跳过且不阻断创建、不向用户报错。用户亦可在具备资产编辑权限时显式将单个资产推送至监控。资产列表可对勾选实例批量走同一无凭据推送（已关联跳过、整批不回滚、上限 100）；详情可按监控实例名手绑 / 解绑，占用则拒绝并提示占用方，不删监控资产、不动 `node_id`。CMDB 主机删除或监控实例删除时，CMDB 侧仅清理相应关联标识；节点退役时，CMDB 侧解除关联，而监控侧会停用并软删除关联监控实例。携带来源链路的回传被抑制，避免循环通知。相关模块：[[legacy-ard-modules-monitor.md#5. 数据流【已实现/已存在】]]、[[legacy-ard-modules-node-mgmt.md#4. 通信机制【已实现/已存在】]]。
 
 > 证据来源：server/apps/cmdb/services/module_ingest.py:254-400，server/apps/cmdb/services/module_ingest.py:403-494，server/apps/cmdb/services/module_push.py:82-152，server/apps/cmdb/services/module_push.py:349-437，server/apps/cmdb/views/instance.py:335-369　|　同步基线：d2769559　|　【已实现】
 
@@ -136,7 +136,7 @@
 | `reconcile_ipam_task` | :372 | 周期执行 IPAM 与 CMDB 自动对账，调用 `services/ipam_reconcile.run_reconciliation` |
 
 ### 主机联动与节点管理同步【已实现】
-主机资产联动为事件推送：节点管理或监控可将主机状态和关联标识写入 CMDB，CMDB 创建主机后会通知两端并回填其建立的关联；显式推送仅面向监控。联动路径保留组织范围和操作人上下文，且以来源链路抑制回声。节点管理拉同步默认打开，与节点→CMDB 推送共用 `node_id` → ip+cloud 认实体，主机实例名为 `{ip}[{云区域}]`，禁止双建。节点删除或拉同步发现 sidecar 节点已从源侧消失时，只清 host 上的 `node_id`，不删实例。`node_id`/`monitor_id` 对用户不可编辑；内部 `skip_permission_check` 写路径必须仍能写入或清空这两个系统联动字段。产品行为见 [[legacy-prd-cmdb-资产.md#3.12 跨模块主机联动]] 与 `specs/changes/cmdb-node-mgmt-sync-shared-identity/spec.md`。
+主机资产联动为事件推送：节点管理或监控可将主机状态和关联标识写入 CMDB，CMDB 创建主机后会通知两端并回填其建立的关联；显式推送仅面向监控。联动路径保留组织范围和操作人上下文，且以来源链路抑制回声。节点管理拉同步默认打开，与节点→CMDB 推送共用 `node_id` → ip+cloud 认实体，禁止双建。联动新建主机时实例名默认为 `{ip}[{云区域}]`；更新时若 IP 与云区域未变则保留用户自定义实例名，任一变化则刷新为新的 `{ip}[{云区域}]`。该规则同时作用于 CMDB 接收节点管理/监控的 ingest 入口与节点管理拉同步。监控侧规范主键占用时回收同对象行，认领或新建后把 `monitor_id` 写回 CMDB，避免「监控空壳有外联、CMDB 无监控 ID」的单向指针。节点删除或拉同步发现 sidecar 节点已从源侧消失时，只清 host 上的 `node_id`，不删实例。`node_id`/`monitor_id` 对用户不可编辑；内部 `skip_permission_check` 写路径必须仍能写入或清空这两个系统联动字段。产品行为见 [[legacy-prd-cmdb-资产.md#3.12 跨模块主机联动]] 与 `specs/changes/cmdb-node-mgmt-sync-shared-identity/spec.md`。
 
 > 证据来源：server/apps/cmdb/services/module_push.py:43-79，server/apps/cmdb/services/module_push.py:82-152，server/apps/cmdb/services/host_sync_identity.py，server/apps/cmdb/services/node_mgmt_sync_service.py　|　【已实现】
 
@@ -173,7 +173,7 @@
 - `[cmdb#20260701-005]` 补录模型初始化、OID 初始化、字段分组初始化、`_display` 字段初始化等管理命令入口。
 
 ## 2026-07-09 Code-ARD 校准
-- `[cmdb#20260709-001]` NATS `get_room3d_layout` payload 增 `rack_type_name` 字段：依据 `rack` 模型 `datacenter_type` 枚举属性将 id 解析为可读名称（计算/网络/存储/安全/其他/未分类），无值时不带该字段。消费方为运营分析 3D 大屏 `web/src/app/ops-analysis/components/widgets/room3D/`（数据源 `cmdb/get_room3d_layout` 注册于 `server/apps/operation_analysis/support-files/source_api.json:406`）。
+- `[cmdb#20260709-001]` NATS `get_room3d_layout` payload 增 `rack_type_name` 字段：依据 `rack` 模型 `datacenter_type` 枚举属性将 id 解析为可读名称（计算/网络/存储/安全/其他/未分类），无值时不带该字段。消费方为运营分析 3D 大屏 `web/src/app/ops-analysis/components/widgets/room3D/`。后续于 `20260921-001` 改为场景接口包装，不再注册用户可选数据源。
 - `[cmdb#20260709-002]` `get_room3d_layout` 中 `rack_id`/`rack_name` 来源统一为 `item['rack_id']` / `item['rack_name']`（`instance_name` 缺失时 fallback 到 `rack_id`），并配套新增 `test_get_room3d_layout_falls_back_to_rack_id_when_name_missing`、`test_get_room3d_layout_returns_rack_type_name_from_cmdb_enum` 两个测试。
 - `[cmdb#20260709-003]` 双向校验修订：`InstanceViewSet.room3d_layout` REST 端点**不存在**（3D 数据走内置数据源 rest_api，不在 ViewSet 路由表内）；NATS `receive_ip_discovery_result` handler 与 `services.ipam_discovery.maybe_dispatch_ip_discovery` 函数**已下线**（功能下沉到 `services/ipam_discovery.py:205,299` 服务层直连 Stargazer 回调）。spec 删除相关端点行，证据行按代码当前位置刷新。
 
@@ -184,5 +184,9 @@
 
 - `[cmdb#20260907-001]` 新增 NATS `network_topology_among_uuids`：入参 `inst_uuids` + `user_info`，按模型构建 permission_map，调用 `InstanceManage.network_topology_among_uuids`。无权 / 非网络设备 / 非法 UUID / 超上限 / 闭集不完整一律 `{result: False, data: {nodes:[], links:[]}}`，不返回空成功图。RPC 包装：`apps.rpc.cmdb.CMDB.network_topology_among_uuids`。消费方为运营分析网络状态拓扑场景。
 
+## 2026-09-21 Code-ARD 校准
+- `[cmdb#20260921-002]` `get_room3d_layout` payload 增 `rack_state` / `rack_state_name`：依据 `rack` 模型 `datacenter_state` 枚举属性将 id 解析为可读名称（启用/停用），无值时不带 `rack_state_name`。消费方为运营分析 3D 机房机柜顶显示。
+- `[cmdb#20260921-001]` 运营分析 3D 机房改为 Screen-only 自取数场景组件，经 `scene_widgets/room3d` 包装 NATS `get_room_list` / `get_room3d_layout`；用户侧内置数据源「CMDB 3D机房布局」「CMDB 机房列表」下架。NATS handler 本身不变。
+
 ## 7. 证据来源
-`server/apps/cmdb/{urls.py,models/*,models/ipam_models.py:7,graph/*,graph/neo4j.py,graph/drivers/graph_client.py,collection/*,collection/collect_plugin/oceanstor.py,constants/constants.py,tasks/celery_tasks.py:72-74,397,408,nats/nats.py:696,711,942-949,952-1050,services/rack_room.py,services/ipam_*.py,services/ipam_discovery.py:205,299,services/ipam_reconcile.py,utils/ipam_cidr.py,node_configs/network_config_file.py:5-63,views/collect.py:66-68,views/instance.py:1145,1190,1212,1282,management/commands/{model_init.py:7,init_oid.py:11,init_field_groups.py:15,init_display_fields.py:24},support-files/model_config.xlsx}`、`server/apps/operation_analysis/support-files/source_api.json:406`（3D 机房数据源 `cmdb/get_room3d_layout` 注册）；`server/apps/rpc/cmdb.py:44-94`。
+`server/apps/cmdb/{urls.py,models/*,models/ipam_models.py:7,graph/*,graph/neo4j.py,graph/drivers/graph_client.py,collection/*,collection/collect_plugin/oceanstor.py,constants/constants.py,tasks/celery_tasks.py:72-74,397,408,nats/nats.py:696,711,942-949,952-1050,services/rack_room.py,services/ipam_*.py,services/ipam_discovery.py:205,299,services/ipam_reconcile.py,utils/ipam_cidr.py,node_configs/network_config_file.py:5-63,views/collect.py:66-68,views/instance.py:1145,1190,1212,1282,management/commands/{model_init.py:7,init_oid.py:11,init_field_groups.py:15,init_display_fields.py:24},support-files/model_config.xlsx}`、`server/apps/operation_analysis/services/room3d.py`（包装 CMDB NATS `get_room_list` / `get_room3d_layout`）；`server/apps/rpc/cmdb.py`。

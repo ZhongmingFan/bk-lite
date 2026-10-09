@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from typing import Literal
 
 from langchain_core.callbacks import adispatch_custom_event, dispatch_custom_event
 from langchain_core.runnables import RunnableConfig
@@ -12,6 +13,9 @@ from pydantic import Field as PydanticField
 
 from apps.core.logger import opspilot_logger as logger
 from apps.opspilot.metis.llm.chain.k8s_report_tools import build_a2ui_report_contract
+from apps.opspilot.metis.llm.chain.nested_stream import publish_owned_custom_event
+from apps.opspilot.metis.llm.tools.common.user_choice_guard import validate_user_choice_options
+from apps.opspilot.metis.llm.tools.kubernetes.user_choice_guard import build_kubernetes_cluster_choice_guard
 from apps.opspilot.services.approval import wait_for_approval
 from apps.opspilot.utils.user_choice import wait_for_choice
 
@@ -83,32 +87,28 @@ class ApprovalToolsMixin:
 
     def _build_choice_tool(self):
         """构建 request_user_choice 工具，供 LLM 需要向用户提问时调用"""
-        from typing import List, Literal, Optional
-
-        from langchain_core.tools import StructuredTool
-        from pydantic import BaseModel as PydanticBaseModel
-        from pydantic import Field as PydanticField
 
         class AskUserInput(PydanticBaseModel):
             question: str = PydanticField(description="完整的一句问句，具体、引用用户原话或当前上下文里的关键词。脱离上下文用户也能看懂。")
             question_type: Literal["single_select", "multi_select", "confirm", "text"] = PydanticField(
                 description="single_select=N选1; multi_select=N选若干; confirm=是/否; text=开放式输入"
             )
-            options: Optional[List[str]] = PydanticField(
+            options: list[str] | None = PydanticField(
                 default=None,
-                description="single_select/multi_select 必填，2~4项，每项不超40字符。confirm/text 必须为 None。",
+                description="single_select/multi_select 必填，选项必须来自真实查询结果，至少 2 项；类型很多时也要全部放入，前端会显示下拉框。confirm/text 必须为 None。禁止用纯文本列出选项。",
             )
 
         async def _ask_user(
             question: str,
             question_type: str,
-            options: Optional[List[str]] = None,
+            options: list[str] | None = None,
             config: RunnableConfig = None,
         ) -> str:
-            from apps.opspilot.metis.llm.tools.common.user_choice_guard import validate_user_choice_options
-            from apps.opspilot.metis.llm.tools.kubernetes.user_choice_guard import build_kubernetes_cluster_choice_guard
-
-            configurable = getattr(_ask_user, "_configurable", {}) or {}
+            configurable = {}
+            if isinstance(config, dict):
+                configurable = dict(config.get("configurable") or {})
+            if not configurable:
+                configurable = dict(getattr(_ask_user, "_configurable", {}) or {})
             guard = build_kubernetes_cluster_choice_guard(
                 question=question,
                 options=options,
@@ -124,8 +124,10 @@ class ApprovalToolsMixin:
                 return guard_message
 
             choice_id = str(uuid.uuid4())[:8]
-            execution_id = getattr(_ask_user, "_execution_id", "") or str(int(time.time() * 1000))
-            node_id = getattr(_ask_user, "_node_id", "skill_test")
+            execution_id = (
+                str(configurable.get("execution_id") or "").strip() or getattr(_ask_user, "_execution_id", "") or str(int(time.time() * 1000))
+            )
+            node_id = str(configurable.get("node_id") or "").strip() or getattr(_ask_user, "_node_id", "") or "skill_test"
 
             # Convert to internal options format based on question_type
             if question_type == "confirm":
@@ -167,17 +169,40 @@ class ApprovalToolsMixin:
                 "display_hint": "text" if question_type == "text" else "auto",
             }
 
-            # 深 agent 包装节点里 sync dispatch 可能因缺 parent run id 静默失败；
-            # 优先 adispatch，保证修复闭环的选择卡一定能推到前端。
-            try:
-                await adispatch_custom_event("user_choice_request", choice_request_data, config=config)
-            except Exception:
+            published = publish_owned_custom_event(config, "user_choice_request", choice_request_data)
+            if not published:
                 try:
-                    dispatch_custom_event("user_choice_request", choice_request_data, config=config)
+                    await adispatch_custom_event("user_choice_request", choice_request_data, config=config)
+                    published = True
                 except Exception:
-                    pass
+                    try:
+                        dispatch_custom_event("user_choice_request", choice_request_data, config=config)
+                        published = True
+                    except Exception:
+                        published = False
+            if published:
+                logger.info("[choice_tool] 提问已发射: question=%s, type=%s, id=%s", question[:50], question_type, choice_id)
+            else:
+                logger.warning("[choice_tool] 提问未送达前端: question=%s, type=%s, id=%s", question[:50], question_type, choice_id)
 
-            logger.info(f"[choice_tool] 提问已发射: question={question[:50]}, " f"type={question_type}, id={choice_id}")
+            # QA batch only: OPSPILOT_QA_AUTO_CHOICE=1 resolves HITL with defaults (prefer Host).
+            import os as _os_qa
+
+            _qa_auto = _os_qa.getenv("OPSPILOT_QA_AUTO_CHOICE", "").strip().lower() in {"1", "true", "yes"}
+            _wait_trigger = "interactive"
+            if _qa_auto:
+                _wait_trigger = "unattended"
+                for _o in options_data:
+                    _k = str(_o.get("key") or "").strip()
+                    _kl = _k.lower()
+                    if _kl in {"host", "主机"} or "host" in _kl:
+                        default_keys = [_k]
+                        break
+                logger.info(
+                    "[choice_tool] QA_AUTO_CHOICE unattended default_keys=%s options=%s",
+                    default_keys,
+                    [o.get("key") for o in options_data],
+                )
 
             result = await wait_for_choice(
                 execution_id=execution_id,
@@ -187,7 +212,7 @@ class ApprovalToolsMixin:
                 default_keys=default_keys,
                 timeout_seconds=120,
                 poll_interval=1.0,
-                trigger_type="interactive",
+                trigger_type=_wait_trigger,
             )
 
             selected = result["selected"]
@@ -201,13 +226,14 @@ class ApprovalToolsMixin:
                 "selected": selected,
                 "source": source,
             }
-            try:
-                await adispatch_custom_event("user_choice_result", result_payload, config=config)
-            except Exception:
+            if not publish_owned_custom_event(config, "user_choice_result", result_payload):
                 try:
-                    dispatch_custom_event("user_choice_result", result_payload, config=config)
+                    await adispatch_custom_event("user_choice_result", result_payload, config=config)
                 except Exception:
-                    pass
+                    try:
+                        dispatch_custom_event("user_choice_result", result_payload, config=config)
+                    except Exception:
+                        pass
 
             # Build response text for LLM
             if question_type == "text":
@@ -235,7 +261,9 @@ class ApprovalToolsMixin:
                 "1. 存在多个目标/实例且用户未明确指定范围时（必须先通过搜索/查询工具确认有多个结果，再让用户选择。不能跳过查询直接问）\n"
                 "2. 请求存在多种合理解读，选错会导致返工\n"
                 "3. 需要只有用户掌握的信息（偏好、业务规则、场景背景）\n"
-                "4. 任务完成后让用户选择下一步操作\n\n"
+                "4. 任务完成后让用户选择下一步操作\n"
+                "5. 工具因缺少必填参数失败（Missing parameters / is required）时，立刻用选项问用户补全；禁止编造 uvx/CLI 替代方案\n"
+                "6. 监控查询只给了实例名、未说明是主机/K8s Pod/中间件时，先 monitor_list_objects，再用真实对象类型名问用户；禁止按名称形态猜测类型\n\n"
                 "━━━ 禁止调用的场景 ━━━\n"
                 "A. 自己能查到答案的不要问（用工具查）\n"
                 "B. 用户原始消息里已经给过约束的不要再问\n"
@@ -246,7 +274,7 @@ class ApprovalToolsMixin:
                 "G. 用户没有提出 K8s/技术操作需求时，不要主动问是否要做检查\n\n"
                 "━━━ 参数选择 ━━━\n"
                 "能让用户点按钮就别让用户打字。\n"
-                "- single_select: N选1，options 2~4项\n"
+                "- single_select: N选1，options 必须来自查询结果；类型很多时也全部放入，不要截成 2~4 项\n"
                 "- multi_select: N选若干\n"
                 "- confirm: 是/否（options 设为 None）\n"
                 "- text: 开放式输入（options 设为 None）\n\n"

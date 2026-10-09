@@ -1,16 +1,26 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
-import { Input, Tooltip, Tree } from "antd";
+import { Button, Input, Popconfirm, Tree } from "antd";
 import type { DataNode as TreeDataNode } from "antd/lib/tree";
+import { DeleteOutlined } from "@ant-design/icons";
 import { useTranslation } from "@/utils/i18n";
+import PermissionWrapper from "@/components/permission";
 import type {
   KnowledgePage,
   WikiDirectoryNode,
 } from "@/app/opspilot/types/wiki";
+import {
+  canDeleteKnowledgeDirectory,
+  isMaterialsRootDirectory,
+  parseWikiTreeSelection,
+  wikiMaterialTreeKey,
+  wikiPageTreeKey,
+} from "@/app/opspilot/utils/wikiDirectoryTreeOps";
+import { useImeSafeSearchInput } from "@/app/opspilot/utils/imeKeyboard";
+import { formatWikiDirectoryLabel } from "./wikiFormat";
 
 const directoryKey = (id: number) => `directory:${id}`;
-const pageKey = (id: number) => `page:${id}`;
 
 export interface WikiTreePageItem {
   id: number;
@@ -19,27 +29,45 @@ export interface WikiTreePageItem {
   directory: number | null;
 }
 
+export interface WikiTreeMaterialItem {
+  id: number;
+  name: string;
+}
+
 interface WikiDirectoryTreeProps {
   directories: WikiDirectoryNode[];
   pages: WikiTreePageItem[];
+  materials?: WikiTreeMaterialItem[];
   unclassifiedDirectoryId: number | null;
   selectedPageId: number | null;
+  selectedMaterialId?: number | null;
   search: string;
   onSearchChange: (value: string) => void;
   onSelectPage: (pageId: number) => void;
+  onSelectMaterial?: (materialId: number) => void;
+  canMutate?: boolean;
+  onDeletePage?: (pageId: number) => void;
+  onDeleteDirectory?: (directoryId: number) => void;
 }
 
 const WikiDirectoryTree: React.FC<WikiDirectoryTreeProps> = ({
   directories,
   pages,
+  materials = [],
   unclassifiedDirectoryId,
   selectedPageId,
+  selectedMaterialId = null,
   search,
   onSearchChange,
   onSelectPage,
+  onSelectMaterial,
+  canMutate = false,
+  onDeletePage,
+  onDeleteDirectory,
 }) => {
   const { t } = useTranslation();
   const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([]);
+  const searchInput = useImeSafeSearchInput(search, onSearchChange);
 
   const pagesByDirectory = useMemo(() => {
     const map = new Map<number | null, WikiTreePageItem[]>();
@@ -70,49 +98,125 @@ const WikiDirectoryTree: React.FC<WikiDirectoryTreeProps> = ({
       return left.order - right.order || left.name.localeCompare(right.name);
     };
 
+    const stopTreeSelect = (event: React.MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+    };
+
+    const renderDeleteControl = (
+      confirm: string,
+      onConfirm: () => void,
+    ) => (
+      <PermissionWrapper requiredPermissions={["Edit"]}>
+        <Popconfirm
+          title={confirm}
+          disabled={!canMutate}
+          onConfirm={onConfirm}
+        >
+          <Button
+            type="text"
+            size="small"
+            danger
+            disabled={!canMutate}
+            icon={<DeleteOutlined />}
+            className="h-6 w-6 min-w-6 p-0 opacity-0 group-hover:opacity-100"
+            aria-label={t("common.delete")}
+            onMouseDown={stopTreeSelect}
+            onClick={stopTreeSelect}
+          />
+        </Popconfirm>
+      </PermissionWrapper>
+    );
+
     const toPageNode = (page: WikiTreePageItem): TreeDataNode => ({
-      key: pageKey(page.id),
+      key: wikiPageTreeKey(page.id),
       isLeaf: true,
       title: (
-        <Tooltip title={page.page_type || page.title} placement="right">
-          <span className="block truncate text-[13px] leading-5">
+        <span className="group flex min-w-0 items-center gap-1">
+          <span className="block min-w-0 flex-1 truncate text-[13px] leading-5">
             {page.title}
           </span>
-        </Tooltip>
+          {onDeletePage
+            ? renderDeleteControl(t("wiki.deletePageConfirm"), () => {
+              onDeletePage(page.id);
+            })
+            : null}
+        </span>
       ),
     });
 
+    const toMaterialNode = (material: WikiTreeMaterialItem): TreeDataNode => ({
+      key: wikiMaterialTreeKey(material.id),
+      isLeaf: true,
+      title: (
+        <span className="block min-w-0 truncate text-[13px] leading-5">
+          {material.name}
+        </span>
+      ),
+    });
+
+    const keyword = search.trim().toLowerCase();
+    const visibleMaterials = [...materials]
+      .filter((material) =>
+        !keyword || material.name.toLowerCase().includes(keyword),
+      )
+      .sort((left, right) => left.name.localeCompare(right.name, "zh"));
+
     const toTreeNode = (directory: WikiDirectoryNode): TreeDataNode => {
       const isUnclassified = directory.id === unclassifiedDirectoryId;
-      const label = isUnclassified
-        ? t("wiki.directoryUnclassified")
-        : directory.name;
+      const label = formatWikiDirectoryLabel(t, directory);
       const childDirectories = [...(directory.children || [])].sort(
         compareDirectories,
       );
       const childPages = pagesByDirectory.get(directory.id) || [];
+      const materialsRoot = isMaterialsRootDirectory(directory);
+      const materialItems = materialsRoot ? visibleMaterials : [];
+      const emptyMaterials =
+        materialsRoot &&
+        !keyword &&
+        materialItems.length === 0 &&
+        childDirectories.length === 0 &&
+        childPages.length === 0;
+
+      const showDirectoryDelete =
+        Boolean(onDeleteDirectory) &&
+        canDeleteKnowledgeDirectory(
+          directories,
+          directory,
+          unclassifiedDirectoryId,
+        );
 
       return {
         key: directoryKey(directory.id),
         selectable: false,
+        isLeaf: emptyMaterials,
+        className: emptyMaterials ? "wiki-materials-root-empty" : undefined,
         title: (
-          <Tooltip
-            title={
-              isUnclassified
-                ? t("wiki.directoryUnclassifiedTip")
-                : directory.description || label
-            }
-            placement="right"
-          >
-            <span className="block truncate text-[13px] font-medium leading-5 text-[var(--color-text-1)]">
-              {label}
+          <span className="group flex min-w-0 flex-col gap-0.5">
+            <span className="flex min-w-0 items-center gap-1">
+              <span className="block min-w-0 flex-1 truncate text-[13px] font-medium leading-5 text-[var(--color-text-1)]">
+                {label}
+              </span>
+              {showDirectoryDelete
+                ? renderDeleteControl(t("wiki.deleteDirectoryConfirm"), () => {
+                  onDeleteDirectory?.(directory.id);
+                })
+                : null}
             </span>
-          </Tooltip>
+            {emptyMaterials ? (
+              <span className="block text-[12px] font-normal leading-5 text-[var(--color-text-3)]">
+                {t("wiki.materialsRootEmpty")}
+              </span>
+            ) : null}
+          </span>
         ),
-        children: [
-          ...childDirectories.map(toTreeNode),
-          ...childPages.map(toPageNode),
-        ],
+        children: emptyMaterials
+          ? []
+          : [
+            ...childDirectories.map(toTreeNode),
+            ...materialItems.map(toMaterialNode),
+            ...childPages.map(toPageNode),
+          ],
       };
     };
 
@@ -122,7 +226,17 @@ const WikiDirectoryTree: React.FC<WikiDirectoryTreeProps> = ({
       ...[...directories].sort(compareDirectories).map(toTreeNode),
       ...orphanPages.map(toPageNode),
     ];
-  }, [directories, pagesByDirectory, t, unclassifiedDirectoryId]);
+  }, [
+    canMutate,
+    directories,
+    materials,
+    onDeleteDirectory,
+    onDeletePage,
+    pagesByDirectory,
+    search,
+    t,
+    unclassifiedDirectoryId,
+  ]);
 
   const defaultExpanded = useMemo(() => {
     const keys: React.Key[] = [];
@@ -140,7 +254,11 @@ const WikiDirectoryTree: React.FC<WikiDirectoryTreeProps> = ({
     expandedKeys.length > 0 ? expandedKeys : defaultExpanded;
 
   const selectedKeys =
-    selectedPageId !== null ? [pageKey(selectedPageId)] : [];
+    selectedMaterialId !== null
+      ? [wikiMaterialTreeKey(selectedMaterialId)]
+      : selectedPageId !== null
+        ? [wikiPageTreeKey(selectedPageId)]
+        : [];
 
   return (
     <aside className="flex h-full w-[260px] shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-bg-1)]">
@@ -152,10 +270,12 @@ const WikiDirectoryTree: React.FC<WikiDirectoryTreeProps> = ({
           allowClear
           enterButton
           size="small"
-          value={search}
+          value={searchInput.value}
           placeholder={`${t("common.search")}...`}
-          onChange={(event) => onSearchChange(event.target.value)}
-          onSearch={onSearchChange}
+          onChange={searchInput.onChange}
+          onCompositionStart={searchInput.onCompositionStart}
+          onCompositionEnd={searchInput.onCompositionEnd}
+          onSearch={searchInput.onSearch}
         />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
@@ -186,14 +306,16 @@ const WikiDirectoryTree: React.FC<WikiDirectoryTreeProps> = ({
             // 展开箭头保持中性色，不抢视觉
             "[&_.ant-tree-switcher]:text-[var(--color-text-3)]",
             "[&_.ant-tree-switcher]:flex [&_.ant-tree-switcher]:items-center [&_.ant-tree-switcher]:justify-center",
+            // 「来源」空说明不是页面，去掉树节点的可点态
+            "[&_.wiki-materials-root-empty>.ant-tree-node-content-wrapper]:cursor-default",
+            "[&_.wiki-materials-root-empty>.ant-tree-node-content-wrapper:hover]:!bg-transparent",
           ].join(" ")}
           onExpand={(keys) => setExpandedKeys(keys)}
           onSelect={(keys) => {
             if (!keys.length) return;
-            const key = String(keys[0]);
-            if (!key.startsWith("page:")) return;
-            const id = Number(key.replace("page:", ""));
-            if (Number.isInteger(id) && id > 0) onSelectPage(id);
+            const selected = parseWikiTreeSelection(String(keys[0]));
+            if (selected?.kind === "page") onSelectPage(selected.id);
+            if (selected?.kind === "material") onSelectMaterial?.(selected.id);
           }}
         />
       </div>

@@ -72,6 +72,41 @@ def test_instance_create(fake_graph, patch_side_effects):
 
 
 @pytest.mark.django_db
+def test_instance_create_notifies_peers_for_sync_models(fake_graph, patch_side_effects, monkeypatch):
+    fake_graph(
+        MODULE,
+        query_entity=([], 0),
+        create_entity={"_id": 9, "inst_uuid": HOST_UUID, "model_id": "mysql", "inst_name": "db1"},
+    )
+    seen = []
+
+    def _notify(result, *, operator, allowed_org_ids):
+        seen.append((result.get("model_id"), operator, list(allowed_org_ids or [])))
+        return {**result, "monitor_id": "m-mysql"}
+
+    monkeypatch.setattr(f"{MODULE}.InstanceManage._best_effort_notify_peers_on_host_create", _notify)
+    out = InstanceManage.instance_create("mysql", {"inst_name": "db1"}, "admin", allowed_org_ids=[1])
+    assert seen == [("mysql", "admin", [1])]
+    assert out["monitor_id"] == "m-mysql"
+
+
+@pytest.mark.django_db
+def test_instance_create_skips_peer_notify_for_non_sync_models(fake_graph, patch_side_effects, monkeypatch):
+    fake_graph(
+        MODULE,
+        query_entity=([], 0),
+        create_entity={"_id": 9, "inst_uuid": HOST_UUID, "model_id": "biz", "inst_name": "app1"},
+    )
+    monkeypatch.setattr(
+        f"{MODULE}.InstanceManage._best_effort_notify_peers_on_host_create",
+        lambda *a, **k: pytest.fail("非关联模型不得探监控"),
+    )
+    out = InstanceManage.instance_create("biz", {"inst_name": "app1"}, "admin", allowed_org_ids=[1])
+    assert out["_id"] == 9
+    assert "monitor_id" not in out or not out.get("monitor_id")
+
+
+@pytest.mark.django_db
 def test_instance_create_rejects_client_supplied_uuid(fake_graph, patch_side_effects):
     fake_graph(MODULE, query_entity=([], 0))
     with pytest.raises(BaseAppException, match="inst_uuid 是系统保留字段"):
@@ -197,6 +232,36 @@ def test_instance_update_ok(fake_graph, patch_side_effects):
     )
     out = InstanceManage.instance_update([{"id": 1}], ["admin"], 5, {"inst_name": "h2"}, "admin")
     assert out["inst_name"] == "h2"
+
+
+@pytest.mark.django_db
+def test_instance_update_heals_legacy_string_cloud(fake_graph, patch_side_effects):
+    graph = fake_graph(
+        MODULE,
+        query_entity_by_id={
+            "_id": 5,
+            "inst_uuid": HOST_UUID,
+            "model_id": "host",
+            "inst_name": "h1",
+            "organization": [1],
+            "cloud": "1",
+        },
+        query_entity=([], 0),
+        set_entity_properties=[
+            {
+                "_id": 5,
+                "inst_uuid": HOST_UUID,
+                "model_id": "host",
+                "inst_name": "h2",
+                "organization": [1],
+                "cloud": 1,
+            }
+        ],
+    )
+    InstanceManage.instance_update([{"id": 1}], ["admin"], 5, {"inst_name": "h2"}, "admin")
+    update_call = next(call for call in graph.calls if call[0] == "set_entity_properties")
+    assert update_call[1][2]["cloud"] == 1
+    assert update_call[1][2]["inst_name"] == "h2"
 
 
 @pytest.mark.django_db
@@ -543,10 +608,19 @@ def test_instance_association_by_asso_id_missing(fake_graph):
 
 @pytest.mark.django_db
 def test_fulltext_search(fake_graph, monkeypatch):
-    monkeypatch.setattr(f"{MODULE}.InstanceManage._build_permission_params", classmethod(lambda cls, pmap, creator="": ("", {})))
-    fake_graph(MODULE, full_text=[{"_id": 1, "inst_name": "h1", "model_id": "host"}])
+    monkeypatch.setattr(
+        f"{MODULE}.InstanceManage._build_permission_params",
+        classmethod(lambda cls, pmap, creator="": ("n.organization IN $list1", {"list1": [1]})),
+    )
+    graph = fake_graph(MODULE, full_text=[{"_id": 1, "inst_name": "h1", "model_id": "host"}])
     out = InstanceManage.fulltext_search(search="h", permission_map={1: {"inst_names": []}})
     assert len(out) == 1
+    name, _args, kwargs = next(call for call in graph.calls if call[0] == "full_text")
+    assert name == "full_text"
+    assert kwargs["permission_params"] == "n.organization IN $list1"
+    assert kwargs["inst_name_params"] == ""
+    assert kwargs["created"] == ""
+    assert kwargs["permission_params_dict"] == {"list1": [1]}
 
 
 @pytest.mark.django_db

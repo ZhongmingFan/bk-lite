@@ -138,8 +138,9 @@ export interface AssetDataFieldProps {
   propertyList: AttrFieldType[];
   userList: UserItem[];
   instDetail: InstDetail;
-  onsuccessEdit: () => void;
+  onsuccessEdit?: () => void;
   onSubscribe?: () => void;
+  readOnly?: boolean;
 }
 
 export interface InstDetail {
@@ -305,6 +306,7 @@ export interface AttrGroup {
   id: number;
   model_id: string;
   group_name: string;
+  display_name?: string;
   order: number;
   is_collapsed: boolean;
   description: string;
@@ -428,6 +430,7 @@ export interface FullInfoAttrItem {
 export interface FullInfoGroupItem {
   id: number;
   group_name: string;
+  display_name?: string;
   order: number;
   is_collapsed: boolean;
   description: string;

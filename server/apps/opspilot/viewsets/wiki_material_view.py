@@ -1,6 +1,6 @@
 from django.db import transaction
 from django.db.models import Case, IntegerField, Value, When
-from django.http import JsonResponse
+from django.http import FileResponse, JsonResponse
 from rest_framework.decorators import action
 
 from apps.core.decorators.api_permission import HasPermission
@@ -12,10 +12,12 @@ from apps.opspilot.serializers.wiki_serializers import BuildRecordSerializer, Ma
 from apps.opspilot.services.wiki.embedding_service import index_version, reindex_page_chunks
 from apps.opspilot.services.wiki.index_rebuild_service import rebuild_page_indexes
 from apps.opspilot.services.wiki.material_build_queue_service import MaterialBuildQueueError, enqueue_material_builds
+from apps.opspilot.services.wiki.material_file_persist import STORAGE_UNAVAILABLE_MESSAGE, MaterialStorageError, persist_new_material
 from apps.opspilot.services.wiki.material_service import load_parsed_markdown
 from apps.opspilot.services.wiki.material_source_service import MaterialSourceError, source_metadata
 from apps.opspilot.services.wiki.parsed_media_service import _bare_media_locator_spans, rewrite_media_urls_for_display, sign_media_locators
 from apps.opspilot.services.wiki.update_service import handle_material_deletion, preview_material_deletion, preview_material_update, propose_update
+from apps.opspilot.utils.user_message import build_conflict_message, user_message
 from apps.opspilot.viewsets.wiki_team_scope import WikiTeamScopeMixin
 from apps.system_mgmt.utils.operation_log_utils import log_operation
 
@@ -39,6 +41,40 @@ _MATERIAL_STATUS_GROUPS = {
     "built": _MATERIAL_LIST_BUILT_STATUSES,
     "failed": _MATERIAL_LIST_FAILED_STATUSES,
 }
+
+# 下载响应按扩展名给保守类型；不引入用户可控的 content-type。
+_MATERIAL_DOWNLOAD_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+    ".csv": "text/csv",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+}
+
+
+def _material_download_content_type(filename: str) -> str:
+    suffix = ("." + filename.rsplit(".", 1)[-1].lower()) if "." in filename else ""
+    return _MATERIAL_DOWNLOAD_CONTENT_TYPES.get(suffix, "application/octet-stream")
+
+
+def build_material_download_url(material) -> str:
+    """原始文件下载 URL（Server 代理，不暴露 MinIO 直链）。
+
+    走 /api/proxy 前缀，让浏览器经 Next 代理到 Server，而不是当成页面路由。
+    """
+    if not material or not material.pk or not material.file or not material.file.name:
+        return ""
+    return f"/api/proxy/opspilot/wiki_mgmt/material/{material.pk}/download/"
 
 
 def _split_query_values(request, key):
@@ -207,12 +243,22 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
             return JsonResponse({"result": False, "message": str(error)}, status=400)
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        material = serializer.save(
-            source_relative_path=metadata["source_relative_path"],
-            source_identity=metadata["source_identity"],
-            source_folder_path=metadata["source_folder_path"],
-            classification_root=metadata["classification_root"],
-        )
+        try:
+            material = persist_new_material(
+                lambda: serializer.save(
+                    source_relative_path=metadata["source_relative_path"],
+                    source_identity=metadata["source_identity"],
+                    source_folder_path=metadata["source_folder_path"],
+                    classification_root=metadata["classification_root"],
+                )
+            )
+        except MaterialStorageError as error:
+            logger.warning(
+                "wiki material create 对象存储失败 kb=%s error_type=%s",
+                knowledge_base.id,
+                type(error).__name__,
+            )
+            return JsonResponse({"result": False, "message": str(error)}, status=503)
         # 新资料保持 pending；管理员点击「构建」后由统一任务依次解析并构建。
         serializer = self.get_serializer(material)
         log_operation(request, "create", "opspilot", f"新增资料: {material.name}")
@@ -279,7 +325,7 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
                 {
                     "result": False,
                     "code": "material_build_in_progress",
-                    "message": "资料正在构建中，请勿重复提交",
+                    "message": user_message(request, "error.material_build_in_progress", "资料正在构建中，请勿重复提交", self.loader),
                     "retryable": True,
                 },
                 status=409,
@@ -296,7 +342,7 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
                     {
                         "result": False,
                         "code": error.code,
-                        "message": error.message,
+                        "message": build_conflict_message(request, error.message, self.loader),
                         "details": error.details,
                         "retryable": error.status_code >= 500,
                     },
@@ -307,7 +353,7 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
                     {
                         "result": False,
                         "code": "task_dispatch_failed",
-                        "message": "知识构建任务投递失败，请稍后重试",
+                        "message": user_message(request, "error.material_build_dispatch_failed", "知识构建任务投递失败，请稍后重试", self.loader),
                         "retryable": True,
                     },
                     status=503,
@@ -330,7 +376,7 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
                     {
                         "result": False,
                         "code": "material_build_in_progress",
-                        "message": "资料正在构建中，请勿重复提交",
+                        "message": user_message(request, "error.material_build_in_progress", "资料正在构建中，请勿重复提交", self.loader),
                         "retryable": True,
                     },
                     status=409,
@@ -373,7 +419,7 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
                 {
                     "result": False,
                     "code": error.code,
-                    "message": error.message,
+                    "message": build_conflict_message(request, error.message, self.loader),
                     "details": error.details,
                 },
                 status=error.status_code,
@@ -383,7 +429,7 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
                 {
                     "result": False,
                     "code": "task_dispatch_failed",
-                    "message": "知识构建任务投递失败，请稍后重试",
+                    "message": user_message(request, "error.material_build_dispatch_failed", "知识构建任务投递失败，请稍后重试", self.loader),
                     "retryable": True,
                 },
                 status=503,
@@ -409,7 +455,10 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
         material = self.get_object()
         kb = material.knowledge_base
         if not kb.embed_provider_id:
-            return JsonResponse({"result": False, "message": "知识库未配置向量模型,无法重建索引"}, status=400)
+            return JsonResponse(
+                {"result": False, "message": user_message(request, "error.no_embedding_model", "知识库未配置向量模型,无法重建索引", self.loader)},
+                status=400,
+            )
 
         evidences = (
             PageEvidence.objects.filter(material=material, page__status="active").select_related("page", "page__current_version").order_by("page_id")
@@ -437,7 +486,10 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
     @HasPermission("wiki_list-Edit")
     @action(methods=["POST"], detail=False, url_path="batch_create")
     def batch_create(self, request):
-        """批量创建资料(支持多文件):每条独立处理,返回 items + errors 汇总,失败不影响其他记录创建。
+        """批量创建资料(支持多文件):逐条 for 循环入库,返回 items + errors 汇总。
+
+        单文件业务失败(如磁盘满)隔离后继续;对象存储不可用时立即停止后续文件,
+        避免在 MinIO 已挂时继续空转。整批均因对象存储失败时返回 503,提示用户。
 
         POST 表单字段:
         - knowledge_base: int (必填)
@@ -467,6 +519,7 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
 
         items = []
         errors = []
+        storage_unavailable = False
         for index, f in enumerate(files):
             try:
                 metadata = source_metadata(
@@ -475,20 +528,36 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
                     fallback_name=f.name,
                     classification_root_id=classification_root_id,
                 )
-                # 每条记录包在独立 savepoint 中:失败只回滚当前 savepoint,不污染整批事务
-                with transaction.atomic():
-                    material = Material.objects.create(
+
+                def _create(uploaded=f, meta=metadata):
+                    return Material.objects.create(
                         knowledge_base=kb,
-                        name=f.name,
+                        name=uploaded.name,
                         material_type="file",
-                        file=f,
+                        file=uploaded,
                         ocr_enhance=ocr_enhance,
                         status="pending",
-                        source_relative_path=metadata["source_relative_path"],
-                        source_identity=metadata["source_identity"],
-                        source_folder_path=metadata["source_folder_path"],
-                        classification_root=metadata["classification_root"],
+                        source_relative_path=meta["source_relative_path"],
+                        source_identity=meta["source_identity"],
+                        source_folder_path=meta["source_folder_path"],
+                        classification_root=meta["classification_root"],
                     )
+
+                # 每条记录独立事务:对象存储失败回滚当前行,不污染已成功条目。
+                material = persist_new_material(_create)
+            except MaterialStorageError as exc:
+                logger.warning(
+                    "wiki batch_create 对象存储失败 file=%s kb=%s error_type=%s",
+                    f.name,
+                    kb_id,
+                    type(exc).__name__,
+                )
+                error_text = str(exc)
+                if index < len(files) - 1:
+                    error_text = f"{error_text} 后续文件已停止上传。"
+                errors.append({"name": f.name, "error": error_text})
+                storage_unavailable = True
+                break
             except Exception as exc:  # noqa: BLE001 - 批量任务逐条隔离失败
                 logger.exception("wiki batch_create 失败 file=%s kb=%s", f.name, kb_id)
                 errors.append({"name": f.name, "error": str(exc)})
@@ -501,6 +570,15 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
             "opspilot",
             f"批量新增资料: 成功 {len(items)} 条,失败 {len(errors)} 条",
         )
+        if storage_unavailable and not items:
+            return JsonResponse(
+                {
+                    "result": False,
+                    "message": STORAGE_UNAVAILABLE_MESSAGE,
+                    "data": {"items": items, "errors": errors},
+                },
+                status=503,
+            )
         return JsonResponse(
             {"result": True, "data": {"items": items, "errors": errors}},
             status=201 if items and not errors else 200,
@@ -523,7 +601,7 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
         page_ids = list(PageEvidence.objects.filter(material=material).values_list("page_id", flat=True).distinct())
         pages = [{"id": p.id, "title": p.title, "page_type": p.page_type, "status": p.status} for p in KnowledgePage.objects.filter(id__in=page_ids)]
         try:
-            file_url = material.file.url if material.file else ""
+            file_url = build_material_download_url(material) if material.file else ""
         except Exception:
             file_url = ""
         original = material.text_content if material.material_type == "text" else (material.url or "")
@@ -554,6 +632,46 @@ class WikiMaterialViewSet(WikiTeamScopeMixin, AuthViewSet):
                 },
             }
         )
+
+    @HasPermission("wiki_list-View")
+    @action(methods=["GET"], detail=True)
+    def download(self, request, pk=None):
+        """经 Server 代理下载原始文件。
+
+        不下发 MinIO 直链：对象存储通常不对浏览器可达，且直链会绕过权限与
+        内容处置策略。Server 用自身凭据从 MinIO 拉流，权限复用 get_object 的团队边界。
+        """
+        material = self.get_object()
+        file_field = material.file
+        if not file_field or not file_field.name:
+            return JsonResponse(
+                {"result": False, "message": user_message(request, "error.material_no_source_file", "该资料没有可下载的原始文件", self.loader)},
+                status=404,
+            )
+        try:
+            fileobj = file_field.storage.open(file_field.name, "rb")
+        except FileNotFoundError:
+            return JsonResponse(
+                {"result": False, "message": user_message(request, "error.material_source_file_missing", "原始文件不存在", self.loader)},
+                status=404,
+            )
+        except Exception as exc:
+            logger.warning(
+                "wiki material download open failed material=%s error_type=%s failed_stage=%s",
+                material.id,
+                type(exc).__name__,
+                "storage_open",
+            )
+            return JsonResponse(
+                {"result": False, "message": user_message(request, "error.object_storage_unavailable", "对象存储不可用，请稍后重试", self.loader)},
+                status=503,
+            )
+
+        filename = file_field.name.rsplit("/", 1)[-1] or "download"
+        content_type = _material_download_content_type(filename)
+        response = FileResponse(fileobj, content_type=content_type, as_attachment=True, filename=filename)
+        response["Cache-Control"] = "private, no-store"
+        return response
 
     @HasPermission("wiki_list-View")
     @action(methods=["POST"], detail=True)

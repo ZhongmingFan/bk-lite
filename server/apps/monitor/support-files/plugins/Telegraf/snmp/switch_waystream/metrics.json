@@ -2,7 +2,7 @@
   "collector": "Telegraf",
   "collect_type": "snmp_waystream",
   "plugin": "Switch Waystream SNMP",
-  "plugin_desc": "Waystream ASR / FTTH switch SNMP child template (IANA PEN 9303). The verified WAYSTREAM-SMI and WAYSTREAM-RPM-MIB private tree is focused on enterprise identity and RPM/IPTV QoS objects, and no row-filter-free scalar device-health gauges were confirmed in the available state. This child therefore declares no vendor-specific metric deltas in metrics.json; the shared Switch SNMP floor supplies uptime, IF-MIB interface metrics and aggregate traffic through the generic snmp/switch metric model while this plugin provides the Waystream collect_type, UI and Telegraf child template. CPU, memory, temperature, fan and power-supply state are not collected (N/A). Supported brands/models — Waystream ASR and FTTH access switches.",
+  "plugin_desc": "SNMP monitoring template for Waystream switch. It reports uptime, temperature, fan speed, and interface traffic, for ASR and FTTH access switches (enterprise PEN 9303). CPU, memory, and power supply are not exposed by the private MIB and are not collected.",
   "support_collect_detect": true,
   "status_query": "any({instance_type='switch', collect_type='snmp_waystream'}) by (instance_id)",
   "name": "Switch",
@@ -14,44 +14,36 @@
     "instance_id"
   ],
   "supplementary_indicators": [
-    "snmp_uptime"
+    "snmp_uptime",
+    "device_temperature_celsius",
+    "device_fan_speed"
   ],
   "metrics": [
     {
-      "metric_group": "Traffic",
-      "name": "interface_ifHCInOctets",
-      "query": "rate(interface_ifHCInOctets{instance_type='switch', __$labels__}[5m])",
-      "display_name": "Interface Incoming Traffic Rate (HC)",
+      "metric_group": "Temperature",
+      "name": "device_temperature_celsius",
+      "query": "max(device_temperature_celsius{instance_type='switch', __$labels__} / 100) by (instance_id)",
+      "display_name": "Temperature",
       "data_type": "Number",
-      "unit": "byteps",
-      "dimensions": [
-        {
-          "name": "ifDescr",
-          "description": "ifDescr"
-        }
-      ],
+      "unit": "celsius",
+      "dimensions": [],
       "instance_id_keys": [
         "instance_id"
       ],
-      "description": "This metric indicates the average rate of bytes received over the past 5 minutes, based on the 64-bit ifHCInOctets counter which does not wrap on high-speed interfaces."
+      "description": "Highest chassis temperature reading from the wsTempMeasured table (one row per sensor), in degrees Celsius. The raw object is hundredths of a degree, so the query divides by 100. Abnormally high temperatures may indicate cooling failure, blocked airflow, or excessive ambient heat."
     },
     {
-      "metric_group": "Traffic",
-      "name": "interface_ifHCOutOctets",
-      "query": "rate(interface_ifHCOutOctets{instance_type='switch', __$labels__}[5m])",
-      "display_name": "Interface Outgoing Traffic Rate (HC)",
+      "metric_group": "Hardware Status",
+      "name": "device_fan_speed",
+      "query": "max(device_fan_speed{instance_type='switch', __$labels__}) by (instance_id)",
+      "display_name": "Fan Speed",
       "data_type": "Number",
-      "unit": "byteps",
-      "dimensions": [
-        {
-          "name": "ifDescr",
-          "description": "ifDescr"
-        }
-      ],
+      "unit": "counts",
+      "dimensions": [],
       "instance_id_keys": [
         "instance_id"
       ],
-      "description": "This metric indicates the average rate of bytes sent over the past 5 minutes, based on the 64-bit ifHCOutOctets counter which does not wrap on high-speed interfaces."
+      "description": "Highest fan rotation speed from the wsFanRPM table (one row per fan), in revolutions per minute. Abnormally low or zero RPM indicates a stalled or failed fan and a risk of overheating; abnormally high RPM may indicate the device is compensating for high temperature."
     },
     {
       "metric_group": "Base",

@@ -22,6 +22,10 @@ error:
   user_id_empty: user_id 不能为空
   username_empty: 用户名不能为空
   otp_empty: 用户名或 OTP 验证码不能为空
+  api_token_update_not_supported: API 令牌不支持修改
+  invalid_current_team: current_team cookie 无效
+  no_permission_access_team: 无权访问该团队数据
+  code_empty: 验证码不能为空
 
 # 内置应用展示名（Console 卡片 / 左上角应用列表）
 app_name:
@@ -39,6 +43,7 @@ app_name:
   patch: 补丁管理
   apm: APM
   playground: Playground
+  workflow-orchestration: 编排中心
 
 # 应用描述 (内置应用)
 app:
@@ -55,6 +60,7 @@ app:
   ops-console: 统一运维控制台，用于管理和监控所有运维活动
   job: 快速创建并执行作业，统一管理脚本执行、文件分发和定时任务
   patch: 集中管理系统补丁，支持补丁扫描、安装与补丁库维护，帮助持续降低安全风险。
+  workflow-orchestration: 通过可视化流程设计、自动化执行、人工审批与运行追踪，统一编排跨系统运维任务。
 
 # 标签翻译 (内置应用标签)
 tag:
@@ -110,3 +116,8 @@ tag:
   patch_scan: 补丁扫描
   patch_install: 补丁安装
   patch_library: 补丁库
+  # workflow-orchestration
+  workflow_design: 流程设计
+  workflow_execution: 流程执行
+  automation: 自动化
+  approval: 人工审批

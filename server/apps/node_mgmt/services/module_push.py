@@ -5,13 +5,43 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from apps.core.exceptions.base_app_exception import BaseAppException
+from django.core.cache import cache
+from django.db import transaction
+from django.db.models import Q
+
 from apps.core.logger import node_logger as logger
-from apps.core.utils.current_team_scope import resolve_current_team_data_scope
+from apps.core.utils.current_team_scope import build_request_push_actor_scope
+from apps.node_mgmt.constants.installer import InstallerConstants
+from apps.node_mgmt.models.installer import ControllerTaskNode
 from apps.node_mgmt.models.sidecar import Node, NodeOrganization
-from apps.node_mgmt.services.module_push_contract import EVENT_LIFECYCLE, EVENT_UPSERT, IngestEnvelope, PushTargetStatus
+from apps.node_mgmt.services.module_push_contract import (
+    EVENT_LIFECYCLE,
+    EVENT_UPSERT,
+    IngestEnvelope,
+    PushTargetStatus,
+    ingest_auth_kwargs,
+)
 from apps.rpc.cmdb import CMDB
 from apps.rpc.monitor import Monitor
+
+ALLOWED_PUSH_TARGETS = ("cmdb", "monitor")
+
+
+def normalize_push_targets(targets: list[str] | None) -> list[str]:
+    """去重并只保留合法推送目标，保持勾选顺序。"""
+    seen: list[str] = []
+    for raw in targets or []:
+        name = str(raw or "").strip().lower()
+        if name in ALLOWED_PUSH_TARGETS and name not in seen:
+            seen.append(name)
+    return seen
+
+
+class CmdbLinkage:
+    """CMDB 联动客户端：本进程执行 ingest，避免 NATS RPC 超时三次后 skipped。"""
+
+    def ingest_from_source(self, **kwargs):
+        return CMDB(is_local_client=True).ingest_from_source(**kwargs)
 
 
 class MonitorLinkage:
@@ -23,15 +53,7 @@ class MonitorLinkage:
 
 def build_module_push_actor_scope(request) -> dict[str, Any]:
     """从请求鉴权上下文构造跨模块推送 actor_scope。"""
-    operator = getattr(getattr(request, "user", None), "username", "") or ""
-    try:
-        scope = resolve_current_team_data_scope(request)
-        return {
-            "allowed_org_ids": list(scope.data_team_ids),
-            "operator": scope.username or operator,
-        }
-    except BaseAppException:
-        return {"allowed_org_ids": [], "operator": operator}
+    return build_request_push_actor_scope(request)
 
 
 def parse_retire_linked_flag(request) -> bool:
@@ -65,6 +87,146 @@ def parse_retire_linked_flag(request) -> bool:
 
 class ModulePushService:
     DEFAULT_MAX_ATTEMPTS = 3
+
+    @classmethod
+    def remember_deferred_push(
+        cls,
+        *,
+        cloud_region_id: int,
+        nodes: list[dict[str, Any]],
+        targets: list[str],
+        actor_scope: dict[str, Any],
+        task_id: int | None = None,
+    ) -> int:
+        """节点尚未落库时记下勾选：缓存 + 已有安装任务 result。无新表。"""
+        normalized = normalize_push_targets(targets)
+        if not normalized:
+            return 0
+        payload = {
+            "targets": normalized,
+            **ingest_auth_kwargs(actor_scope),
+        }
+        remembered = 0
+        for node in nodes:
+            ip = str(node.get("ip") or "").strip()
+            node_id = str(node.get("node_id") or "").strip()
+            if not ip and not node_id:
+                continue
+            for key in cls._intent_cache_keys(cloud_region_id, ip, node_id):
+                cache.set(key, payload, timeout=InstallerConstants.MODULE_PUSH_INTENT_CACHE_TTL)
+            remembered += 1
+        if task_id:
+            cls._stamp_install_task_intent(task_id, nodes, payload)
+        logger.info(
+            "[ModulePush] remembered deferred push cloud_region_id=%s count=%s targets=%s",
+            cloud_region_id,
+            remembered,
+            normalized,
+        )
+        return remembered
+
+    @classmethod
+    def consume_deferred_push_for_node(cls, node: Node) -> dict[str, Any] | None:
+        """sidecar 首次建节点钩子：消费安装勾选；无意图则跳过。"""
+        node_id = str(getattr(node, "id", "") or "")
+        if not node_id:
+            return None
+        ip = str(getattr(node, "ip", "") or "").strip()
+        cloud_region_id = getattr(node, "cloud_region_id", None)
+        payload = cls._pop_intent_payload(cloud_region_id, ip, node_id)
+        if not payload:
+            return None
+        targets = normalize_push_targets(payload.get("targets"))
+        if not targets:
+            logger.info("[ModulePush] deferred push consumed with empty targets node_id=%s", node_id)
+            return None
+        logger.info(
+            "[ModulePush] consuming deferred push node_id=%s targets=%s",
+            node_id,
+            targets,
+        )
+        return cls.best_effort_push_node(
+            node_id,
+            targets=targets,
+            actor_scope=ingest_auth_kwargs(payload),
+        )
+
+    @classmethod
+    def _intent_cache_keys(cls, cloud_region_id, ip: str, node_id: str) -> list[str]:
+        prefix = InstallerConstants.MODULE_PUSH_INTENT_CACHE_PREFIX
+        keys: list[str] = []
+        if node_id:
+            keys.append(f"{prefix}:node:{node_id}")
+        if ip and cloud_region_id is not None:
+            keys.append(f"{prefix}:ip:{cloud_region_id}:{ip}")
+        return keys
+
+    @classmethod
+    def _stamp_install_task_intent(cls, task_id: int, nodes: list[dict[str, Any]], payload: dict[str, Any]) -> None:
+        ips = {str(node.get("ip") or "").strip() for node in nodes if str(node.get("ip") or "").strip()}
+        node_ids = {str(node.get("node_id") or "").strip() for node in nodes if str(node.get("node_id") or "").strip()}
+        match = Q(task_id=task_id)
+        if ips or node_ids:
+            row_match = Q()
+            if ips:
+                row_match |= Q(ip__in=ips)
+            if node_ids:
+                row_match |= Q(node_id__in=node_ids)
+            match &= row_match
+        for task_node in ControllerTaskNode.objects.filter(match):
+            result = dict(task_node.result or {})
+            if result.get(InstallerConstants.MODULE_PUSH_CONSUMED_KEY):
+                continue
+            result[InstallerConstants.MODULE_PUSH_TARGETS_KEY] = payload["targets"]
+            result[InstallerConstants.MODULE_PUSH_ACTOR_SCOPE_KEY] = ingest_auth_kwargs(payload)
+            task_node.result = result
+            task_node.save(update_fields=["result"])
+
+    @classmethod
+    def _pop_intent_payload(cls, cloud_region_id, ip: str, node_id: str) -> dict[str, Any] | None:
+        keys = cls._intent_cache_keys(cloud_region_id, ip, node_id)
+        payload = None
+        for key in keys:
+            cached = cache.get(key)
+            if isinstance(cached, dict) and cached.get("targets"):
+                payload = cached
+                break
+        for key in keys:
+            cache.delete(key)
+        task_payload = cls._consume_install_task_intent(cloud_region_id, ip, node_id)
+        return payload or task_payload
+
+    @classmethod
+    def _consume_install_task_intent(cls, cloud_region_id, ip: str, node_id: str) -> dict[str, Any] | None:
+        match = Q(task__type="install")
+        row_match = Q()
+        if node_id:
+            row_match |= Q(node_id=node_id)
+            row_match |= Q(**{f"result__{InstallerConstants.INSTALL_NODE_ID_KEY}": node_id})
+        if ip and cloud_region_id is not None:
+            row_match |= Q(task__cloud_region_id=cloud_region_id, ip=ip)
+        if not row_match:
+            return None
+        payload = None
+        with transaction.atomic():
+            task_nodes = list(ControllerTaskNode.objects.select_for_update().filter(match & row_match).order_by("-id")[:20])
+            for task_node in task_nodes:
+                result = dict(task_node.result or {})
+                if result.get(InstallerConstants.MODULE_PUSH_CONSUMED_KEY):
+                    continue
+                targets = normalize_push_targets(result.get(InstallerConstants.MODULE_PUSH_TARGETS_KEY))
+                if not targets:
+                    continue
+                scope = result.get(InstallerConstants.MODULE_PUSH_ACTOR_SCOPE_KEY) or {}
+                if payload is None:
+                    payload = {
+                        "targets": targets,
+                        **ingest_auth_kwargs(scope),
+                    }
+                result[InstallerConstants.MODULE_PUSH_CONSUMED_KEY] = True
+                task_node.result = result
+                task_node.save(update_fields=["result"])
+        return payload
 
     @classmethod
     def best_effort_push_node(
@@ -157,8 +319,7 @@ class ModulePushService:
         attempts_limit = max(1, int(attempts_limit))
 
         node = Node.objects.select_related("cloud_region").get(id=node_id)
-        allowed_org_ids = list(actor_scope.get("allowed_org_ids") or [])
-        operator = actor_scope.get("operator") or ""
+        auth = ingest_auth_kwargs(actor_scope)
 
         push_status = dict(node.push_status or {})
         results: dict[str, Any] = {}
@@ -169,22 +330,14 @@ class ModulePushService:
             if target == "cmdb":
                 status = cls._push_with_retries(
                     target="cmdb",
-                    push_fn=lambda env=envelope: CMDB().ingest_from_source(
-                        **env,
-                        allowed_org_ids=allowed_org_ids,
-                        operator=operator,
-                    ),
+                    push_fn=lambda env=envelope, auth=auth: CmdbLinkage().ingest_from_source(**env, **auth),
                     max_attempts=attempts_limit,
                     on_success=lambda result: cls._backfill_id(node, "cmdb_id", result),
                 )
             elif target == "monitor":
                 status = cls._push_with_retries(
                     target="monitor",
-                    push_fn=lambda env=envelope: MonitorLinkage().ingest_from_source(
-                        **env,
-                        allowed_org_ids=allowed_org_ids,
-                        operator=operator,
-                    ),
+                    push_fn=lambda env=envelope, auth=auth: MonitorLinkage().ingest_from_source(**env, **auth),
                     max_attempts=attempts_limit,
                     on_success=lambda result: cls._backfill_id(node, "monitor_id", result),
                 )
@@ -225,18 +378,16 @@ class ModulePushService:
         attempts_limit = max(1, int(attempts_limit))
 
         envelope = cls._build_lifecycle_envelope(node)
-        allowed_org_ids = list(actor_scope.get("allowed_org_ids") or [])
-        operator = actor_scope.get("operator") or ""
+        auth = ingest_auth_kwargs(actor_scope)
         results: dict[str, Any] = {}
 
         for target in targets:
             if target == "cmdb":
                 status = cls._push_with_retries(
                     target="cmdb",
-                    push_fn=lambda: CMDB().ingest_from_source(
+                    push_fn=lambda auth=auth: CmdbLinkage().ingest_from_source(
                         **envelope,
-                        allowed_org_ids=allowed_org_ids,
-                        operator=operator,
+                        **auth,
                     ),
                     max_attempts=attempts_limit,
                     on_success=lambda _result: None,
@@ -244,10 +395,9 @@ class ModulePushService:
             elif target == "monitor":
                 status = cls._push_with_retries(
                     target="monitor",
-                    push_fn=lambda: MonitorLinkage().ingest_from_source(
+                    push_fn=lambda auth=auth: MonitorLinkage().ingest_from_source(
                         **envelope,
-                        allowed_org_ids=allowed_org_ids,
-                        operator=operator,
+                        **auth,
                     ),
                     max_attempts=attempts_limit,
                     on_success=lambda _result: None,
@@ -320,26 +470,17 @@ class ModulePushService:
             return
 
         envelope = cls._build_envelope(node)
-        allowed_org_ids = list(actor_scope.get("allowed_org_ids") or [])
-        operator = actor_scope.get("operator") or ""
+        auth = ingest_auth_kwargs(actor_scope)
         attempts_limit = max(1, int(max_attempts))
 
         for target, push_fn in (
             (
                 "cmdb",
-                lambda: CMDB().ingest_from_source(
-                    **envelope,
-                    allowed_org_ids=allowed_org_ids,
-                    operator=operator,
-                ),
+                lambda: CmdbLinkage().ingest_from_source(**envelope, **auth),
             ),
             (
                 "monitor",
-                lambda: MonitorLinkage().ingest_from_source(
-                    **envelope,
-                    allowed_org_ids=allowed_org_ids,
-                    operator=operator,
-                ),
+                lambda: MonitorLinkage().ingest_from_source(**envelope, **auth),
             ),
         ):
             status = cls._push_with_retries(

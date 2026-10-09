@@ -70,13 +70,16 @@ export const useLoadbalanceConfig = () => {
     collectTypes: {
       'Loadbalance SNMP General': 'snmp',
       'Loadbalance F5 SNMP': 'snmp_f5',
+      'Loadbalance Cisco ACE SNMP': 'snmp_cisco_ace',
       'Loadbalance Citrix NetScaler SNMP': 'snmp_netscaler',
-      'Loadbalance A10 Thunder SNMP': 'snmp_a10',
+      'Loadbalance A10 SNMP': 'snmp_a10',
       'Loadbalance FortiADC SNMP': 'snmp_fortiadc',
       'Loadbalance Kemp LoadMaster SNMP': 'snmp_kemp',
       'Loadbalance Superiority SNMP': 'snmp_superiority',
       'Loadbalance RELIANOID SNMP': 'snmp_relianoid',
       'Loadbalance Radware Alteon SNMP': 'snmp_alteon',
+      'Loadbalance Radware SNMP': 'snmp_radware',
+      'Loadbalance Array SNMP': 'snmp_array',
       'Loadbalance Flow NetFlow': 'netflow',
       'Loadbalance Flow sFlow': 'sflow'
     }

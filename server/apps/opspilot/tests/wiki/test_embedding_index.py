@@ -1,12 +1,21 @@
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 
-def _kb():
-    from apps.opspilot.models import WikiKnowledgeBase
+def test_page_version_summary_prefers_meta_and_falls_back_to_first_paragraph():
+    from apps.opspilot.services.wiki.generation_navigation_service import page_version_summary
 
-    return WikiKnowledgeBase.objects.create(name="kb", team=[1])
+    assert page_version_summary(SimpleNamespace(meta_snapshot={"summary": "SUMMARY"}, body="BODY")) == "SUMMARY"
+    assert page_version_summary(SimpleNamespace(meta_snapshot={}, body="# H\nfirst paragraph\n\nsecond")) == "first paragraph"
+    assert page_version_summary(SimpleNamespace(meta_snapshot=None, body="   ")) == ""
+
+
+def _kb():
+    from apps.opspilot.tests.wiki.factories import WikiFactory
+
+    return WikiFactory().bootstrapped_knowledge_base()
 
 
 def _page(kb, title, body):
@@ -27,7 +36,7 @@ def test_index_version_stores_embedding():
 
 
 @pytest.mark.django_db
-def test_index_version_embeds_full_body_without_prefix_truncation():
+def test_index_version_embeds_summary_not_full_body():
     from apps.opspilot.services.wiki.embedding_service import index_version
 
     kb = _kb()
@@ -40,7 +49,32 @@ def test_index_version_embeds_full_body_without_prefix_truncation():
         return [[0.1, 0.2]]
 
     assert index_version(cv, None, embed_fn=embed) is True
-    assert tail in seen["text"]
+    assert tail not in seen["text"]
+    assert len(seen["text"]) <= 800
+
+
+@pytest.mark.django_db
+def test_index_version_embeds_meta_summary():
+    from apps.opspilot.services.wiki.embedding_service import index_version
+    from apps.opspilot.services.wiki.page_service import create_manual_page
+
+    kb = _kb()
+    cv = create_manual_page(
+        kb,
+        page_type="concept",
+        title="A",
+        body="BODY_SHOULD_NOT_EMBED",
+        created_by="u",
+        meta_snapshot={"summary": "SUMMARY_FOR_EMBEDDING"},
+    ).current_version
+    seen = {}
+
+    def embed(texts):
+        seen["text"] = texts[0]
+        return [[0.4, 0.5]]
+
+    assert index_version(cv, None, embed_fn=embed) is True
+    assert seen["text"] == "SUMMARY_FOR_EMBEDDING"
 
 
 @pytest.mark.django_db
@@ -53,13 +87,13 @@ def test_index_version_skips_when_embed_unavailable():
 
 
 @pytest.mark.django_db
-def test_index_version_skips_empty_body_and_clear_empty_page_list():
+def test_index_version_skips_empty_summary_and_clear_empty_page_list():
     from apps.opspilot.services.wiki.embedding_service import clear_page_vectors, index_version
 
     kb = _kb()
     cv = _page(kb, "A", "   ").current_version
 
-    assert index_version(cv, None, embed_fn=lambda texts: pytest.fail("empty body should not embed")) is False
+    assert index_version(cv, None, embed_fn=lambda texts: pytest.fail("empty summary should not embed")) is False
     assert clear_page_vectors([]) == 0
 
 
@@ -217,24 +251,27 @@ def test_page_list_marks_index_status_skipped_without_embed_provider(api_client)
 @pytest.mark.django_db
 def test_page_index_status_handles_empty_body_and_missing_current_version(api_client):
     from apps.opspilot.models import EmbedProvider, KnowledgePage
+    from apps.opspilot.services.wiki.index_status_service import page_index_detail
 
     provider = EmbedProvider.objects.create(name="embed", model="embed-model")
     kb = _kb()
     kb.embed_provider = provider
     kb.save(update_fields=["embed_provider"])
-    KnowledgePage.objects.create(knowledge_base=kb, page_type="concept", title="无当前版本")
+    versionless = KnowledgePage.objects.create(knowledge_base=kb, page_type="concept", title="无当前版本")
     _page(kb, "空正文", "   ")
+
+    missing = page_index_detail(versionless)
+    assert missing["status"] == "not_indexed"
+    assert missing["page_embedding"]["reason"] == "no_current_version"
+    assert missing["chunk_embedding"]["reason"] == "no_current_version"
 
     response = api_client.get(f"/api/v1/opspilot/wiki_mgmt/page/?knowledge_base={kb.id}&page_size=20")
 
     assert response.status_code == 200, response.content
     items = {item["title"]: item for item in response.json()["data"]["items"]}
-    assert items["无当前版本"]["index_status"] == "not_indexed"
-    assert items["无当前版本"]["chunk_index_status"] == "not_indexed"
-    assert items["无当前版本"]["index_detail"]["page_embedding"]["reason"] == "no_current_version"
     assert items["空正文"]["index_status"] == "skipped"
     assert items["空正文"]["chunk_index_status"] == "skipped"
-    assert items["空正文"]["index_detail"]["page_embedding"]["reason"] == "empty_body"
+    assert items["空正文"]["index_detail"]["page_embedding"]["reason"] == "empty_summary"
 
 
 @pytest.mark.django_db
@@ -308,7 +345,7 @@ def test_page_reindex_endpoint_requires_embed_provider(api_client):
     response = api_client.post(f"/api/v1/opspilot/wiki_mgmt/page/{page.id}/reindex/", {}, format="json")
 
     assert response.status_code == 400
-    assert "向量模型" in response.json()["message"]
+    assert "embedding model" in response.json()["message"]
     assert not BuildRecord.objects.filter(knowledge_base=kb, trigger="page_reindex").exists()
 
 
@@ -373,7 +410,7 @@ def test_material_reindex_endpoint_requires_embed_provider(api_client):
     response = api_client.post(f"/api/v1/opspilot/wiki_mgmt/material/{material.id}/reindex/", {}, format="json")
 
     assert response.status_code == 400
-    assert "向量模型" in response.json()["message"]
+    assert "embedding model" in response.json()["message"]
     assert not BuildRecord.objects.filter(knowledge_base=kb, trigger="material_reindex").exists()
 
 
@@ -399,7 +436,7 @@ def test_embed_texts_calls_openai_compatible_provider(monkeypatch):
     assert calls == [("http://embed", "secret"), ("embed-model", ["a", "b"])]
 
 
-def test_embed_texts_returns_empty_when_provider_fails(monkeypatch):
+def test_embed_texts_returns_empty_when_provider_fails(monkeypatch, caplog):
     from apps.opspilot.services.wiki import embedding_service
 
     class FakeOpenAI:
@@ -409,4 +446,12 @@ def test_embed_texts_returns_empty_when_provider_fails(monkeypatch):
     monkeypatch.setattr(embedding_service, "OpenAI", FakeOpenAI)
     provider = SimpleNamespace(base_url="http://embed", api_key="secret", model_name="embed-model", id=1)
 
-    assert embedding_service.embed_texts(["a"], provider) == []
+    with caplog.at_level(logging.ERROR, logger="opspilot"):
+        assert embedding_service.embed_texts(["a"], provider) == []
+    records = [record for record in caplog.records if record.msg == "wiki 嵌入生成失败 provider=%s failed_stage=%s error_type=%s"]
+    assert len(records) == 1
+    assert records[0].args == (1, "embed_texts", "RuntimeError")
+    rendered = records[0].getMessage()
+    assert "embed_texts" in rendered
+    assert "RuntimeError" in rendered
+    assert "secret" not in rendered

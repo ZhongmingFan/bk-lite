@@ -1,11 +1,21 @@
 import React from 'react';
-import { cleanup, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import ApmHomePage from '../page';
-import type { ApmDashboard } from '@/app/apm/types';
+import type { ApmDashboard, ApmTimeWindow } from '@/app/apm/types';
 import { renderWithApmIntl } from '@/app/apm/__tests__/intl';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 const api = {
   getDashboard: vi.fn(),
@@ -68,10 +78,10 @@ const loadedDashboard: ApmDashboard = {
     data: {
       total: 5,
       buckets: [
-        { key: 'healthy', label: '健康', count: 3 },
-        { key: 'warning', label: '警告', count: 1 },
-        { key: 'critical', label: '严重', count: 1 },
-        { key: 'unknown', label: '未知', count: 0 },
+        { key: 'healthy', label: 'RAW_HEALTHY', count: 3 },
+        { key: 'warning', label: 'RAW_WARNING', count: 1 },
+        { key: 'critical', label: 'RAW_CRITICAL', count: 1 },
+        { key: 'unknown', label: 'RAW_UNKNOWN', count: 0 },
       ],
     },
   },
@@ -86,6 +96,43 @@ const failedAlertsDashboard: ApmDashboard = {
   ...loadedDashboard,
   alerts: { status: 'failed', error: 'alerts down' },
 };
+
+function dashboardForWindow(window: ApmTimeWindow, applicationCount: number): ApmDashboard {
+  const kpiData = loadedDashboard.kpis.data;
+  if (!kpiData) {
+    throw new Error('loadedDashboard kpis.data is required');
+  }
+  return {
+    ...loadedDashboard,
+    window,
+    kpis: {
+      status: 'ok',
+      data: {
+        ...kpiData,
+        application_count: applicationCount,
+      },
+    },
+    slos: {
+      status: 'ok',
+      data: {
+        items: [
+          {
+            id: `slo-${window}`,
+            service_id: `svc-${window}`,
+            service_name: `slo-service-${window}`,
+            environment: 'prod',
+            objective: 99.9,
+            current_rate: 99.9,
+            met: true,
+          },
+        ],
+      },
+    },
+  };
+}
+
+const dashboard1h = dashboardForWindow('1h', 11);
+const dashboard7d = dashboardForWindow('7d', 77);
 
 const releasesDashboard: ApmDashboard = {
   ...loadedDashboard,
@@ -157,6 +204,12 @@ describe('ApmHomePage', () => {
     expect(screen.getByText('请求量')).not.toBeNull();
     expect(screen.getByText('错误请求数')).not.toBeNull();
     expect(screen.getByText('P95 延迟')).not.toBeNull();
+    expect(screen.getByText('健康')).not.toBeNull();
+    expect(screen.getByText('警告')).not.toBeNull();
+    expect(screen.getByText('严重')).not.toBeNull();
+    expect(screen.queryByText('RAW_HEALTHY')).toBeNull();
+    expect(screen.queryByText('RAW_WARNING')).toBeNull();
+    expect(screen.queryByText('RAW_CRITICAL')).toBeNull();
   });
 
   it('shows retry when a section failed', async () => {
@@ -191,5 +244,89 @@ describe('ApmHomePage', () => {
         link.getAttribute('href') === '/apm/services/deployments'
       )),
     ).toBe(false);
+  });
+
+  it('keeps the 7d dashboard when a slower 1h success arrives later', async () => {
+    const requestA = deferred<ApmDashboard>();
+    const requestB = deferred<ApmDashboard>();
+    api.getDashboard
+      .mockImplementationOnce(() => requestA.promise)
+      .mockImplementationOnce(() => requestB.promise);
+
+    const user = userEvent.setup();
+    renderWithApmIntl(<ApmHomePage />);
+
+    await waitFor(() => expect(api.getDashboard).toHaveBeenCalledTimes(1));
+    expect(api.getDashboard).toHaveBeenLastCalledWith('1h');
+
+    await user.click(screen.getByRole('radio', { name: '7d' }).closest('label')!);
+    await waitFor(() => expect(api.getDashboard).toHaveBeenCalledTimes(2));
+    expect(api.getDashboard).toHaveBeenLastCalledWith('7d');
+
+    await act(async () => {
+      requestB.resolve(dashboard7d);
+    });
+    expect(await screen.findByText('slo-service-7d')).not.toBeNull();
+
+    await act(async () => {
+      requestA.resolve(dashboard1h);
+    });
+    expect(screen.getByText('slo-service-7d')).not.toBeNull();
+    expect(screen.queryByText('slo-service-1h')).toBeNull();
+  });
+
+  it('does not let a stale 1h failure overwrite the 7d dashboard', async () => {
+    const requestA = deferred<ApmDashboard>();
+    const requestB = deferred<ApmDashboard>();
+    api.getDashboard
+      .mockImplementationOnce(() => requestA.promise)
+      .mockImplementationOnce(() => requestB.promise);
+
+    const user = userEvent.setup();
+    renderWithApmIntl(<ApmHomePage />);
+
+    await waitFor(() => expect(api.getDashboard).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole('radio', { name: '7d' }).closest('label')!);
+    await waitFor(() => expect(api.getDashboard).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      requestB.resolve(dashboard7d);
+    });
+    expect(await screen.findByText('slo-service-7d')).not.toBeNull();
+
+    await act(async () => {
+      requestA.reject(new Error('stale 1h'));
+    });
+    expect(screen.getByText('slo-service-7d')).not.toBeNull();
+    expect(screen.queryByText('slo-service-1h')).toBeNull();
+    expect(screen.queryByText('加载失败，点击重试')).toBeNull();
+  });
+
+  it('does not let a stale 1h finally hide 7d loading or overwrite the result', async () => {
+    const requestA = deferred<ApmDashboard>();
+    const requestB = deferred<ApmDashboard>();
+    api.getDashboard
+      .mockImplementationOnce(() => requestA.promise)
+      .mockImplementationOnce(() => requestB.promise);
+
+    const user = userEvent.setup();
+    renderWithApmIntl(<ApmHomePage />);
+
+    await waitFor(() => expect(api.getDashboard).toHaveBeenCalledTimes(1));
+    await user.click(screen.getByRole('radio', { name: '7d' }).closest('label')!);
+    await waitFor(() => expect(api.getDashboard).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      requestA.reject(new Error('stale 1h'));
+    });
+    expect(screen.getByLabelText('加载 APM 首页数据')).not.toBeNull();
+    expect(screen.queryByText('加载失败，点击重试')).toBeNull();
+    expect(screen.queryByText('slo-service-7d')).toBeNull();
+
+    await act(async () => {
+      requestB.resolve(dashboard7d);
+    });
+    expect(await screen.findByText('slo-service-7d')).not.toBeNull();
+    expect(screen.queryByText('加载失败，点击重试')).toBeNull();
   });
 });

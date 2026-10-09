@@ -172,15 +172,42 @@ def test_send_msg_with_channel_missing_and_unsupported():
     missing = nats_api.send_msg_with_channel(999999, "t", "c", [1])
     assert missing == {"result": False, "message": "Channel not found"}
 
+
+def test_send_msg_wechat_app_uses_usernames_as_userids():
     channel = Channel.objects.create(
         name="wechat",
         channel_type=ChannelChoices.ENTERPRISE_WECHAT,
-        config={},
+        config={"corp_id": "ww", "secret": "s", "agent_id": 1},
         description="",
         team=[1],
     )
-    unsupported = nats_api.send_msg_with_channel(channel.id, "t", "c", [1])
-    assert unsupported == {"result": False, "message": "Unsupported channel type"}
+    user = _user(username="wx-alice")
+    empty = nats_api.send_msg_with_channel(channel.id, "t", "c", [])
+    assert empty == {"result": False, "message": "No valid recipients found"}
+    with patch("apps.system_mgmt.nats.channels.send_wechat", return_value={"result": True}) as send:
+        ok = nats_api.send_msg_with_channel(channel.id, "t", "body", [user.id], channel_type="enterprise_wechat")
+    assert ok == {"result": True}
+    send.assert_called_once()
+    _, content, user_list = send.call_args.args
+    assert content == "body"
+    assert list(user_list.values_list("username", flat=True)) == ["wx-alice"]
+
+
+def test_send_msg_im_notification_routes_by_channel_type_even_when_channel_id_collides():
+    channel = Channel.objects.create(
+        name="mail",
+        channel_type=ChannelChoices.EMAIL,
+        config={"host": "smtp"},
+        description="",
+        team=[1],
+    )
+    with patch("apps.system_mgmt.nats.channels.send_im_notification", return_value={"result": True, "message": "ok"}) as send, patch(
+        "apps.system_mgmt.nats.channels.send_email"
+    ) as send_email:
+        ok = nats_api.send_msg_with_channel(channel.id, "t", "c", [1], channel_type="im_notification")
+    assert ok == {"result": True, "message": "ok"}
+    send.assert_called_once_with(channel.id, "t", "c", [1])
+    send_email.assert_not_called()
 
 
 def test_send_msg_email_requires_recipients_and_delegates():
@@ -260,6 +287,44 @@ def test_get_user_rules_by_app_admin_and_instance_scope():
     UserRule.objects.create(username=normal.username, domain="domain.com", group_rule=gdr)
     scoped = nats_api.get_user_rules_by_app(group.id, normal.username, "domain.com", "opspilot", "bot")
     assert [item["id"] for item in scoped["instance"]] == [88]
+
+
+def test_get_user_rules_by_app_admin_include_children_covers_deep_descendants():
+    group_a = Group.objects.create(name="rules-team-a", parent_id=0)
+    group_b = Group.objects.create(name="rules-team-b", parent_id=group_a.id)
+    group_c = Group.objects.create(name="rules-team-c", parent_id=group_b.id)
+    admin_role, _ = Role.objects.get_or_create(name="admin", app="")
+    admin = _user(username="rules-tree-admin", role_list=[admin_role.id], group_list=[group_a.id])
+
+    result = nats_api.get_user_rules_by_app(
+        group_a.id,
+        admin.username,
+        admin.domain,
+        "job",
+        "job_record",
+        include_children=True,
+    )
+
+    assert set(result["team"]) == {group_a.id, group_b.id, group_c.id}
+
+
+def test_get_user_rules_by_app_regular_user_include_children_keeps_authorized_scope():
+    group_a = Group.objects.create(name="rules-regular-a", parent_id=0)
+    group_b = Group.objects.create(name="rules-regular-b", parent_id=group_a.id)
+    group_c = Group.objects.create(name="rules-regular-c", parent_id=group_b.id)
+    regular = _user(username="rules-tree-regular", role_list=[], group_list=[group_a.id, group_b.id])
+
+    result = nats_api.get_user_rules_by_app(
+        group_a.id,
+        regular.username,
+        regular.domain,
+        "job",
+        "job_record",
+        include_children=True,
+    )
+
+    assert set(result["team"]) == {group_a.id, group_b.id}
+    assert group_c.id not in result["team"]
 
 
 def test_get_login_module_domain_list_always_includes_default():

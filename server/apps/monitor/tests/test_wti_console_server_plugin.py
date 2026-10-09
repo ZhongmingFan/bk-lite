@@ -37,6 +37,11 @@ EXPECTED_METRICS = {
     "device_temperature_celsius",
     "device_psu_state",
 }
+BRANCH_METRICS = {
+    "wti_branch_current_amps",
+    "wti_branch_voltage_volts",
+    "wti_branch_power_watts",
+}
 UNSUPPORTED_METRICS = {
     "device_cpu_usage",
     "device_memory_usage",
@@ -142,7 +147,7 @@ def test_metrics_json_is_brand_delta_without_base_metrics(metrics):
     names = {m["name"] for m in metrics["metrics"]}
     floor = {"snmp_uptime", "interface_ifHCInOctets", "interface_ifHCOutOctets"}
     input_power_states = {f"wti_input_power_{index}_state" for index in range(1, 5)}
-    assert names - floor == EXPECTED_METRICS | input_power_states
+    assert names - floor == EXPECTED_METRICS | input_power_states | BRANCH_METRICS
     assert floor <= names
     assert set(metrics.get("supplementary_indicators", [])) == EXPECTED_METRICS | {"snmp_uptime"}
 
@@ -155,7 +160,10 @@ def test_health_metrics_are_temperature_and_conservative_power_state(metrics):
     assert by_name["device_temperature_celsius"]["query"].replace(" ", "").startswith("max(")
     assert by_name["device_psu_state"]["metric_group"] == "Hardware Status"
     assert by_name["device_psu_state"]["data_type"] == "Enum"
-    assert by_name["device_psu_state"]["unit"] == "none"
+    psu_options = json.loads(by_name["device_psu_state"]["unit"])
+    psu_by_id = {item["id"]: item["name"] for item in psu_options}
+    assert psu_by_id[1] == "healthy"
+    assert psu_by_id[2] == "fault"
     assert by_name["device_psu_state"]["query"].replace(" ", "").startswith("max(")
 
 

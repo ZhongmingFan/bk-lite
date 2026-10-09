@@ -8,7 +8,7 @@ import { PlusOutlined } from '@ant-design/icons';
 import { useTranslation } from '@/utils/i18n';
 
 import { useCollectTypeInfo } from '@/app/log/hooks/integration/common/getCollectTypeConfig';
-import { useRouter } from 'next/navigation';
+import { useScreenAwareRouter } from '@/console-layout';
 import { CollectTypeItem } from '@/app/log/types/integration';
 import { TableDataItem, TreeItem } from '@/app/log/types';
 import Permission from '@/components/permission';
@@ -20,7 +20,7 @@ const Integration = () => {
   const { isLoading } = useApiClient();
   const { getCollectTypes, getDisplayCategoryEnum } = useIntegrationApi();
   const { t } = useTranslation();
-  const router = useRouter();
+  const router = useScreenAwareRouter();
   const { getIcon } = useCollectTypeInfo();
   const [pageLoading, setPageLoading] = useState<boolean>(false);
   const [searchText, setSearchText] = useState<string>('');
@@ -157,7 +157,7 @@ const Integration = () => {
   };
 
   return (
-    <div className="flex">
+    <div className="flex h-full min-h-0 w-full min-w-0 overflow-hidden">
       <TreeSelector
         showAllMenu
         data={treeData}
@@ -165,7 +165,7 @@ const Integration = () => {
         loading={treeLoading}
         onNodeSelect={handleObjectChange}
       />
-      <div className="w-full p-5 bg-[var(--color-bg-1)]">
+      <div className="min-w-0 flex-1 p-5 bg-[var(--color-bg-1)]">
         <div className="flex justify-end">
           <Search
             className="mb-[20px] w-60"

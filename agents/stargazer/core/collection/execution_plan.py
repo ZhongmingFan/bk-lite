@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from core.collection.runtime import CollectionRequest
+from core.collection.runtime import CollectionRequest, _run_log_identity
 from core.logger import logger, safe_log_value
 from core.plugin.yaml_reader import ExecutorConfig, PluginYamlReader, yaml_reader
 
@@ -32,7 +32,7 @@ class TimeoutDefaults:
 @dataclass(frozen=True)
 class ExecutionPlan:
     preflight_timeout_seconds: float
-    probe_timeout_seconds: float
+    probe_timeout_seconds: float | None
     collection_timeout_seconds: float
     publish_timeout_seconds: float
     execution_mode: str
@@ -41,11 +41,15 @@ class ExecutionPlan:
     def __post_init__(self) -> None:
         for field_name in (
             "preflight_timeout_seconds",
-            "probe_timeout_seconds",
             "collection_timeout_seconds",
             "publish_timeout_seconds",
         ):
             _positive_timeout(field_name, getattr(self, field_name))
+        if self.probe_timeout_seconds is not None:
+            _positive_timeout(
+                "probe_timeout_seconds",
+                self.probe_timeout_seconds,
+            )
         if self.execution_mode not in _EXECUTION_MODES:
             raise ValueError(f"execution_mode must be one of {sorted(_EXECUTION_MODES)}")
         if self.capacity_group not in _CAPACITY_GROUPS:
@@ -87,9 +91,8 @@ class ExecutionPlanResolver:
                 )
             except FileNotFoundError as exc:
                 logger.warning(
-                    "event=execution_plan_yaml_missing task_id=%s plugin=%s executor=%s "
-                    "action=use_defaults failed_stage=run_preparation error_type=%s",
-                    safe_log_value(request.task_id),
+                    "event=execution_plan_yaml_missing %s plugin=%s executor=%s action=use_defaults failed_stage=run_preparation error_type=%s",
+                    _run_log_identity(request),
                     safe_log_value(plugin_name or "-"),
                     safe_log_value(executor_type or "protocol"),
                     type(exc).__name__,
@@ -120,10 +123,9 @@ class ExecutionPlanResolver:
             if self._metrics is not None:
                 self._metrics.increment("snmp_timeout_clamped_total")
             logger.warning(
-                "event=snmp_collection_timeout_clamped task_id=%s plugin=%s "
-                "configured_seconds=%s effective_seconds=%s "
+                "event=snmp_collection_timeout_clamped %s plugin=%s configured_seconds=%s effective_seconds=%s "
                 "failed_stage=run_preparation error_type=CollectionTimeoutClamped",
-                safe_log_value(request.task_id),
+                _run_log_identity(request),
                 safe_log_value(plugin_name or "-"),
                 requested_collection_timeout,
                 collection_timeout,
@@ -135,11 +137,16 @@ class ExecutionPlanResolver:
                 self._defaults.preflight_seconds,
                 "preflight_timeout_seconds",
             ),
-            probe_timeout_seconds=_configured_timeout(
-                config,
-                "probe_timeout",
-                self._defaults.probe_seconds,
-                "probe_timeout_seconds",
+            # SNMP 插件自带有界请求超时与重试，不再叠加外层预算。
+            probe_timeout_seconds=(
+                None
+                if target_policy_mode == "snmp"
+                else _configured_timeout(
+                    config,
+                    "probe_timeout",
+                    self._defaults.probe_seconds,
+                    "probe_timeout_seconds",
+                )
             ),
             collection_timeout_seconds=collection_timeout,
             publish_timeout_seconds=self._defaults.publish_seconds,

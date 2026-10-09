@@ -2,7 +2,7 @@
   "collector": "Telegraf",
   "collect_type": "snmp_comtrol",
   "plugin": "Switch Comtrol RocketLinx SNMP",
-  "plugin_desc": "Comtrol RocketLinx industrial Ethernet switch SNMP baseline collection (enterprise 11545). This template uses standard MIB-II / IF-MIB to collect device uptime and 64-bit HC interface traffic. Current public facts confirm RocketLinx managed switch products, the Pepperl+Fuchs Comtrol enterprise root, and an official SNMP MIB file download, but they do not expose stable shared CPU, memory, temperature, fan or power health leaf OIDs with conservative status semantics, so vendor health metrics are not promoted into device-health metrics.",
+  "plugin_desc": "SNMP monitoring template for Comtrol RocketLinx switch. It reports uptime, temperature, optical modules, dual power-supply LED status, and interface traffic (enterprise PEN 2882).",
   "support_collect_detect": true,
   "status_query": "any({instance_type='switch', collect_type='snmp_comtrol'}) by (instance_id)",
   "name": "Switch",
@@ -14,9 +14,104 @@
     "instance_id"
   ],
   "supplementary_indicators": [
-    "snmp_uptime"
+    "snmp_uptime",
+    "sfp_temperature_celsius",
+    "sfp_tx_power",
+    "sfp_rx_power"
   ],
   "metrics": [
+    {
+      "metric_group": "Temperature",
+      "name": "sfp_temperature_celsius",
+      "query": "sfp_temperature_celsius{instance_type='switch', __$labels__}",
+      "display_name": "SFP Temperature",
+      "data_type": "Number",
+      "unit": "celsius",
+      "dimensions": [
+        {
+          "name": "index",
+          "description": "SFP port index (portSfpIndex)"
+        },
+        {
+          "name": "portSfpIndex",
+          "description": "SFP port index"
+        }
+      ],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "Current SFP DDM temperature in degrees Celsius from portSfpDdmTempatureCurrent on the es8520-xt portSfpTable branch. DisplayString text is parsed to a number (unit suffix such as C is stripped). Empty, N/A or no-module rows are skipped. Abnormally high module temperature can indicate airflow issues or a failing optic."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "sfp_tx_power",
+      "query": "sfp_tx_power{instance_type='switch', __$labels__}",
+      "display_name": "SFP TX Power",
+      "data_type": "Number",
+      "unit": "counts",
+      "dimensions": [
+        {
+          "name": "index",
+          "description": "SFP port index (portSfpIndex)"
+        },
+        {
+          "name": "portSfpIndex",
+          "description": "SFP port index"
+        }
+      ],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "Current SFP DDM transmit power from portSfpDdmTxPowerCurrent on the es8520-xt portSfpTable branch. DisplayString text is parsed to a number (unit suffix such as dBm is stripped). Empty, N/A or no-module rows are skipped. Abnormally low Tx power can indicate an aging or failing optical module."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "sfp_rx_power",
+      "query": "sfp_rx_power{instance_type='switch', __$labels__}",
+      "display_name": "SFP RX Power",
+      "data_type": "Number",
+      "unit": "counts",
+      "dimensions": [
+        {
+          "name": "index",
+          "description": "SFP port index (portSfpIndex)"
+        },
+        {
+          "name": "portSfpIndex",
+          "description": "SFP port index"
+        }
+      ],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "Current SFP DDM receive power from portSfpDdmRxPowerCurrent on the es8520-xt portSfpTable branch. DisplayString text is parsed to a number (unit suffix such as dBm is stripped). Empty, N/A or no-module rows are skipped. Abnormally low Rx power can indicate link attenuation, dirty fiber, or a faulty peer transmitter."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "device_psu_state",
+      "query": "max(device_psu_state{instance_type='switch', __$labels__}) by (instance_id)",
+      "display_name": "Power Supply 1 LED Status",
+      "data_type": "Enum",
+      "unit": "[{\"name\":\"正常\",\"id\":1,\"color\":\"#1ac44a\"},{\"name\":\"异常\",\"id\":2,\"color\":\"#ff4d4f\"}]",
+      "dimensions": [],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "LED status of power input 1 on the Comtrol ES8510 (ledPower1Status). Stored as 1=on (normal) or 2=off (abnormal). Missing, empty or not-present readings and values outside the MIB range on(1)/off(2) are dropped."
+    },
+    {
+      "metric_group": "Hardware Status",
+      "name": "device_psu_state_backup",
+      "query": "max(device_psu_state_backup{instance_type='switch', __$labels__}) by (instance_id)",
+      "display_name": "Power Supply 2 LED Status",
+      "data_type": "Enum",
+      "unit": "[{\"name\":\"正常\",\"id\":1,\"color\":\"#1ac44a\"},{\"name\":\"异常\",\"id\":2,\"color\":\"#ff4d4f\"}]",
+      "dimensions": [],
+      "instance_id_keys": [
+        "instance_id"
+      ],
+      "description": "LED status of power input 2 on the Comtrol ES8510 (ledPower2Status). Stored as 1=on (normal) or 2=off (abnormal). Missing, empty or not-present readings and values outside the MIB range on(1)/off(2) are dropped."
+    },
     {
       "metric_group": "Traffic",
       "name": "interface_ifHCInOctets",

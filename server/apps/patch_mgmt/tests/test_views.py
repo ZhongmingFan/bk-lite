@@ -12,6 +12,8 @@ import sys
 import pytest
 from rest_framework import status
 
+from apps.monitor.models import MonitorPlugin  # noqa: F401  INSTALL_APPS 需含 monitor（node_mgmt.urls → collector_release）
+from apps.node_mgmt.models import Node  # noqa: F401  列表 URL 加载依赖 node_mgmt
 from apps.patch_mgmt.constants import ComplianceStatus, GovernanceTaskStatus, GovernanceTaskType, OSType, PatchSourceType
 from apps.patch_mgmt.models import (
     BaselineRequirement,
@@ -311,7 +313,7 @@ class TestPatchSourceViewApi:
         assert resp.status_code == status.HTTP_200_OK, resp.data
         source.refresh_from_db()
         assert source.connectivity_status == "unknown"
-        probe.assert_called_once_with(source.id)
+        probe.assert_called_once_with(source.id, 1)
 
     def test_create_api_missing_required_name_returns_400(self, su_client):
         """malformed_input: 缺少必填字段 name"""
@@ -867,7 +869,9 @@ class TestPatchDashboardViewApi:
         assert resp.data["target_total"] >= 2
         assert resp.data["patch_total"] >= 1
 
-    def test_stats_api_uses_unable_to_determine_for_unknown_compliance(self, su_client):
+    @pytest.mark.parametrize("language,expected_label", [("zh-Hans", "无法判定"), ("en", "Assessment unknown")])
+    def test_stats_api_uses_unable_to_determine_for_unknown_compliance(self, su_client, authenticated_user, language, expected_label):
+        authenticated_user.locale = language
         target = PatchTarget.objects.create(
             name="unknown-compliance-target",
             ip="10.0.0.199",
@@ -889,7 +893,7 @@ class TestPatchDashboardViewApi:
 
         assert resp.status_code == status.HTTP_200_OK
         unknown = next(item for item in resp.data["compliance_distribution"] if item["filter"] == "unknown")
-        assert unknown["label"] == "无法判定"
+        assert unknown["label"] == expected_label
 
     def test_superuser_dashboard_includes_all_target_roots(self, su_client):
         own = PatchTarget.objects.create(name="own", ip="1.1.1.1", team=[1])

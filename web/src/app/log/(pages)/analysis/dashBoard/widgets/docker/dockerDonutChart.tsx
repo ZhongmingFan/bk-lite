@@ -1,8 +1,10 @@
-import React, { useMemo, useRef, useState, useEffect } from 'react';
+import React, { useMemo, useRef, useState, useCallback, useEffect } from 'react';
 import ReactEcharts from 'echarts-for-react';
 import ChartEmptyState from '@/components/chart-empty-state';
 import useChartColors from './useChartColors';
 import { formatNumericValue } from '@/app/log/utils/common';
+import { createDockerDonutSizeBinder } from './dockerDonutSizeObserver';
+import { useTranslation } from '@/utils/i18n';
 
 const trimTrailingZeros = (value: string) =>
   value.replace(/\.0+$|(?<=\.\d*[1-9])0+$/g, '');
@@ -57,24 +59,20 @@ const DockerDonutChart: React.FC<DockerDonutChartProps> = ({
   loading = false,
   config
 }) => {
+  const { t } = useTranslation();
   const colors = useChartColors();
-  const containerRef = useRef<HTMLDivElement>(null);
   // 容器尺寸，用于计算绝对像素 radius
   const [size, setSize] = useState({ w: 0, h: 0 });
+  const binderRef = useRef(createDockerDonutSizeBinder(setSize));
+
+  const containerCallbackRef = useCallback((node: HTMLDivElement | null) => {
+    binderRef.current.bind(node);
+  }, []);
 
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const obs = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        setSize({
-          w: entry.contentRect.width,
-          h: entry.contentRect.height
-        });
-      }
-    });
-    obs.observe(el);
-    return () => obs.disconnect();
+    return () => {
+      binderRef.current.unbind();
+    };
   }, []);
 
   const { chartOption, total } = useMemo(() => {
@@ -219,7 +217,7 @@ const DockerDonutChart: React.FC<DockerDonutChartProps> = ({
         : 0.38;
 
   return (
-    <div ref={containerRef} className="relative h-full w-full">
+    <div ref={containerCallbackRef} className="relative h-full w-full">
       <ReactEcharts
         option={chartOption}
         style={{ height: '100%', width: '100%' }}
@@ -254,7 +252,7 @@ const DockerDonutChart: React.FC<DockerDonutChartProps> = ({
             className="text-[10px] mt-0.5"
             style={{ color: colors.textTertiary }}
           >
-            总数
+            {t('log.analysis.total', '总数')}
           </span>
         </div>
       )}

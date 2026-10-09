@@ -7,6 +7,7 @@ from apps.core.utils.database import bulk_create_with_primary_keys
 from apps.monitor.constants.alert_policy import AlertConstants
 from apps.monitor.constants.database import DatabaseConstants
 from apps.monitor.models import MonitorAlert, MonitorEvent, MonitorEventRawData
+from apps.monitor.services.alert_access import snapshot_policy_organization_ids
 from apps.monitor.services.alert_lifecycle_notify import AlertLifecycleNotifier
 from apps.monitor.utils.dimension import format_dimension_str
 
@@ -16,6 +17,7 @@ class EventAlertManager:
         self.policy = policy
         self.instances_map = instances_map
         self.active_alerts = active_alerts
+        self.organizations = snapshot_policy_organization_ids(policy)
 
     def create_events(self, events):
         if not events:
@@ -204,8 +206,8 @@ class EventAlertManager:
         alert_type: str,
         monitor_instance_id: str = "",
     ) -> tuple:
-        identity = monitor_instance_id if alert_type == "no_data" and monitor_instance_id else metric_instance_id
-        return identity, alert_type
+        del monitor_instance_id
+        return metric_instance_id, alert_type
 
     def _select_lifecycle_events(self, events, new_alerts):
         """只保留触发和新高峰升级；持续命中、级别回落不落 Event。"""
@@ -306,6 +308,8 @@ class EventAlertManager:
                     operator="",
                     notice_type_ids=self.policy.notice_type_ids,
                     notice_users=self.policy.notice_users,
+                    handlers=list(self.policy.handlers or []),
+                    organizations=list(self.organizations),
                 )
             )
 

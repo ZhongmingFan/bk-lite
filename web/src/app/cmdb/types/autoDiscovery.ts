@@ -53,11 +53,15 @@ export interface CollectTaskMessage {
 
 export interface CredentialPoolItem {
   credential_id?: string;
+  credential_source?: 'inline' | 'vault';
+  vault_credential_id?: string;
+  vault_type_key?: string;
   _client_id?: string;
   username?: string;
   user?: string;
   password?: string;
   enable_password?: string;
+  transport_protocol?: 'ssh' | 'telnet' | string;
   port?: number | string;
   database?: string;
   version?: string;
@@ -116,6 +120,7 @@ export interface TreeNode {
   id: string;
   model_id?: string;
   target_model_id?: string;
+  supports_host_discovery?: boolean;
   classification_id?: string;
   default_timeout?: number;
   key: string;
@@ -128,6 +133,9 @@ export interface TreeNode {
   credential_tip_key?: string;
   encrypted_fields?: string[];
   credential_schema?: CredentialSchema;
+  credential_category?: string | null;
+  credential_binding?: string | null;
+  credential_type_keys?: string[];
   tag?: string[];
   desc?: string;
   children?: TreeNode[];
@@ -138,6 +146,7 @@ export interface ModelItem {
   id: string;
   model_id: string;
   target_model_id?: string;
+  supports_host_discovery?: boolean;
   classification_id?: string;
   default_timeout?: number;
   key: string;
@@ -150,6 +159,9 @@ export interface ModelItem {
   credential_tip_key?: string;
   encrypted_fields?: string[];
   credential_schema?: CredentialSchema;
+  credential_category?: string | null;
+  credential_binding?: string | null;
+  credential_type_keys?: string[];
   tag?: string[];
   desc?: string;
   tabItems?: TreeNode[];
@@ -308,6 +320,17 @@ export interface NodeMgmtSyncDetailData {
   raw_data?: TaskData;
   todo?: Array<Record<string, any>>;
   executed?: Array<Record<string, any>>;
+  collect_diagnoses?: Array<{
+    cloud_region_id?: number;
+    task_id?: number;
+    decision?: string;
+    child_status?: string;
+    reason_code?: string;
+    raw_host?: number;
+    raw_process?: number;
+    collect_success?: number;
+    collect_failed?: number;
+  }>;
 }
 
 export interface NodeMgmtSyncRun {

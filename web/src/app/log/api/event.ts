@@ -59,6 +59,24 @@ const useLogEventApi = () => {
     return await patch(`/log/alert/${String(id)}/`, rest);
   };
 
+  const claimLogAlert = async (id: React.Key) => {
+    return await post(`/log/alert/${String(id)}/claim/`);
+  };
+
+  const assignLogAlert = async (
+    id: React.Key,
+    handlers: Array<string | number>
+  ) => {
+    return await post(`/log/alert/${String(id)}/assign/`, { handlers });
+  };
+
+  const reassignLogAlert = async (
+    id: React.Key,
+    handlers: Array<string | number>
+  ) => {
+    return await post(`/log/alert/${String(id)}/reassign/`, { handlers });
+  };
+
   const geEventList = async (
     params: {
       alert_id?: React.Key;
@@ -87,6 +105,10 @@ const useLogEventApi = () => {
     });
   };
 
+  const getAlertSnapshots = async (alertId: React.Key) => {
+    return await get(`/log/alert/snapshots/${String(alertId)}/`);
+  };
+
   const getLogAlertStats = async (
     params: LogAlertParams = {},
     config?: AxiosRequestConfig
@@ -107,9 +129,13 @@ const useLogEventApi = () => {
     getLogAlert,
     getLogAlertStats,
     patchLogAlert,
+    claimLogAlert,
+    assignLogAlert,
+    reassignLogAlert,
     geEventList,
     getEventRaw,
     getEventRawData,
+    getAlertSnapshots,
   };
 };
 

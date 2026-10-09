@@ -10,16 +10,25 @@ from apps.core.logger import opspilot_logger as logger
 from apps.core.mixinx import EncryptMixin
 from apps.core.utils.loader import LanguageLoader
 from apps.opspilot.metis.llm.chain.report_renderers import strip_phantom_tool_calls
+from apps.opspilot.metis.llm.common.llm_client_factory import DEFAULT_CHAT_TEMPERATURE, INTERNAL_SAMPLING_TEMPERATURE_KEY, resolve_gateway_temperature
 from apps.opspilot.models import LLMModel, SkillTools, SkillTypeChoices
 from apps.opspilot.services.builtin_tools import (
+    BUILTIN_ACTIVEDIRECTORY_TOOL_NAME,
+    BUILTIN_ALERTS_TOOL_NAME,
     BUILTIN_ATTACHMENT_FILE_TOOL_NAME,
-    BUILTIN_MONITOR_TOOL_ID,
+    BUILTIN_CMDB_TOOL_NAME,
+    BUILTIN_LOG_TOOL_NAME,
     BUILTIN_MONITOR_TOOL_NAME,
     BUILTIN_MSSQL_TOOL_NAME,
     BUILTIN_MYSQL_TOOL_NAME,
     BUILTIN_ORACLE_TOOL_NAME,
     BUILTIN_REDIS_TOOL_NAME,
+    IDENTITY_ONLY_BUILTIN_TOOLS,
+    build_builtin_activedirectory_runtime_tool,
+    build_builtin_alerts_runtime_tool,
     build_builtin_attachment_file_runtime_tool,
+    build_builtin_cmdb_runtime_tool,
+    build_builtin_log_runtime_tool,
     build_builtin_monitor_runtime_tool,
     build_builtin_mssql_runtime_tool,
     build_builtin_mysql_runtime_tool,
@@ -30,6 +39,7 @@ from apps.opspilot.services.caller_identity import CALLER_IDENTITY_CONFIG_KEY
 from apps.opspilot.services.chat_request import ChatRequest
 from apps.opspilot.services.history_service import history_service
 from apps.opspilot.services.llm_context_budget import DEFAULT_CHAT_SCENE_OUTPUT_TOKENS, working_budget_for_model
+from apps.opspilot.services.skill_memory_service import append_skill_memory_block
 from apps.opspilot.services.wiki.active_generation_query_service import ActiveGenerationReadError
 from apps.opspilot.services.wiki.wiki_budget_service import WikiBudgetExceeded, load_wiki_budget_config
 from apps.opspilot.services.wiki.wiki_context_service import augment_prompt_with_trace, should_skip_wiki_retrieval
@@ -137,7 +147,31 @@ def _wiki_context_options(kwargs):
     top_k = _optional_positive_int(kwargs.get("wiki_top_k"))
     if top_k:
         options["top_k"] = top_k
+    if "force_wiki_grounded" in kwargs:
+        options["force_wiki_grounded"] = bool(kwargs.get("force_wiki_grounded"))
     return options
+
+
+def _attach_wiki_answer_budget(chat_kwargs, extra_config, wiki_budget_trace, derived, *, force_wiki_grounded):
+    extra_config["wiki_budget"] = {
+        **wiki_budget_trace,
+        "max_output_tokens": derived.output_reserve_tokens,
+    }
+    if not force_wiki_grounded:
+        return
+    # 强制知识库回答：单次模型调用。图节点在 max_model_calls=1 时不绑定工具。
+    budget_config = load_wiki_budget_config()
+    route_calls = int((wiki_budget_trace.get("llm_budget") or {}).get("used_calls") or 0)
+    remaining_calls = budget_config.qa_max_llm_calls - route_calls
+    if remaining_calls <= 0:
+        raise WikiBudgetExceeded(
+            "wiki_llm_call_budget_exceeded",
+            "知识库问答 LLM 调用次数已达到上限",
+            details=wiki_budget_trace,
+        )
+    chat_kwargs["max_steps"] = remaining_calls
+    chat_kwargs["max_model_calls"] = 1
+    extra_config["wiki_budget"]["remaining_answer_calls"] = remaining_calls
 
 
 def _resolve_agent_execute_timeout() -> int:
@@ -203,10 +237,10 @@ class ChatService:
         wiki_kb_ids = kwargs.get("wiki_kb_ids") or []
 
         llm_model = LLMModel.objects.get(id=request.llm_model)
-        show_think = request.show_think
+        show_think = False
         skill_type = request.skill_type
         # 与历史行为一致：在转发给 format_chat_server_kwargs 之前从原始 dict 中移除这些键。
-        kwargs.pop("show_think", True)
+        kwargs.pop("show_think", False)
         kwargs.pop("group", 0)
 
         # 处理用户消息和图片
@@ -387,18 +421,26 @@ class ChatService:
         builtin_tool_names = {
             BUILTIN_ATTACHMENT_FILE_TOOL_NAME: None,
             BUILTIN_MONITOR_TOOL_NAME: None,
+            BUILTIN_CMDB_TOOL_NAME: None,
+            BUILTIN_ALERTS_TOOL_NAME: None,
+            BUILTIN_LOG_TOOL_NAME: None,
             BUILTIN_REDIS_TOOL_NAME: None,
             BUILTIN_MYSQL_TOOL_NAME: None,
             BUILTIN_ORACLE_TOOL_NAME: None,
             BUILTIN_MSSQL_TOOL_NAME: None,
+            BUILTIN_ACTIVEDIRECTORY_TOOL_NAME: None,
         }
         builtin_builders = {
             BUILTIN_ATTACHMENT_FILE_TOOL_NAME: build_builtin_attachment_file_runtime_tool,
             BUILTIN_MONITOR_TOOL_NAME: build_builtin_monitor_runtime_tool,
+            BUILTIN_CMDB_TOOL_NAME: build_builtin_cmdb_runtime_tool,
+            BUILTIN_ALERTS_TOOL_NAME: build_builtin_alerts_runtime_tool,
+            BUILTIN_LOG_TOOL_NAME: build_builtin_log_runtime_tool,
             BUILTIN_REDIS_TOOL_NAME: build_builtin_redis_runtime_tool,
             BUILTIN_MYSQL_TOOL_NAME: build_builtin_mysql_runtime_tool,
             BUILTIN_ORACLE_TOOL_NAME: build_builtin_oracle_runtime_tool,
             BUILTIN_MSSQL_TOOL_NAME: build_builtin_mssql_runtime_tool,
+            BUILTIN_ACTIVEDIRECTORY_TOOL_NAME: build_builtin_activedirectory_runtime_tool,
         }
 
         selected_tool_ids = [tool["id"] for tool in selected_tools if isinstance(tool.get("id"), int) and tool["id"] > 0]
@@ -409,11 +451,14 @@ class ChatService:
 
         def _resolved_tool_name(tool):
             tool_id = tool.get("id")
-            if tool_id == BUILTIN_MONITOR_TOOL_ID:
-                return BUILTIN_MONITOR_TOOL_NAME
+            if tool_id in IDENTITY_ONLY_BUILTIN_TOOLS:
+                return IDENTITY_ONLY_BUILTIN_TOOLS[tool_id]
             if isinstance(tool_id, int) and tool_id > 0:
                 skill_tool = skill_tools_by_id.get(tool_id)
                 return skill_tool.name if skill_tool else tool.get("name")
+            raw_name = tool.get("rawName") or tool.get("name")
+            if raw_name in IDENTITY_ONLY_BUILTIN_TOOLS.values():
+                return raw_name
             return tool.get("name")
 
         def _runtime_tool_kwargs(tool):
@@ -421,9 +466,8 @@ class ChatService:
 
         for tool in selected_tools:
             resolved_name = _resolved_tool_name(tool)
-            if resolved_name == BUILTIN_MONITOR_TOOL_NAME:
-                # Monitor 只使用服务端受理时的 caller_identity，旧配置中的所有
-                # kwargs（尤其密码）在任何解密、prompt 或 extra_config 合并前清空。
+            if resolved_name in IDENTITY_ONLY_BUILTIN_TOOLS.values():
+                # 身份只来自 caller_identity，旧配置中的 kwargs 在解密前清空。
                 tool["kwargs"] = []
             else:
                 for item in tool.get("kwargs", []):
@@ -443,15 +487,14 @@ class ChatService:
             loaded_tool_names.add(skill_tool.name)
             is_builtin = skill_tool.is_build_in or skill_tool.name in builtin_tool_names
             tool_kwargs_for_builtin = tool_map.get(skill_tool.id, {})
-            if skill_tool.name == BUILTIN_MONITOR_TOOL_NAME:
-                # DB 中可能仍保存旧版凭据或 extra_param_prompt；Monitor 运行时
-                # descriptor 必须完全由安全 builder 重建。
-                tool_params = build_builtin_monitor_runtime_tool(tool_kwargs_for_builtin)
+            if skill_tool.name in IDENTITY_ONLY_BUILTIN_TOOLS.values():
+                builder = builtin_builders.get(skill_tool.name)
+                tool_params = builder(tool_kwargs_for_builtin) if builder else skill_tool.params.copy()
             else:
                 tool_params = skill_tool.params.copy()
                 tool_params.pop("kwargs", None)
 
-            if is_builtin and skill_tool.name != BUILTIN_MONITOR_TOOL_NAME:
+            if is_builtin and skill_tool.name not in IDENTITY_ONLY_BUILTIN_TOOLS.values():
                 tool_params["url"] = f"langchain:{skill_tool.name}"
                 builder = builtin_builders.get(skill_tool.name)
                 if builder:
@@ -542,9 +585,9 @@ class ChatService:
         Returns:
             chat_kwargs字典、doc_map字典、title_map字典
         """
-        show_think = kwargs.get("show_think", True)
+        show_think = False
         title_map = doc_map = {}
-        extra_config = {"show_think": show_think}
+        extra_config = {"show_think": show_think, "user_timezone": str(kwargs.get("user_timezone") or "").strip()}
 
         user_message, image_data = history_service.process_user_message_and_images(kwargs["user_message"])
         if image_data:
@@ -558,8 +601,10 @@ class ChatService:
 
         # Wiki 知识库复用:若技能选择了 Wiki 知识库,则检索并把上下文注入系统提示词。
         # 寒暄/闲聊跳过检索与 Wiki 答疑预算收口，按普通对话回复。
+        # 非强制只把知识库当参考，保留工具循环；强制才收成单次 grounded 回答。
         wiki_budget_trace = {}
         wiki_kb_ids = kwargs.get("wiki_kb_ids")
+        force_wiki_grounded = bool(kwargs.get("force_wiki_grounded"))
         wiki_active = bool(wiki_kb_ids) and not should_skip_wiki_retrieval(user_message)
         if wiki_kb_ids and not wiki_active:
             wiki_budget_trace = {
@@ -582,22 +627,38 @@ class ChatService:
                 extra_config["wiki_citations"] = wiki_citations
             extra_config["wiki_budget"] = wiki_budget_trace
 
+        memory_block = kwargs.get("skill_memory_block") or ""
+        if memory_block:
+            resolved_prompt = append_skill_memory_block(resolved_prompt, memory_block)
+
+        vendor_type = llm_model.vendor.vendor_type if llm_model.vendor_id else ""
+        # 对话温度固定 1；技能表与请求里的旧滑条值忽略。
+        # 内部节点可通过 internal_sampling_temperature 保留低温采样；
+        # 固定单位模型仍经 resolve_gateway_temperature 省略该字段。
+        if INTERNAL_SAMPLING_TEMPERATURE_KEY in kwargs:
+            requested_temperature = kwargs[INTERNAL_SAMPLING_TEMPERATURE_KEY]
+        else:
+            requested_temperature = DEFAULT_CHAT_TEMPERATURE
+        sampling_temperature = resolve_gateway_temperature(llm_model.model_name, requested_temperature, vendor_type)
+
         # 构建聊天参数
         chat_kwargs = {
             "openai_api_base": llm_model.openai_api_base,
             "openai_api_key": llm_model.openai_api_key,
             "model": llm_model.model_name,
             "protocol_type": llm_model.protocol_type,
-            "vendor_type": llm_model.vendor.vendor_type if llm_model.vendor_id else "",
+            "vendor_type": vendor_type,
             "system_message_prompt": resolved_prompt,
-            "temperature": kwargs["temperature"],
+            "temperature": sampling_temperature,
             "user_message": user_message,
             "chat_history": chat_history,
             "user_id": str(kwargs["user_id"]),
             "enable_naive_rag": False,
             "rag_stage": "string",
-            "enable_suggest": kwargs.get("enable_suggest", False),
-            "enable_query_rewrite": kwargs.get("enable_query_rewrite", False),
+            # 问题建议 / 问题优化 / 展示思考已下线：忽略技能表与请求里的旧开关。
+            # <think> 标签仍由 stream_common / invoke_chat 硬匹配剥离，不展示思考过程。
+            "enable_suggest": False,
+            "enable_query_rewrite": False,
             "locale": kwargs.get("locale", "en"),
         }
 
@@ -612,24 +673,13 @@ class ChatService:
         )
 
         if wiki_active:
-            budget_config = load_wiki_budget_config()
-            route_calls = int((wiki_budget_trace.get("llm_budget") or {}).get("used_calls") or 0)
-            remaining_calls = budget_config.qa_max_llm_calls - route_calls
-            if remaining_calls <= 0:
-                raise WikiBudgetExceeded(
-                    "wiki_llm_call_budget_exceeded",
-                    "知识库问答 LLM 调用次数已达到上限",
-                    details=wiki_budget_trace,
-                )
-            chat_kwargs["max_steps"] = remaining_calls
-            chat_kwargs["max_model_calls"] = 1
-            chat_kwargs["enable_query_rewrite"] = False
-            chat_kwargs["enable_suggest"] = False
-            extra_config["wiki_budget"] = {
-                **wiki_budget_trace,
-                "remaining_answer_calls": remaining_calls,
-                "max_output_tokens": derived.output_reserve_tokens,
-            }
+            _attach_wiki_answer_budget(
+                chat_kwargs,
+                extra_config,
+                wiki_budget_trace,
+                derived,
+                force_wiki_grounded=force_wiki_grounded,
+            )
         if kwargs.get("thread_id"):
             chat_kwargs["thread_id"] = str(kwargs["thread_id"])
         elif kwargs.get("execution_id"):

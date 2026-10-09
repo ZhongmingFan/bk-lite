@@ -128,6 +128,31 @@ class NodeMgmt(object):
         return_data = self.client.run("get_child_configs_by_ids", ids)
         return return_data
 
+    def run_telegraf_child_configs_once(self, request_id, config_ids, expected_node_id, organization_ids):
+        """在配置所属节点上一次性执行已保存的 CMDB Telegraf 子配置。"""
+        from apps.core.utils.current_team_scope import _normalize_organization_ids
+        from apps.node_mgmt.services.telegraf_oneshot import TelegrafOneShotService
+
+        normalized_organizations = sorted(_normalize_organization_ids(organization_ids))
+        authorization = TelegrafOneShotService.build_authorization(
+            request_id=request_id,
+            config_ids=config_ids,
+            expected_node_id=expected_node_id,
+            organization_ids=normalized_organizations,
+        )
+        timeout_options = {} if self.is_local_client else {"_timeout": 61}
+        return self.client.run(
+            "run_telegraf_child_configs_once",
+            {
+                "request_id": request_id,
+                "config_ids": config_ids,
+                "expected_node_id": expected_node_id,
+                "organization_ids": normalized_organizations,
+                "authorization": authorization,
+            },
+            **timeout_options,
+        )
+
     def get_child_config_nodes_by_ids(self, ids, organization_ids):
         """按子配置 ID 批量获取当前组织范围内的采集节点。"""
         return self.client.run(
@@ -150,6 +175,26 @@ class NodeMgmt(object):
             permission_data or {},
         )
         return return_data
+
+    def get_authorized_execution_targets_by_ids(self, node_ids, permission_data=None):
+        if not self.is_local_client:
+            logger.warning("RPC local client required: operation=get_authorized_execution_targets_by_ids")
+            raise RpcLocalClientRequiredError("get_authorized_execution_targets_by_ids")
+        return self.client.run(
+            "get_authorized_execution_targets_by_ids",
+            node_ids,
+            permission_data or {},
+        )
+
+    def get_authorized_execution_targets_by_ips(self, ips, permission_data=None):
+        if not self.is_local_client:
+            logger.warning("RPC local client required: operation=get_authorized_execution_targets_by_ips")
+            raise RpcLocalClientRequiredError("get_authorized_execution_targets_by_ips")
+        return self.client.run(
+            "get_authorized_execution_targets_by_ips",
+            ips,
+            permission_data or {},
+        )
 
     def update_child_config_content(self, id, content, env_config=None):
         """

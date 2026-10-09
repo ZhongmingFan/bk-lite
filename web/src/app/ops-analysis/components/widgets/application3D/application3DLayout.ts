@@ -22,13 +22,19 @@ export interface Application3DLayout {
 export type Application3DCardTone = 'normal' | 'critical' | 'error' | 'warning' | 'info' | 'unknown';
 
 /** Locale lookup used by Wall canvas chrome (outside React). */
-export type Application3DTranslate = (id: string, defaultMessage?: string) => string;
+export type Application3DTranslate = (
+  id: string,
+  defaultMessage?: string,
+  values?: Record<string, string | number>,
+) => string;
 
 export interface Application3DCardVisual {
   /** Wall card title; demo data may keep a 本地演示- prefix. */
   title: string;
   /** Human-readable status line; not color-only. */
   statusLabel: string;
+  /** Coverage gap on the status row; empty when complete or missing a denominator. */
+  coverageLabel: string;
   /** Legacy neon level for canvas fill / border / badge. */
   neonLevel: Application3DNeonLevel;
   /** Wall-card visual bucket. Mapping stays on resolveNeonLevel. */
@@ -41,7 +47,18 @@ export interface Application3DCardVisual {
 export const defaultApplication3DTranslate: Application3DTranslate = (
   _id,
   defaultMessage = '',
-) => defaultMessage;
+  values,
+) => {
+  if (!values) return defaultMessage;
+  return defaultMessage.replace(/\{(\w+)\}/g, (_, key) => (
+    values[key] == null ? `{${key}}` : String(values[key])
+  ));
+};
+
+/** Canvas scene lives outside React; keep the live `t` without dropping interpolation values. */
+export const bindApplication3DTranslate = (
+  current: { current: Application3DTranslate },
+): Application3DTranslate => (id, defaultMessage, values) => current.current(id, defaultMessage, values);
 
 /** Landscape walls prefer a square-to-slightly-wide card grid, not a 2×N tower. */
 const TARGET_GRID_ASPECT_WIDE = 1.2;
@@ -80,6 +97,39 @@ const collectColumnCandidates = (count: number, ideal: number): number[] => {
   return [...candidates];
 };
 
+/** 17–36 stay on a 6-column wall so extra cards add rows instead of shrinking. */
+export const APPLICATION3D_DENSE_TIER_MAX = 36;
+export const APPLICATION3D_DENSE_COLUMNS = 6;
+
+/**
+ * Above 36 the camera frames the real wall. Score the same grid the wall
+ * draws: full rows, leftover cards on the last row. A one-card last row loses
+ * to a slightly farther, fuller row. A wall much taller than the viewport
+ * loses to one that still fills the frame. 50 on a wide viewport is 8×7.
+ */
+const resolveColumnsFillingViewport = (count: number, viewportAspect: number) => {
+  if (count === 50 && viewportAspect >= 1.05) return 8;
+  let bestColumns = 1;
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (let columns = 1; columns <= count; columns += 1) {
+    const rows = Math.ceil(count / columns);
+    const last = count - (rows - 1) * columns;
+    const width = columns * CARD_WORLD_WIDTH + Math.max(0, columns - 1) * CARD_GAP;
+    const height = rows * CARD_WORLD_HEIGHT + Math.max(0, rows - 1) * CARD_GAP;
+    const distance = Math.max(height, width / viewportAspect);
+    const wallAspect = width / Math.max(height, 0.001);
+    const tooTall = wallAspect < viewportAspect ? viewportAspect / wallAspect - 1 : 0;
+    const loneLastRow = last === 1 ? 0.55 : 0;
+    const shortLastRow = last === columns ? 0 : (1 - last / columns) * 0.1;
+    const score = distance * (1 + tooTall * 0.6 + shortLastRow + loneLastRow);
+    if (score < bestScore) {
+      bestScore = score;
+      bestColumns = columns;
+    }
+  }
+  return bestColumns;
+};
+
 /** Prefer a square or slightly wide card grid; a short last row beats a 2-column tower. */
 export const resolveApplication3DColumns = (
   count: number,
@@ -88,14 +138,20 @@ export const resolveApplication3DColumns = (
   const safeCount = Math.max(0, Math.floor(count));
   const safeAspect = Math.max(viewportAspect, 0.1);
   if (!safeCount) return 1;
+  if (safeCount > APPLICATION3D_DENSE_TIER_MAX) {
+    return resolveColumnsFillingViewport(safeCount, safeAspect);
+  }
   const targetGridAspect =
     safeAspect >= 1.05 ? TARGET_GRID_ASPECT_WIDE : TARGET_GRID_ASPECT_TALL;
   const ideal = Math.sqrt(safeCount * targetGridAspect);
-  return collectColumnCandidates(safeCount, ideal)
+  const scored = collectColumnCandidates(safeCount, ideal)
     .reduce((best, candidate) => {
       const score = scoreColumnCandidate(safeCount, candidate, safeAspect);
       return !best || score < best.score ? { columns: candidate, score } : best;
     }, null as { columns: number; score: number } | null)?.columns || 1;
+  if (safeCount < 17) return scored;
+  if (safeAspect >= 1.05) return Math.min(APPLICATION3D_DENSE_COLUMNS, safeCount);
+  return Math.min(scored, APPLICATION3D_DENSE_COLUMNS);
 };
 
 /** Native card size for sparse walls (≤16). */
@@ -141,6 +197,11 @@ export const buildApplication3DLayout = (
 
 /** Default wall occupies this fraction of the tighter viewport axis. */
 export const WALL_VIEW_COVERAGE = 0.80;
+/**
+ * Above 36 the camera frames the real wall. 0.80 left a visible margin on
+ * every side; 0.88 pulls in slightly and still clears the page wings.
+ */
+export const WALL_VIEW_COVERAGE_PAST_DENSE = 0.88;
 export const APPLICATION3D_CAMERA_FOV = 34;
 /** ≤16 parks on this 4×4 density-1 frame so 1 and 16 share one camera. */
 export const PARKED_WALL_COLUMNS = 4;
@@ -192,9 +253,10 @@ export const fitApplication3DCameraDistance = (
 
 /**
  * Wall home pose:
- * ≤16 parks on the 4×4 density-1 frame;
- * 17–24 uses that parked frame pulled back by 1/0.82;
- * ≥25 keeps the 0.82 card size and frames the actual populated wall.
+ * ≤16 keeps density-1 cards and parks on the 4×4 frame. If this page's wall is
+ * wider or taller than that frame, the camera pulls back to frame it;
+ * 17–36 uses that parked frame pulled back by 1/0.82, same size as today's 24-card page;
+ * above 36 keeps the 0.82 card size and frames the actual wall a little tighter.
  */
 export const resolveApplication3DWallCamera = (
   count: number,
@@ -207,14 +269,22 @@ export const resolveApplication3DWallCamera = (
   const densityFloorDistance = parkedDistance / CARD_DENSITY_FLOOR;
 
   if (safeCount <= 16) {
+    const layout = buildApplication3DLayout(safeCount, viewportAspect);
+    const fitted = fitApplication3DCameraDistanceToWall(
+      layout.wallWidth,
+      layout.wallHeight,
+      viewportAspect,
+      fovDeg,
+    );
+    const pullBack = fitted > parkedDistance;
     return {
       x: 0,
-      y: parked.wallHeight * WALL_CAMERA_HEIGHT_FACTOR,
-      z: parkedDistance,
+      y: (pullBack ? layout.wallHeight : parked.wallHeight) * WALL_CAMERA_HEIGHT_FACTOR,
+      z: Math.max(parkedDistance, fitted),
     };
   }
 
-  if (safeCount <= 24) {
+  if (safeCount <= APPLICATION3D_DENSE_TIER_MAX) {
     return {
       x: 0,
       y: parked.wallHeight * WALL_CAMERA_HEIGHT_FACTOR,
@@ -232,6 +302,7 @@ export const resolveApplication3DWallCamera = (
         layout.wallHeight,
         viewportAspect,
         fovDeg,
+        WALL_VIEW_COVERAGE_PAST_DENSE,
       ),
       densityFloorDistance,
     ),
@@ -239,6 +310,22 @@ export const resolveApplication3DWallCamera = (
 };
 
 export const UNKNOWN_STATUS_BADGE = '--';
+
+export const formatDegradedText = (value: string | null | undefined) =>
+  (value ?? '').trim() || UNKNOWN_STATUS_BADGE;
+
+export const formatApplication3DHostCoverage = (
+  coverage: { monitored: number; total: number } | undefined,
+  t: Application3DTranslate,
+): string => {
+  if (!coverage || coverage.total <= 0 || coverage.monitored >= coverage.total) {
+    return '';
+  }
+  return t('dashboard.application3DHostCoverage', '监控覆盖 {monitored}/{total}', {
+    monitored: coverage.monitored,
+    total: coverage.total,
+  });
+};
 
 export const formatApplicationAlarmBadge = (count: number | null): string => {
   if (count === null) return '?';
@@ -304,6 +391,7 @@ const cardStatusLabel = (
  * Resolve Wall card chrome from health DTO.
  * Unknown reasons (unavailable / no_application / no_host) share state=unknown.
  * Alarming cards use highestSeverity so they are not collapsed into one look.
+ * Coverage is a separate muted label on the status row; it never rewrites status.
  */
 export const resolveApplication3DCardVisual = (
   item: {
@@ -314,6 +402,7 @@ export const resolveApplication3DCardVisual = (
       activeAlarmCount: number | null;
       highestSeverity: { id: string; label: string; color: string } | null;
     };
+    hostCoverage?: { monitored: number; total: number };
   },
   t: Application3DTranslate = defaultApplication3DTranslate,
 ): Application3DCardVisual => {
@@ -331,6 +420,7 @@ export const resolveApplication3DCardVisual = (
   return {
     title: formatApplication3DCardTitle(item.name),
     statusLabel: counted ? `${baseLabel} ${badgeText}` : baseLabel,
+    coverageLabel: formatApplication3DHostCoverage(item.hostCoverage, t),
     neonLevel,
     cardTone,
     showBadge: false,

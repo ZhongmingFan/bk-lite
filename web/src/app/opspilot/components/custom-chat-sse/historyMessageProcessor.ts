@@ -17,9 +17,11 @@ import {
   WikiCitation,
 } from '@/app/opspilot/types/global';
 import { initToolCallTooltips, renderErrorMessage, ToolCallInfo } from './toolCallRenderer';
+import { getOpspilotTranslate } from './i18n';
 import {
   applyPlannedExecutionStep,
   attachToolCallToCurrentStep,
+  plannedStepIndexFromToolEvent,
   createPlannedExecutionState,
   finalizePlannedExecutionSteps,
   isFailedPlannedStepStatus,
@@ -449,7 +451,11 @@ const buildFromEvents = (events: any[], finalize = true) => {
           status: 'completed',
           result: undefined
         });
-        plannedExecutionState = attachToolCallToCurrentStep(plannedExecutionState, msg.toolCallId);
+        plannedExecutionState = attachToolCallToCurrentStep(
+          plannedExecutionState,
+          msg.toolCallId,
+          plannedStepIndexFromToolEvent(msg)
+        );
         break;
 
       case 'TOOL_CALL_ARGS':
@@ -490,8 +496,14 @@ const buildFromEvents = (events: any[], finalize = true) => {
       case 'TOOL_CALL_END':
         if (msg.toolCallId && toolCalls.has(msg.toolCallId)) {
           if (!isToolAssignedToPlannedStep(plannedExecutionState, msg.toolCallId)) {
-            pendingToolIds.push(msg.toolCallId);
-            lastBlockType = 'toolCall';
+            if (plannedExecutionState.steps.length > 0) {
+              if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+                console.debug('[planned-execution] unassigned tool call', msg.toolCallId);
+              }
+            } else {
+              pendingToolIds.push(msg.toolCallId);
+              lastBlockType = 'toolCall';
+            }
           }
         }
         break;
@@ -503,8 +515,14 @@ const buildFromEvents = (events: any[], finalize = true) => {
           parts.push(currentText);
           currentText = '';
         }
-        const errorMessage = msg.message || '执行过程中发生错误';
-        const errorHtml = renderErrorMessage(errorMessage, msg.type === 'RUN_ERROR' ? 'run_error' : 'error', msg.code);
+        const errorMessage =
+        msg.message || getOpspilotTranslate()('chat.historyError', '执行过程中发生错误');
+        const errorHtml = renderErrorMessage(
+          errorMessage,
+          msg.type === 'RUN_ERROR' ? 'run_error' : 'error',
+          msg.code,
+          getOpspilotTranslate()
+        );
         if (parts.length > 0) {
           parts.push('\n\n' + errorHtml);
         } else {
@@ -519,6 +537,9 @@ const buildFromEvents = (events: any[], finalize = true) => {
           const customValue = unwrapCustomValue(msg.value);
           const customName = msg.name || (isRecord(customValue) ? String(customValue.name || '') : '');
           const plannedKind = looksLikePlannedExecutionPayload(customValue);
+          if (customName === 'stream_keepalive' || customName === 'planned_step_hidden_text') {
+            break;
+          }
           if (customName === 'browser_step_progress' && customValue) {
             upsertStep(customValue as BrowserStepProgressData);
           } else if (customName === 'browser_task_received' && customValue) {
@@ -581,7 +602,7 @@ const buildFromEvents = (events: any[], finalize = true) => {
               const errorText =
                 (typeof stepValue.error === 'string' && stepValue.error.trim()) ||
                 step?.error ||
-                '步骤因凭据、权限或配置失败已中止';
+                getOpspilotTranslate()('chat.plannedStep.abortedByCredentials', '步骤因凭据、权限或配置失败已中止');
               for (const toolCallId of step?.toolCallIds || []) {
                 const tool = toolCalls.get(toolCallId);
                 if (!tool || tool.status !== 'calling') continue;
@@ -642,6 +663,7 @@ const buildFromEvents = (events: any[], finalize = true) => {
         objective: step.objective,
         status: step.status,
         toolCallIds: [...step.toolCallIds],
+        reusedPriorResult: step.reusedPriorResult,
         error: step.error,
       }))
       : undefined;

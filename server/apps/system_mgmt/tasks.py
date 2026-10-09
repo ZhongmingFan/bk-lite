@@ -14,6 +14,7 @@ from apps.rpc.base import RpcClient
 from apps.system_mgmt.models import Channel, ErrorLog, Group, LoginModule, SystemSettings, User
 from apps.system_mgmt.models.channel import ChannelChoices
 from apps.system_mgmt.utils.channel_utils import send_email_to_user
+from apps.system_mgmt.utils.i18n import system_mgmt_message
 from apps.system_mgmt.utils.group_utils import GroupUtils
 
 
@@ -318,12 +319,13 @@ def check_password_expiry_and_notify():
         if days_left > reminder_days:
             continue
 
+        name = user.display_name or user.username
         if days_left > 0:
-            subject = "密码即将过期提醒"
-            body = f"<p>尊敬的 {user.display_name or user.username}：</p><p>您的密码将在 <b>{days_left}</b> 天后过期，请尽快修改密码。</p>"
+            subject = system_mgmt_message(user.locale, "email.password_expiring_subject")
+            body = system_mgmt_message(user.locale, "email.password_expiring_body", name=name, days=days_left)
         else:
-            subject = "密码已过期提醒"
-            body = f"<p>尊敬的 {user.display_name or user.username}：</p><p>您的密码已过期，请立即修改密码。</p>"
+            subject = system_mgmt_message(user.locale, "email.password_expired_subject")
+            body = system_mgmt_message(user.locale, "email.password_expired_body", name=name)
 
         result = send_email_to_user(channel_config, body, [user.email], subject)
         if result.get("result"):
@@ -457,7 +459,16 @@ def send_initial_password_email_batch(run_id: int):
         username = item["username"]
         user = users.get(item["user_id"])
         if not user or not user.email:
-            outcomes.append({"username": username, "ok": False, "reason": "用户邮箱为空或用户不存在"})
+            outcomes.append(
+                {
+                    "username": username,
+                    "ok": False,
+                    "reason": system_mgmt_message(
+                        getattr(user, "locale", None) if user else None,
+                        "error.email_recipient_missing_or_unknown",
+                    ),
+                }
+            )
             continue
         try:
             raw_password = decrypt_from_vault(vault[username])

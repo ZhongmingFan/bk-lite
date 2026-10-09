@@ -8,8 +8,9 @@ from django.utils import translation
 from rest_framework.exceptions import ValidationError
 
 from apps.core.logger import operation_analysis_logger as logger
-from apps.core.utils.team_utils import get_current_team
+from apps.core.utils.team_utils import collect_group_tree_ids, get_current_team
 from apps.operation_analysis.nats.nats_client import DefaultNastClient
+from apps.operation_analysis.services.user_messages import oa_message
 from apps.rpc.base import AppClient
 
 # 连远端共享 NATS 时，旧 worker 可能没有叠色 handler。本地开发 IS_LOCAL_RPC=1 走本进程。
@@ -20,13 +21,30 @@ _LOCAL_RPC_OVERLAY_MODULES = {
 }
 
 
+def parse_organization_team(value):
+    """画布组织筛选值 → 组织 ID。空或非法返回 None，调用方继续用 cookie 组织。"""
+    if value in (None, "", [], ()):
+        return None
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+        if value in (None, ""):
+            return None
+    try:
+        team = int(value)
+    except (TypeError, ValueError):
+        return None
+    if team <= 0:
+        return None
+    return team
+
+
 def build_nats_user_info(request) -> dict:
     username = request.user.username
     team_str = get_current_team(request)
     try:
         team = int(team_str)
     except (TypeError, ValueError):
-        raise ValidationError("current_team cookie 缺失或格式错误，请重新登录或刷新页面")
+        raise ValidationError(oa_message("messages.current_team_cookie_invalid", "current_team cookie 缺失或格式错误，请重新登录或刷新页面"))
     include_children = request.COOKIES.get("include_children", "0") == "1"
     permission = getattr(request.user, "permission", {})
     if isinstance(permission, dict):
@@ -44,15 +62,88 @@ def build_nats_user_info(request) -> dict:
     }
 
 
+ORGANIZATION_PARAM_KEY = "organization_param"
+
+# 取数失败的身份是 code。展示文案由视图按 code 解析，不拿中文或插值后的句子做匹配。
+NATS_SOURCE_INVALID_NAMESPACE_PARAM = "invalid_namespace_param"
+NATS_SOURCE_DATASOURCE_UNLINKED = "datasource_namespace_unlinked"
+NATS_SOURCE_DATASOURCE_NOT_SELECTED = "datasource_namespace_not_selected"
+NATS_SOURCE_NAMESPACE_UNAVAILABLE = "namespace_unavailable"
+NATS_SOURCE_NAMESPACE_SERVER_MISSING = "namespace_server_missing"
+NATS_SOURCE_MODULE_NOT_FOUND = "module_not_found"
+
+
+class NatsSourceError(RuntimeError):
+    def __init__(self, code, **details):
+        self.code = code
+        self.details = details
+        super().__init__(code)
+
+
+def is_organization_param_spec(spec) -> bool:
+    """参数定义是否为组织控件（inputConfig 优先，旧 inputMode 只读兼容）。"""
+    if not isinstance(spec, dict):
+        return False
+    input_config = spec.get("inputConfig")
+    if isinstance(input_config, dict):
+        return input_config.get("control") == "organization"
+    return spec.get("inputMode") == "organization"
+
+
+def _organization_param_names_from_specs(param_specs) -> list[str]:
+    names = []
+    seen = set()
+    for spec in param_specs or []:
+        if not is_organization_param_spec(spec):
+            continue
+        raw_name = spec.get("name")
+        if not isinstance(raw_name, str):
+            continue
+        name = raw_name.strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def resolve_organization_param_name(params: dict, param_specs=None) -> str | None:
+    """解析本次请求的组织语义参数名。标记优先；无标记回落定义；多个定义报错。"""
+    spec_names = _organization_param_names_from_specs(param_specs)
+    if len(spec_names) > 1:
+        raise ValidationError(oa_message("messages.multiple_org_params", "同一请求不能声明多个组织控件参数"))
+
+    marker = params.get(ORGANIZATION_PARAM_KEY) if isinstance(params, dict) else None
+    if marker not in (None, ""):
+        if not isinstance(marker, str):
+            raise ValidationError(oa_message("messages.organization_param_name", "organization_param 必须是参数名字符串"))
+        name = marker.strip()
+        if name:
+            return name
+
+    if len(spec_names) == 1:
+        return spec_names[0]
+    return None
+
+
 class GetNatsData:
     """
     获取NATS数据源数据
     """
 
-    def __init__(self, namespace: str, path: str, namespace_list: list, params: dict = None, request=None):
+    def __init__(
+        self,
+        namespace: str,
+        path: str,
+        namespace_list: list,
+        params: dict = None,
+        request=None,
+        param_specs=None,
+    ):
         self.request = request
         self.path = path
         self.params = params if params is not None else {}
+        self.param_specs = param_specs if param_specs is not None else []
         self.update_request_params()
         self.namespace = namespace
         self.namespace_list = namespace_list
@@ -76,6 +167,17 @@ class GetNatsData:
         :return:
         """
         self.params[self.user_param_key] = build_nats_user_info(self.request)
+        param_name = resolve_organization_param_name(self.params, self.param_specs)
+        self.params.pop(ORGANIZATION_PARAM_KEY, None)
+        if not param_name:
+            return
+        organization_team = parse_organization_team(self.params.get(param_name))
+        if organization_team is None:
+            return
+        user_info = self.params[self.user_param_key]
+        allowed_team_ids = collect_group_tree_ids(user_info.get("group_tree"))
+        allowed_team_ids.add(user_info["team"])
+        user_info["team"] = organization_team if organization_team in allowed_team_ids else None
 
     def set_namespace_servers(self):
         """
@@ -115,15 +217,15 @@ class GetNatsData:
             try:
                 namespace_id = int(namespace_id)
             except (TypeError, ValueError):
-                raise RuntimeError("命名空间参数无效")
+                raise NatsSourceError(NATS_SOURCE_INVALID_NAMESPACE_PARAM)
 
         if namespace_id is not None:
             if not self.namespace_list:
-                raise RuntimeError("数据源未关联命名空间")
+                raise NatsSourceError(NATS_SOURCE_DATASOURCE_UNLINKED)
             for ns in self.namespace_list:
                 if ns.id == namespace_id:
                     return ns
-            raise RuntimeError("数据源未关联所选命名空间")
+            raise NatsSourceError(NATS_SOURCE_DATASOURCE_NOT_SELECTED)
 
         # 未指定或未匹配到，返回第一个
         return self.namespace_list[0] if self.namespace_list else None
@@ -134,6 +236,7 @@ class GetNatsData:
         """
         local_module = _LOCAL_RPC_OVERLAY_MODULES.get((self.namespace, self.path))
         if local_module and os.getenv("IS_LOCAL_RPC", "0") == "1":
+            self.params.pop(ORGANIZATION_PARAM_KEY, None)
             self.params.pop("namespace_id", None)
             logger.debug(
                 "[DataSourceQuery] IS_LOCAL_RPC 本进程取数 namespace=%s path=%s",
@@ -144,11 +247,20 @@ class GetNatsData:
 
         namespace = self._get_target_namespace()
         if namespace is None:
-            raise RuntimeError("未找到可用的命名空间")
+            raise NatsSourceError(NATS_SOURCE_NAMESPACE_UNAVAILABLE)
 
         server_url = self.namespace_server_map.get(namespace.id)
         if not server_url:
-            raise RuntimeError(f"命名空间 {namespace.name} 未配置服务器连接")
+            logger.warning(
+                "[DataSourceQuery] 命名空间未配置连接 namespace=%s namespace_id=%s",
+                namespace.name,
+                namespace.id,
+            )
+            raise NatsSourceError(
+                NATS_SOURCE_NAMESPACE_SERVER_MISSING,
+                namespace_name=namespace.name,
+                namespace_id=namespace.id,
+            )
 
         nats_namespace = getattr(namespace, "namespace", "bk_lite")
         nats_client = self._get_client(server=server_url, namespace=nats_namespace)
@@ -164,7 +276,11 @@ class GetNatsData:
                 nats_namespace,
                 self.path,
             )
-            raise RuntimeError(f"NamePaces({self.namespace}) Module not found func({self.path})!")
+            raise NatsSourceError(
+                NATS_SOURCE_MODULE_NOT_FOUND,
+                namespace=self.namespace,
+                path=self.path,
+            )
 
         logger.debug(
             "[DataSourceQuery] 调用 NATS 取数 namespace=%s(id=%s) nats_namespace=%s path=%s",

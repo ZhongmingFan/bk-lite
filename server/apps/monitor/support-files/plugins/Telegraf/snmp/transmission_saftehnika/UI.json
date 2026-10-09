@@ -343,6 +343,41 @@
       },
       "label_en": "Interval",
       "description_en": "Collection time interval (unit: seconds)"
+    },
+    {
+      "name": "product_branch",
+      "label": "产品分支",
+      "type": "select",
+      "required": true,
+      "editable": true,
+      "default_value": "integra-b",
+      "description": "选择 Integra-B、Integra-W 或 MPMUX。三套系统树不得混采，否则会轮询对端不存在的 OID。",
+      "description_en": "Select Integra-B, Integra-W or MPMUX. The three system trees must not be mixed, otherwise missing OIDs are polled.",
+      "options": [
+        {
+          "label": "Integra-B",
+          "value": "integra-b",
+          "label_en": "Integra-B"
+        },
+        {
+          "label": "Integra-W",
+          "value": "integra-w",
+          "label_en": "Integra-W"
+        },
+        {
+          "label": "MPMUX",
+          "value": "mpmux",
+          "label_en": "MPMUX"
+        }
+      ],
+      "widget_props": {
+        "placeholder": "选择产品分支",
+        "placeholder_en": "Select product branch"
+      },
+      "transform_on_edit": {
+        "origin_path": "child.content.config.tags.product_branch"
+      },
+      "label_en": "Product Branch"
     }
   ],
   "table_columns": [

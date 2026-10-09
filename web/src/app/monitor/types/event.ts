@@ -38,7 +38,7 @@ export interface StrategyFields {
   metric_unit?: string;
   organizations?: string[];
   source?: SourceFeild;
-  collect_type?: number;
+  collect_type?: string | number;
   schedule?: {
     type: string;
     value: number;
@@ -65,6 +65,7 @@ export interface StrategyFields {
   notice_type?: string;
   notice_type_ids?: number[];
   notice_users?: string[];
+  handlers?: Array<string | number>;
   monitor_object?: number;
   id?: number;
   group_by?: string[];

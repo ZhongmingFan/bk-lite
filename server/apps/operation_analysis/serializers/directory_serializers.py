@@ -12,8 +12,10 @@ from apps.operation_analysis.constants.canvas_refresh import CANVAS_REFRESH_INTE
 from apps.operation_analysis.constants.import_export import ObjectType
 from apps.operation_analysis.models.models import Architecture, Dashboard, Directory, Report, Screen, Topology
 from apps.operation_analysis.serializers.base_serializers import BaseFormatTimeSerializer
+from apps.operation_analysis.services.builtin_i18n import apply_canvas_representation, apply_directory_representation
 from apps.operation_analysis.services.import_export.view_sets import normalize_canvas_view_sets_for_storage
 from apps.operation_analysis.services.report_view_sets import normalize_report_view_sets
+from apps.operation_analysis.services.user_messages import oa_message
 
 CANVAS_REFRESH_INTERVAL_KWARGS = {"required": False, "default": serializers.empty}
 REPORT_VERSION_DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%f%z"
@@ -22,7 +24,11 @@ REPORT_VERSION_DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%f%z"
 class ReportVersionConflict(APIException):
     status_code = status.HTTP_409_CONFLICT
     default_code = "report_version_conflict"
-    default_detail = "报表已被其他人更新，请刷新后重试"
+
+    def __init__(self, detail=None, code=None):
+        if detail is None:
+            detail = oa_message("messages.report_version_conflict", "报表已被其他人更新，请刷新后重试")
+        super().__init__(detail, code)
 
 
 def with_canvas_refresh_interval_kwargs(extra_kwargs: dict) -> dict:
@@ -80,6 +86,9 @@ class DirectoryModelSerializer(BaseFormatTimeSerializer, AuthSerializer):
             "build_in_key": {"read_only": True},
         }
 
+    def to_representation(self, instance):
+        return apply_directory_representation(super().to_representation(instance), instance, self.context)
+
 
 class DirectoryChainVisibilityMixin:
     def validate(self, attrs):
@@ -119,7 +128,10 @@ class DirectoryChainVisibilityMixin:
         if conflicts:
             raise serializers.ValidationError(
                 {
-                    "detail": "所选组织超出目录可见范围，请调整目录或对象的组织范围",
+                    "detail": oa_message(
+                        "messages.directory_groups_out_of_scope",
+                        "所选组织超出目录可见范围，请调整目录或对象的组织范围",
+                    ),
                     "data": {"conflicts": conflicts},
                 }
             )
@@ -137,7 +149,7 @@ class BuiltinPermissionMixin:
 class CanvasRefreshIntervalSerializerMixin:
     def validate_refresh_interval(self, value):
         if value not in CANVAS_REFRESH_INTERVAL_MS:
-            raise serializers.ValidationError("refresh_interval 必须是 0、60000、300000 或 600000")
+            raise serializers.ValidationError(oa_message("messages.refresh_interval_invalid", "refresh_interval 必须是 0、60000、300000 或 600000"))
         return value
 
 
@@ -148,6 +160,9 @@ class CanvasObjectSerializer(DirectoryChainVisibilityMixin, BuiltinPermissionMix
             "is_build_in": {"read_only": True},
             "build_in_key": {"read_only": True},
         }
+
+    def to_representation(self, instance):
+        return apply_canvas_representation(super().to_representation(instance), instance, self.context)
 
     def create(self, validated_data):
         """
@@ -226,7 +241,7 @@ class ReportModelSerializer(CanvasRefreshIntervalSerializerMixin, CanvasObjectSe
                 raise serializers.ValidationError({"view_sets": [str(error)]}) from error
 
             if self.instance is not None and "expected_updated_at" not in attrs:
-                raise serializers.ValidationError({"expected_updated_at": ["保存报表内容时必须提供当前版本"]})
+                raise serializers.ValidationError({"expected_updated_at": [oa_message("messages.report_version_required", "保存报表内容时必须提供当前版本")]})
         return attrs
 
     def create(self, validated_data):

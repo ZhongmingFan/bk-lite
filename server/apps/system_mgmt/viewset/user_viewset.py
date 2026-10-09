@@ -509,7 +509,9 @@ class UserViewSet(ViewSetUtils):
 
                     email_result = send_local_user_initial_password_email(user, email_password, str(email_channel.id))
                     if not email_result.get("result"):
-                        raise InitialPasswordDeliveryError(email_result.get("message") or "邮件发送失败")
+                        raise InitialPasswordDeliveryError(
+                            email_result.get("message") or loader.get("error.initial_password_email_delivery_failed")
+                        )
 
                 # 记录操作日志
                 log_operation(request, "create", "system-manager", f"新增用户: {kwargs['username']} ({kwargs['lastName']})")
@@ -811,8 +813,16 @@ class UserViewSet(ViewSetUtils):
         params["groups"] = groups
         is_superuser = params.pop("is_superuser", False)
         admin_role_id = Role.objects.get(name="admin", app="").id
-        if not is_synced_user and not self._is_valid_phone(params.get("phone")):
-            return JsonResponse({"result": False, "message": loader.get("error.invalid_phone")})
+        if "email" in params:
+            email_value = params.get("email")
+            if not isinstance(email_value, str) or not email_value.strip():
+                return JsonResponse({"result": False, "message": loader.get("error.email_required")}, status=400)
+            params["email"] = email_value.strip()
+        if "phone" in params and isinstance(params.get("phone"), str):
+            params["phone"] = params["phone"].strip()
+        should_validate_phone = (not is_synced_user) or ("phone" in params)
+        if should_validate_phone and not self._is_valid_phone(params.get("phone")):
+            return JsonResponse({"result": False, "message": loader.get("error.invalid_phone")}, status=400)
         if is_superuser:
             params["roles"] = [admin_role_id]
         else:
@@ -843,10 +853,10 @@ class UserViewSet(ViewSetUtils):
             if not is_synced_user:
                 update_fields["display_name"] = params.get("lastName")
                 update_fields["group_list"] = params.get("groups")
-                if "email" in params:
-                    update_fields["email"] = params["email"]
-                if "phone" in params:
-                    update_fields["phone"] = params["phone"]
+            if "email" in params:
+                update_fields["email"] = params["email"]
+            if "phone" in params:
+                update_fields["phone"] = params["phone"]
 
             User.objects.filter(id=pk).update(**update_fields)
             # 清除用户菜单缓存（缓存键格式为 menus-user:{user_id}）

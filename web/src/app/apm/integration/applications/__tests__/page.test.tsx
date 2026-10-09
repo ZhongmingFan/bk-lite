@@ -10,6 +10,7 @@ const api = {
   getApplications: vi.fn(),
   createApplication: vi.fn(),
   updateApplication: vi.fn(),
+  deleteApplication: vi.fn(),
   isLoading: false,
 };
 
@@ -18,6 +19,7 @@ vi.mock('@/app/apm/api', () => ({ default: () => api }));
 vi.mock('@/app/apm/components/apm-data-table', () => ({
   APM_TABLE_COLUMN_WIDTHS: {
     actionGroup: 192,
+    actionGroupWide: 260,
     organization: 160,
     status: 96,
     timestamp: 168,
@@ -50,8 +52,13 @@ vi.mock('@/components/permission', () => ({
     <span className={className}>{children}</span>
   ),
 }));
+const userInfo = {
+  flatGroups: [{ id: 10, name: 'Default' }],
+  isSuperUser: false,
+  loading: false,
+};
 vi.mock('@/context/userInfo', () => ({
-  useUserInfoContext: () => ({ flatGroups: [{ id: 10, name: 'Default' }] }),
+  useUserInfoContext: () => userInfo,
 }));
 
 const application = {
@@ -79,6 +86,7 @@ beforeEach(() => {
     removeEventListener: vi.fn(),
     dispatchEvent: vi.fn(),
   }));
+  userInfo.isSuperUser = false;
   api.getApplications.mockResolvedValue([application]);
 });
 
@@ -95,7 +103,7 @@ describe('APM 应用管理', () => {
     expect(screen.queryByText('共 1 个应用')).toBeNull();
 
     const createButton = screen.getByRole('button', { name: '创建应用' });
-    expect(createButton.parentElement?.classList.contains('ml-auto')).toBe(true);
+    expect(createButton.closest('.ml-auto')).not.toBeNull();
   });
 
   it('直接展示高频行操作并固定在表格右侧', async () => {
@@ -105,6 +113,7 @@ describe('APM 应用管理', () => {
     expect(screen.getByRole('button', { name: '添加接入' })).not.toBeNull();
     expect(screen.getByRole('button', { name: '查看详情' })).not.toBeNull();
     expect(screen.getByRole('button', { name: '编辑' })).not.toBeNull();
+    expect(screen.getByRole('button', { name: '删除' })).not.toBeNull();
     expect(screen.queryByRole('button', { name: /更多操作/ })).toBeNull();
     expect(document.querySelector('[data-fixed="right"]')).not.toBeNull();
   });
@@ -128,5 +137,43 @@ describe('APM 应用管理', () => {
     expect(drawerFooter?.contains(cancelButton)).toBe(true);
     expect(drawerFooter?.contains(createButton)).toBe(true);
     expect(document.querySelector('.ant-drawer-header')?.contains(createButton)).toBe(false);
+  });
+
+  it('确认删除后调用删除接口并刷新列表', async () => {
+    const user = userEvent.setup();
+    api.deleteApplication.mockResolvedValue(undefined);
+    api.getApplications
+      .mockResolvedValueOnce([application])
+      .mockResolvedValueOnce([]);
+    renderWithApmIntl(<ApmApplicationsPage />);
+    await screen.findByText('演示应用');
+
+    await user.click(screen.getByRole('button', { name: '删除' }));
+    const confirm = document.querySelector('.ant-popconfirm-buttons .ant-btn-primary');
+    expect(confirm).not.toBeNull();
+    await user.click(confirm!);
+
+    await waitFor(() => expect(api.deleteApplication).toHaveBeenCalledWith('application-a'));
+    await waitFor(() => expect(api.getApplications).toHaveBeenCalledTimes(2));
+  });
+
+  it('普通用户不展示未归属筛选', async () => {
+    renderWithApmIntl(<ApmApplicationsPage />);
+    await screen.findByText('演示应用');
+    expect(screen.queryByRole('button', { name: /未归属/ })).toBeNull();
+    expect(api.getApplications).not.toHaveBeenCalledWith(expect.objectContaining({
+      params: expect.objectContaining({ unassigned: true }),
+    }));
+  });
+
+  it('超级用户打开未归属后只请求零组织应用', async () => {
+    userInfo.isSuperUser = true;
+    const user = userEvent.setup();
+    renderWithApmIntl(<ApmApplicationsPage />);
+    await screen.findByText('演示应用');
+
+    await user.click(screen.getByRole('button', { name: /未归属/ }));
+
+    await waitFor(() => expect(api.getApplications).toHaveBeenCalledWith({ params: { unassigned: true } }));
   });
 });

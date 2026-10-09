@@ -11,6 +11,7 @@ from apps.cmdb.collection.nic_inventory import is_ingestible_nic, normalize_nic_
 from apps.cmdb.collection.plugins import get_collection_plugin
 from apps.cmdb.collection.plugins.base import bind_collection_mapping
 from apps.cmdb.constants.constants import CollectPluginTypes
+from apps.cmdb.services.host_sync_identity import parse_cloud_id
 from apps.core.logger import cmdb_logger as logger
 
 
@@ -22,6 +23,7 @@ class HostCollectMetrics(CollectBase):
             {"id": "2", "name": "Windows"},
             {"id": "3", "name": "AIX"},
             {"id": "4", "name": "Unix"},
+            {"id": "4", "name": "HP-UX"},
             {"id": "other", "name": "Other"},
         ]
         self.server_cpuarch_list = [
@@ -141,12 +143,12 @@ class HostCollectMetrics(CollectBase):
         for source in (matched_instance, params, default_instance):
             if not isinstance(source, dict):
                 continue
-            cloud = source.get("cloud")
-            if cloud not in (None, ""):
+            cloud = parse_cloud_id(source.get("cloud"))
+            if cloud is not None:
                 return cloud
-            cloud_id = source.get("cloud_id")
-            if cloud_id not in (None, ""):
-                return cloud_id
+            cloud = parse_cloud_id(source.get("cloud_id"))
+            if cloud is not None:
+                return cloud
 
         return ""
 
@@ -216,8 +218,6 @@ class HostCollectMetrics(CollectBase):
 
     def set_component_inst_name(self, data, *args, **kwargs):
         """设置实例名称"""
-        if self.inst_name:
-            return self.inst_name
         result_data = data
         self_device = result_data.get("self_device", "")
         if data["model_id"] == "nic" and self_device:
@@ -228,7 +228,15 @@ class HostCollectMetrics(CollectBase):
             return f"{result_data.get('mem_locator', '')}-{self_device}"
         elif data["model_id"] == "gpu" and self_device:
             return f"{result_data.get('gpu_name', '')}-{self_device}"
-        return ""
+        elif data["model_id"] == "storage_controller" and self_device:
+            sc_id = str(result_data.get("sc_id") or "").strip()
+            return f"{sc_id}-{self_device}" if sc_id else ""
+        elif data["model_id"] == "psu" and self_device:
+            psu_name = str(result_data.get("psu_name") or "").strip()
+            return f"{psu_name}-{self_device}" if psu_name else ""
+        # 多资产任务的 self.inst_name 只代表任务中的首个实例；每条硬件指标
+        # 必须优先使用自身携带的 self_device。仅在旧指标缺少归属信息时兼容回退。
+        return self.inst_name or ""
 
     def set_nic_inst_name(self, data, *args, **kwargs):
         return normalize_nic_mac(data.get("nic_mac"))
@@ -237,7 +245,8 @@ class HostCollectMetrics(CollectBase):
         return normalize_nic_mac(data.get("nic_mac"))
 
     def set_nic_asso_instances(self, data, *args, **kwargs):
-        parent_name = self.inst_name or data.get("self_device")
+        # 与磁盘/内存/GPU 一致，关联目标以当前指标所属设备为准。
+        parent_name = data.get("self_device") or self.inst_name
         return [
             {
                 "model_id": self.model_id,

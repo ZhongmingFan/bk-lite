@@ -5,7 +5,7 @@ from dataclasses import asdict
 from rest_framework import status, viewsets
 from rest_framework.response import Response
 
-from apps.apm.adapters import TelemetryStoreUnavailable, VictoriaTracesTelemetryStore
+from apps.apm.adapters import TelemetryStoreUnavailable, VictoriaTracesTelemetryStore, telemetry_error_payload
 from apps.apm.renderers import ApmRenderer
 from apps.apm.serializers import IssueSearchSerializer
 from apps.apm.services import DjangoTelemetryIssueService, DjangoTelemetryQueryService
@@ -30,7 +30,7 @@ class ApmIssueViewSet(viewsets.ViewSet):
         organization_ids = visible_organization_ids(request)
         if not organization_ids:
             return Response({"items": [], "next_cursor": None, "truncated": False})
-        serializer = IssueSearchSerializer(data=request.query_params)
+        serializer = IssueSearchSerializer(data=request.query_params, context={"request": request})
         if not serializer.is_valid():
             return Response(
                 {"code": "invalid_query", "detail": serializer.errors},
@@ -55,8 +55,5 @@ class ApmIssueViewSet(viewsets.ViewSet):
         except ValueError as exc:
             return Response({"code": "invalid_query", "detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         except TelemetryStoreUnavailable as exc:
-            return Response(
-                {"code": "telemetry_unavailable", "detail": str(exc)},
-                status=status.HTTP_503_SERVICE_UNAVAILABLE,
-            )
+            return Response(telemetry_error_payload(exc), status=status.HTTP_503_SERVICE_UNAVAILABLE)
         return Response(asdict(issues))

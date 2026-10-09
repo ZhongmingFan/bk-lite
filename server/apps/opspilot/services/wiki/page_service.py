@@ -9,6 +9,7 @@ from django.db import transaction
 
 from apps.opspilot.models import KnowledgePage, PageVersion, WikiDirectory, WikiKnowledgeBase
 from apps.opspilot.services.wiki.decision_service import revoke_rules_for_identity_change, subject_key_for_page
+from apps.opspilot.services.wiki.directory_service import directory_page_type_mismatch_message
 from apps.opspilot.services.wiki.generation_relation_service import GenerationRelationError, rebuild_generation_relations
 from apps.opspilot.services.wiki.generation_service import (
     GenerationServiceError,
@@ -18,6 +19,7 @@ from apps.opspilot.services.wiki.generation_service import (
     mark_generation_ready,
     put_generation_member,
 )
+from apps.opspilot.services.wiki.structure_service import bootstrap_knowledge_base
 from apps.opspilot.services.wiki.title_service import InvalidWikiTitle, WikiTitleConflict, assert_unique_title_locked, canonical_title
 
 UNCLASSIFIED_DIRECTORY_KEY = "__unclassified__"
@@ -81,6 +83,9 @@ def _generation_error(error):
 
 def _active_pair_locked(locked_kb):
     if locked_kb.active_structure_revision_id is None or locked_kb.active_generation_id is None:
+        bootstrap_knowledge_base(locked_kb, operator="system")
+        locked_kb.refresh_from_db()
+    if locked_kb.active_structure_revision_id is None or locked_kb.active_generation_id is None:
         raise PageServiceError(
             "active_snapshot_missing",
             "知识库缺少可写入的 active structure/generation",
@@ -105,6 +110,26 @@ def _active_pair_locked(locked_kb):
     return revision, generation
 
 
+def _default_node_for_page_type(nodes, page_type):
+    wanted = str(page_type or "").strip() or "concept"
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        defaults = (node.get("rules") or {}).get("default_for_page_types") or []
+        if wanted in defaults:
+            return node
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        defaults = (node.get("rules") or {}).get("default_for_page_types") or []
+        if "concept" in defaults:
+            return node
+    return next(
+        (node for node in nodes if isinstance(node, dict) and node.get("key") == UNCLASSIFIED_DIRECTORY_KEY),
+        None,
+    )
+
+
 def _target_directory(locked_kb, revision, page_type, directory_id=None):
     snapshot = revision.structure_snapshot or {}
     nodes = snapshot.get("directories")
@@ -116,10 +141,7 @@ def _target_directory(locked_kb, revision, page_type, directory_id=None):
         )
 
     if directory_id is None:
-        target_node = next(
-            (node for node in nodes if isinstance(node, dict) and node.get("key") == UNCLASSIFIED_DIRECTORY_KEY),
-            None,
-        )
+        target_node = _default_node_for_page_type(nodes, page_type)
     else:
         try:
             normalized_directory_id = int(directory_id)
@@ -153,8 +175,17 @@ def _target_directory(locked_kb, revision, page_type, directory_id=None):
     if isinstance(allowed, list) and allowed and page_type not in allowed:
         raise PageServiceError(
             "directory_page_type_not_allowed",
-            "目标目录不接收该页面类型",
-            details={"directory_id": target.pk, "page_type": page_type},
+            directory_page_type_mismatch_message(
+                target.name,
+                page_types=[page_type],
+                allowed_page_types=allowed,
+            ),
+            details={
+                "directory_id": target.pk,
+                "directory_name": target.name,
+                "page_type": page_type,
+                "allowed_page_types": list(allowed),
+            },
         )
     return target
 
@@ -373,20 +404,33 @@ def edit_page(
     )
 
     revision, base_generation = _active_pair_locked(locked_kb)
-    try:
-        member = base_generation.page_members.select_related("page_version", "directory").get(
+    member = (
+        base_generation.page_members.select_related("page_version", "directory")
+        .filter(
             page=locked_page,
             page_status="active",
         )
-    except base_generation.page_members.model.DoesNotExist as error:
-        raise PageServiceError(
-            "page_not_in_active_generation",
-            "页面不属于当前 active generation",
-            status_code=409,
-            retryable=True,
-            details={"page_id": locked_page.pk, "active_generation_id": base_generation.pk},
-        ) from error
-    target = _target_directory(locked_kb, revision, next_page_type, member.directory_id)
+        .first()
+    )
+    source_body = None
+    if member is not None:
+        source_body = member.page_version.body
+        directory_id = member.directory_id
+        assignment_mode = member.assignment_mode
+    else:
+        current = locked_page.current_version
+        if current is None:
+            raise PageServiceError(
+                "page_not_in_active_generation",
+                "页面不属于当前 active generation，且没有可恢复的当前版本",
+                status_code=409,
+                retryable=True,
+                details={"page_id": locked_page.pk, "active_generation_id": base_generation.pk},
+            )
+        source_body = current.body
+        directory_id = locked_page.directory_id
+        assignment_mode = locked_page.directory_assignment_mode or "auto"
+    target = _target_directory(locked_kb, revision, next_page_type, directory_id)
     candidate = _begin_manual_candidate(locked_kb, revision, base_generation, updated_by)
     if next_subject_key != old_subject_key:
         revoke_rules_for_identity_change(
@@ -418,7 +462,7 @@ def edit_page(
     version = _new_candidate_version(
         locked_page,
         candidate,
-        body=body if body is not None else member.page_version.body,
+        body=body if body is not None else source_body,
         change_type=change_type,
         created_by=updated_by,
         meta_snapshot=meta_snapshot,
@@ -430,7 +474,7 @@ def edit_page(
             page_id=locked_page.pk,
             page_version_id=version.pk,
             directory_id=target.pk,
-            assignment_mode=member.assignment_mode,
+            assignment_mode=assignment_mode,
             page_status="active",
         )
     except GenerationServiceError as error:

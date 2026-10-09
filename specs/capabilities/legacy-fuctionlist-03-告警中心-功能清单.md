@@ -23,7 +23,7 @@
 | 告警源专属 webhook | 按告警源 ID 暴露独立 webhook 接入地址 | `POST /alerts/api/source/{source_id}/webhook` | GA |
 | NATS 接入 | 通过 NATS 消息通道接收事件并进入同一处理主流程 | 记录 `pusher/source_id` 等来源信息 | GA |
 | K8s 接入 YAML | K8s 告警源生成部署 YAML 便于集群侧接入 | `/alerts/open_api/k8s/render` | GA |
-| 告警开放接口 | 按开放契约查询告警并执行动作 | 统一网关 `/openapi/v1/alerts/*`（list/detail/events/assign/acknowledge/reassign/close/batch-action，锚点为业务告警 ID）；存量 `api/open/alerts` 仍保留。接口关闭允许待响应/处理中且不校验处理人 | GA |
+| 告警开放接口 | 按开放契约查询告警并执行动作 | 统一网关 `/openapi/v1/alerts/*`（list/detail/events/assign/acknowledge/reassign/close/batch-action/shield-create/shield-operate，PUT/DELETE shield）；存量 `api/open/alerts` 仍保留。接口关闭允许待响应/处理中且不校验处理人。屏蔽策略按名称定位，仅能操作本人创建的记录 | GA |
 | 字段标准化 | 经 source adapter 按告警源字段映射标准化为 Event 模型 | 默认 mapping，`title` 必填（缺失丢弃）；`external_id` 缺失按 `item+resource_name+source_id` 生成；`level` 缺失/非法回落最低级别；`start_time` 缺失用当前时间 | GA |
 | 时间戳兼容 | 兼容 10 位秒级与 13 位毫秒级时间戳 | — | GA |
 | 事件动作 | 事件 action 取值 | `created`（产生，默认）/ `closed`（关闭）/ `recovery`（恢复） | GA |
@@ -61,7 +61,7 @@
 |---|---|---|---|
 | 告警列表 | 按级别、状态、来源、时间范围、我的告警、是否有 Incident 等筛选 | — | GA |
 | 告警详情 | 展示基础信息、关联事件、关联事故、操作记录、通知结果 | — | GA |
-| 告警状态机 | 告警状态枚举与迁移 | 状态：`unassigned` 未分派 / `pending` 待处理 / `processing` 处理中 / `resolved` 人工恢复 / `closed` 人工关闭 / `auto_close` 自动关闭 / `auto_recovery` 自动恢复；默认 `unassigned` | GA |
+| 告警状态机 | 告警状态枚举与迁移 | 状态：`unassigned` 未分派 / `pending` 待处理 / `processing` 处理中 / `resolved` 人工恢复 / `closed` 人工关闭 / `auto_close` 自动关闭 / `auto_recovery` 自动恢复；默认 `unassigned`。关闭态含 `resolved`，活跃列表不展示已解决 | GA |
 | 状态操作 | 分派、认领、转派、关闭、恢复 | assign：`unassigned→pending`；acknowledge：`pending→processing`；reassign：`processing→pending`（当前处理人）；平台超级用户还可对 `pending` 转派且状态保持 `pending`；close：`processing→closed`；resolve：`processing→resolved`；非法前置状态操作被拒绝 | GA |
 | 批量操作 | 批量分派、认领、关闭、恢复 | 按后端支持动作执行 | GA |
 | 自动恢复 | 恢复事件经 `external_id` 关联历史创建事件，创建事件均被更晚恢复事件覆盖时转 `auto_recovery` | **依赖 `external_id`**：CREATED 或 RECOVERY 缺少 `external_id` 时不自动恢复（保持跳过）；因此产生的悬挂活跃告警依赖自动关闭（`close_minutes` / `beat_close_alert`）兜底，不放宽匹配键 | GA |
@@ -103,7 +103,7 @@
 | 告警丰富规则 | 配置丰富规则的提供方、入参绑定、出参投影与启停 | 支持规则 CRUD、分页列表与启停；入参绑定须为对象映射，出参投影须为列表结构；提供 `metrics` 统计接口返回总规则数、启用占比、自建规则数与已丰富告警占比 | GA |
 | 告警处理规则 | 配置动作规则的触发事件、匹配条件、动作类型与动作配置 | 当前已落地动作类型为 `job`；支持规则 CRUD、启停与手动触发 | GA |
 | 执行记录 | 查看自动/手动触发后的动作执行记录 | 记录字段含规则名、告警标题、触发方式、触发事件、执行状态、作业链接、触发时间；支持按状态筛选 | GA |
-| 分派策略 | 按条件匹配责任人/责任团队与触发行为 | 含匹配类型（全部/过滤）、匹配规则、分派人员、通知渠道、通知场景（分派/恢复）、通知频率配置 | GA |
+| 分派策略 | 按条件匹配责任人/责任团队与触发行为 | 含匹配类型（全部/过滤）、匹配规则、分派人员、通知渠道、通知场景（分派/恢复）、通知频率配置；优先级 0～100，按数值、创建时间、ID 依次降序取唯一命中策略 | GA |
 | 屏蔽策略 | 见"屏蔽处理" | — | GA |
 | 系统设置 | 告警中心全局配置项 | — | GA |
 | 操作日志 | 策略与系统配置变更审计 | 日志目标类型：事件/告警/事故/系统；操作类型：添加/修改/删除/执行 | GA |
@@ -177,7 +177,7 @@
 | 状态机 | 取值（中文） |
 |---|---|
 | 事件状态（`EventStatus`） | received 已接收 / pending 待响应 / processing 处理中 / resolved 已处理 / closed 已关闭 / shield 已屏蔽 |
-| 告警状态（`AlertStatus`） | pending 待响应 / processing 处理中 / resolved 已处理 / closed 已关闭 / unassigned 未分派 / auto_close 自动关闭 / auto_recovery 自动恢复（活跃态：pending/processing/unassigned；关闭态：closed/auto_close/auto_recovery） |
+| 告警状态（`AlertStatus`） | pending 待响应 / processing 处理中 / resolved 已处理 / closed 已关闭 / unassigned 未分派 / auto_close 自动关闭 / auto_recovery 自动恢复（活跃态：pending/processing/unassigned；关闭态：closed/auto_close/auto_recovery/resolved） |
 | 会话 Alert 状态（`SessionStatus`） | observing 观察中 / confirmed 已确认 / recovered 已恢复 |
 | 事故状态（`IncidentStatus`） | pending 待响应 / processing 处理中 / resolved 已处理 / closed 已关闭 |
 | 告警操作（`AlertOperate`） | acknowledge 认领 / close 关闭 / reassign 转派 / assign 分派 |

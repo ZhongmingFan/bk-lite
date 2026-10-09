@@ -35,6 +35,7 @@ import {
   buildDashboardActionUrl,
   resolveDashboardActionParams,
 } from '@/app/ops-analysis/utils/dashboardActions';
+import { applySameOriginNavigation } from '@/console-layout';
 import { resolveTableCellPresentation } from '@/app/ops-analysis/utils/tableCellStyle';
 import {
   formatVisibleChartValue,
@@ -50,6 +51,11 @@ import { useTableBodyScrollY } from './shared/useTableBodyScrollY';
 
 const { RangePicker } = DatePicker;
 const DEFAULT_CELL_MAX_WIDTH = 260;
+const TOOLTIP_MAX_WIDTH = 480;
+const TOOLTIP_STYLES = {
+  root: { maxWidth: TOOLTIP_MAX_WIDTH },
+  body: { whiteSpace: 'pre-line' as const, maxWidth: TOOLTIP_MAX_WIDTH },
+};
 
 interface ComTableProps {
   rawData: any;
@@ -196,12 +202,10 @@ const ComTable: React.FC<ComTableProps> = ({
         return;
       }
 
-      if (action.openMode === 'newTab') {
-        window.open(url, '_blank', 'noopener,noreferrer');
-        return;
-      }
-
-      window.location.href = url;
+      applySameOriginNavigation(url, {
+        currentSearch: window.location.search,
+        explicitNewWindow: action.openMode === 'newTab',
+      });
     },
     [shareMode, t],
   );
@@ -271,7 +275,11 @@ const ComTable: React.FC<ComTableProps> = ({
               : presentation;
           if (formattedPresentation.mode === 'colorBackground') {
             return (
-              <Tooltip placement="topLeft" title={formattedPresentation.tooltipText}>
+              <Tooltip
+                placement="topLeft"
+                title={formattedPresentation.tooltipText}
+                styles={TOOLTIP_STYLES}
+              >
                 <div
                   role="img"
                   aria-label={formattedPresentation.tooltipText}
@@ -289,7 +297,11 @@ const ComTable: React.FC<ComTableProps> = ({
           }
 
           return (
-            <Tooltip placement="topLeft" title={formattedPresentation.displayText}>
+            <Tooltip
+              placement="topLeft"
+              title={formattedPresentation.displayText}
+              styles={TOOLTIP_STYLES}
+            >
               <div
                 style={{
                   maxWidth: DEFAULT_CELL_MAX_WIDTH,

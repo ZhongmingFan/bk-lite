@@ -4,7 +4,8 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 
 from apps.core.decorators.api_permission import HasPermission
-from apps.core.exceptions.base_app_exception import BaseAppException
+from apps.core.exceptions.base_app_exception import BaseAppException, ValidationAppException
+from apps.core.logger import monitor_logger as logger
 from apps.core.utils.loader import LanguageLoader
 from apps.core.utils.web_utils import WebUtils
 from apps.monitor.constants.language import LanguageConstants
@@ -12,11 +13,16 @@ from apps.monitor.filters.plugin import MonitorPluginFilter
 from apps.monitor.models import MonitorPlugin, MonitorPluginUITemplate
 from apps.monitor.models.monitor_object import MonitorObject
 from apps.monitor.serializers.plugin import MonitorPluginListSerializer, MonitorPluginSerializer
+from apps.monitor.services.aliyun_regions import AliyunRegionService
+from apps.monitor.services.collect_config_update import CollectConfigUpdateService
 from apps.monitor.services.custom_snmp_plugin import CustomSnmpPluginService
 from apps.monitor.services.plugin import MonitorPluginService
 from apps.monitor.services.plugin_guide import PluginGuideService
+from apps.monitor.services.qcloud_regions import QCloudRegionService
 from apps.monitor.services.template_access_guide import TemplateAccessGuideService
 from apps.monitor.utils.pagination import parse_page_params
+from apps.monitor.utils.plugin_source import is_built_in_plugin, is_custom_plugin_template
+from apps.monitor.views.node_mgmt import _build_actor_context
 from config.drf.pagination import CustomPageNumberPagination
 
 
@@ -141,7 +147,7 @@ class MonitorPluginViewSet(viewsets.ModelViewSet):
             if plugin.id in db_ids:
                 continue
             plugin_key = f"{LanguageConstants.MONITOR_OBJECT_PLUGIN}.{plugin.name}"
-            if plugin.template_type in {"api", "pull"}:
+            if plugin.template_type in {"api", "pull", "script"}:
                 display_name = plugin.display_name or plugin.name
                 display_description = lan.get(f"{plugin_key}.desc") or plugin.description or plugin.name
             else:
@@ -162,7 +168,7 @@ class MonitorPluginViewSet(viewsets.ModelViewSet):
     def _enrich_plugin_results(self, results, lan, parent_obj_by_id: dict):
         """补齐 display_* / is_custom / parent_object_display_name(原地修改)。"""
         for result in results:
-            if result.get("template_type") in {"api", "pull"}:
+            if result.get("template_type") in {"api", "pull", "script"}:
                 result["display_name"] = result.get("display_name") or result["name"]
                 result["display_description"] = (
                     lan.get(f"{LanguageConstants.MONITOR_OBJECT_PLUGIN}.{result['name']}.desc") or result["description"] or result["name"]
@@ -171,7 +177,11 @@ class MonitorPluginViewSet(viewsets.ModelViewSet):
                 plugin_key = f"{LanguageConstants.MONITOR_OBJECT_PLUGIN}.{result['name']}"
                 result["display_name"] = lan.get(f"{plugin_key}.name") or result.get("display_name") or result["name"]
                 result["display_description"] = lan.get(f"{plugin_key}.desc") or result["description"] or result["name"]
-            result["is_custom"] = result.get("template_type") in {"api", "pull", "snmp"}
+            result["is_custom"] = is_custom_plugin_template(result.get("template_type"))
+            result["is_built_in"] = is_built_in_plugin(
+                result.get("template_type"),
+                result.get("is_pre"),
+            )
 
             parent_id = result.get("parent_monitor_object")
             parent_obj = parent_obj_by_id.get(parent_id) if parent_id is not None else None
@@ -193,6 +203,54 @@ class MonitorPluginViewSet(viewsets.ModelViewSet):
         results = self.get_serializer(plugins, many=True).data
         parent_obj_by_id = self._build_parent_obj_by_id(plugins)
         return self._enrich_plugin_results(results, lan, parent_obj_by_id)
+
+    def _keyword_field_values(self, plugin, lan):
+        plugin_key = f"{LanguageConstants.MONITOR_OBJECT_PLUGIN}.{plugin.name}"
+        if plugin.template_type in {"api", "pull", "script"}:
+            display_name = plugin.display_name or plugin.name
+            display_description = lan.get(f"{plugin_key}.desc") or plugin.description or plugin.name
+        else:
+            display_name = lan.get(f"{plugin_key}.name") or plugin.display_name or plugin.name
+            display_description = lan.get(f"{plugin_key}.desc") or plugin.description or plugin.name
+        parent = MonitorPluginSerializer.get_parent_monitor_object_instance(plugin)
+        parent_display_name = ""
+        if parent is not None:
+            parent_display_name = parent.display_name or parent.name or ""
+        return {
+            "name": plugin.name or "",
+            "display_name": display_name or "",
+            "display_description": display_description or "",
+            "parent_object_display_name": parent_display_name,
+        }
+
+    def _filter_keyword_match_ids(self, queryset, kw, lan):
+        plugins = list(queryset.prefetch_related(self._entry_context_prefetch()))
+        matched_ids = []
+        for plugin in plugins:
+            values = self._keyword_field_values(plugin, lan)
+            if any(kw in (values.get(field) or "").lower() for field in self.KEYWORD_FIELDS):
+                matched_ids.append(plugin.id)
+        return matched_ids
+
+    def _attach_stale_counts(self, results, request):
+        if not results:
+            return results
+        try:
+            plugin_ids = [row.get("id") for row in results if row.get("id") is not None]
+            plugins = list(MonitorPlugin._default_manager.filter(id__in=plugin_ids).prefetch_related("monitor_object"))
+            CollectConfigUpdateService.annotate_plugin_stale_counts(
+                plugins,
+                results,
+                _build_actor_context(request),
+            )
+        except Exception:
+            logger.exception(
+                "event=collect_config_stale_count_failed plugin_count=%s failed_stage=list_enrich error_type=count_error",
+                len(results),
+            )
+            for row in results:
+                row.setdefault("stale_instance_count", 0)
+        return results
 
     def list(self, request, *args, **kwargs):
         queryset = self._filter_visible_entry_plugins(self.filter_queryset(self.get_queryset())).order_by("id")
@@ -216,38 +274,38 @@ class MonitorPluginViewSet(viewsets.ModelViewSet):
             count = queryset.count()
             start = (page - 1) * page_size
             end = start + page_size
-            items = self._serialize_and_enrich(queryset[start:end], lan)
+            items = self._attach_stale_counts(self._serialize_and_enrich(queryset[start:end], lan), request)
             return WebUtils.response_success({"count": count, "items": items})
 
         if kw:
             queryset = self._apply_keyword_coarse_filter(queryset, kw, lan)
+            matched_ids = self._filter_keyword_match_ids(queryset, kw, lan)
+            if not use_pagination:
+                page_qs = queryset.filter(id__in=matched_ids).order_by("id")
+                return WebUtils.response_success(self._attach_stale_counts(self._serialize_and_enrich(page_qs, lan), request))
+            page, page_size = parse_page_params(
+                request.query_params,
+                default_page=1,
+                default_page_size=20,
+                allow_page_size_all=True,
+            )
+            if page_size != -1:
+                page_size = min(page_size, CustomPageNumberPagination.max_page_size)
+            start = (page - 1) * page_size
+            end = start + page_size
+            page_ids = matched_ids[start:end]
+            page_qs = queryset.filter(id__in=page_ids).order_by("id")
+            items = self._attach_stale_counts(self._serialize_and_enrich(page_qs, lan), request)
+            return WebUtils.response_success({"count": len(matched_ids), "items": items})
 
         results = self._serialize_and_enrich(queryset, lan)
-
-        if kw:
-            results = [r for r in results if any(kw in (r.get(f) or "").lower() for f in self.KEYWORD_FIELDS)]
-
-        if not use_pagination:
-            return WebUtils.response_success(results)
-
-        page, page_size = parse_page_params(
-            request.query_params,
-            default_page=1,
-            default_page_size=20,
-            allow_page_size_all=True,
-        )
-        if page_size != -1:
-            page_size = min(page_size, CustomPageNumberPagination.max_page_size)
-        count = len(results)
-        start = (page - 1) * page_size
-        end = start + page_size
-        return WebUtils.response_success({"count": count, "items": results[start:end]})
+        return WebUtils.response_success(self._attach_stale_counts(results, request))
 
     @HasPermission("integration_list-Setting")
     def destroy(self, request, *args, **kwargs):
         plugin = self.get_object()
         self._ensure_modifiable(plugin)
-        if plugin.template_type in {"api", "pull", "snmp"}:
+        if is_custom_plugin_template(plugin.template_type):
             try:
                 plugin.delete()
             except ProgrammingError as exc:
@@ -287,6 +345,21 @@ class MonitorPluginViewSet(viewsets.ModelViewSet):
         data.pop("_mark_objects_builtin", None)
         MonitorPluginService.import_monitor_plugin(data)
         return WebUtils.response_success()
+
+    @action(methods=["post"], detail=True, url_path="restore_builtin")
+    @HasPermission("integration_list-Setting")
+    def restore_builtin(self, request, pk=None):
+        plugin = self.get_object()
+        from apps.node_mgmt.services.collector_release.service import CollectorReleaseService
+        from apps.node_mgmt.utils.package_permission import require_collector_pack_write
+
+        # 与组件库的导入/恢复用同一套判定，避免只有监控侧权限的人撤销别人的导入。
+        require_collector_pack_write(request)
+        result = CollectorReleaseService.restore_builtin(
+            plugin.name,
+            actor_context=_build_actor_context(request),
+        )
+        return WebUtils.response_success(result)
 
     @action(methods=["get"], detail=False, url_path="export/(?P<pk>[^/.]+)")
     @HasPermission("integration_list-View")
@@ -370,6 +443,54 @@ class MonitorPluginViewSet(viewsets.ModelViewSet):
         ui_template["ui_template"] = localize_ui_template(content or {}, locale) if content else content
         ui_template["support_collect_detect"] = resolve_support_collect_detect(plugin, fallback=bool(ui_template.get("support_collect_detect")))
         return WebUtils.response_success(ui_template)
+
+    @action(methods=["post"], detail=False, url_path="qcloud_regions")
+    @HasPermission("integration_configure-Add,integration_list-View")
+    def qcloud_regions(self, request):
+        """按腾讯云账号密钥动态拉取可用地域（DescribeRegions）。"""
+        payload = request.data if isinstance(request.data, dict) else {}
+        collect_config_id = payload.get("collect_config_ids") or payload.get("collect_config_id") or payload.get("config_id") or ""
+        username = payload.get("username") or payload.get("secret_id") or ""
+        password = payload.get("password") or payload.get("ENV_PASSWORD") or payload.get("secret_key") or ""
+        cloud_region_id = payload.get("cloud_region_id")
+        actor_context = _build_actor_context(request) if collect_config_id else None
+        try:
+            regions = QCloudRegionService.list_regions(
+                username=username,
+                password=password,
+                cloud_region_id=cloud_region_id,
+                collect_config_id=collect_config_id,
+                actor_context=actor_context,
+            )
+        except ValidationAppException as exc:
+            return WebUtils.response_error(error_message=str(exc), status_code=400)
+        except BaseAppException as exc:
+            return WebUtils.response_error(error_message=str(exc), status_code=400)
+        return WebUtils.response_success(regions)
+
+    @action(methods=["post"], detail=False, url_path="aliyun_regions")
+    @HasPermission("integration_configure-Add,integration_list-View")
+    def aliyun_regions(self, request):
+        """按阿里云账号密钥动态拉取可用地域（DescribeRegions）。"""
+        payload = request.data if isinstance(request.data, dict) else {}
+        collect_config_id = payload.get("collect_config_ids") or payload.get("collect_config_id") or payload.get("config_id") or ""
+        username = payload.get("username") or payload.get("access_key") or payload.get("secret_id") or ""
+        password = payload.get("password") or payload.get("ENV_PASSWORD") or payload.get("access_secret") or payload.get("secret_key") or ""
+        cloud_region_id = payload.get("cloud_region_id")
+        actor_context = _build_actor_context(request) if collect_config_id else None
+        try:
+            regions = AliyunRegionService.list_regions(
+                username=username,
+                password=password,
+                cloud_region_id=cloud_region_id,
+                collect_config_id=collect_config_id,
+                actor_context=actor_context,
+            )
+        except ValidationAppException as exc:
+            return WebUtils.response_error(error_message=str(exc), status_code=400)
+        except BaseAppException as exc:
+            return WebUtils.response_error(error_message=str(exc), status_code=400)
+        return WebUtils.response_success(regions)
 
     @HasPermission("integration_collect-View,integration_configure-Add")
     def _get_collect_template(self, request, pk=None):

@@ -1,9 +1,10 @@
 import React from 'react';
-import { cleanup, screen, within } from '@testing-library/react';
+import { act, cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { renderWithApmIntl } from '@/app/apm/__tests__/intl';
+import { HandledRequestError } from '@/utils/request';
 import ApmServiceDetailPage from '../page';
 
 const api = {
@@ -18,9 +19,16 @@ const api = {
   isLoading: false,
 };
 
+const navigation = {
+  search: new URLSearchParams(),
+  replace: vi.fn(),
+};
+
 vi.mock('next/navigation', () => ({
   useParams: () => ({ serviceId: 'svc-1' }),
-  useSearchParams: () => new URLSearchParams(),
+  useSearchParams: () => navigation.search,
+  usePathname: () => '/apm/services/svc-1',
+  useRouter: () => ({ replace: navigation.replace }),
 }));
 vi.mock('next/link', () => ({
   default: ({
@@ -50,6 +58,8 @@ vi.mock('@/components/permission', () => ({
 }));
 
 beforeEach(() => {
+  navigation.search = new URLSearchParams();
+  navigation.replace.mockReset();
   window.matchMedia = vi.fn().mockImplementation((query: string) => ({
     matches: true,
     media: query,
@@ -128,6 +138,40 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+function deferredBreakdown() {
+  let resolve!: (value: unknown) => void;
+  const promise = new Promise((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+function errorBreakdownFixture(errorType: string, environment = 'production') {
+  return {
+    service_id: 'svc-1',
+    environment,
+    started_at: '2026-08-24T00:00:00Z',
+    ended_at: '2026-08-24T01:00:00Z',
+    data_state: 'available',
+    request_count: 10,
+    error_count: 4,
+    error_rate: 0.4,
+    failed_endpoints: [
+      { endpoint: 'POST /checkout', error_count: 3, request_count: 8, error_rate: 0.375 },
+    ],
+    other_error_count: 0,
+    error_types: [{
+      error_type: errorType,
+      message: '',
+      count: 2,
+      location: 'downstream',
+      last_seen_at: '2026-08-24T00:50:00Z',
+      sample_traces: [],
+    }],
+    recent_failures: [],
+  };
+}
+
 describe('APM 服务详情页头', () => {
   it('用面包屑「服务」回到服务目录，而不是依赖已选中的二级菜单', async () => {
     renderWithApmIntl(<ApmServiceDetailPage />);
@@ -136,6 +180,45 @@ describe('APM 服务详情页头', () => {
     expect(catalogLink.getAttribute('href')).toBe('/apm/services?perspective=service');
     expect(catalogLink.textContent).toBe('服务');
     expect(screen.getByRole('navigation', { name: '页面路径' })).not.toBeNull();
+  }, 15_000);
+
+  it('从 URL 的 window 初始化时间窗，切换 Segmented 后写回 window', async () => {
+    navigation.search = new URLSearchParams('environment=production&window=7d');
+    const user = userEvent.setup();
+    renderWithApmIntl(<ApmServiceDetailPage />);
+
+    expect(await screen.findByText('checkout')).not.toBeNull();
+    expect(screen.getByText('7d').closest('.ant-segmented-item-selected')).not.toBeNull();
+
+    await user.click(screen.getByText('15m'));
+    await waitFor(() => {
+      expect(navigation.replace).toHaveBeenCalledWith(
+        '/apm/services/svc-1?environment=production&window=15m',
+        { scroll: false },
+      );
+    });
+  }, 15_000);
+});
+
+describe('APM 服务详情容量态', () => {
+  it('RED 与调用链查询超限时展示数据量过大而不是存储不可用', async () => {
+    const tooLarge = () => new HandledRequestError('VictoriaTraces 响应超过大小上限', {
+      status: 503,
+      code: 'query_too_large',
+    });
+    api.getServiceRed.mockRejectedValue(tooLarge());
+    api.getTraces.mockRejectedValue(tooLarge());
+    const user = userEvent.setup();
+    renderWithApmIntl(<ApmServiceDetailPage />);
+
+    expect(await screen.findByText('checkout')).not.toBeNull();
+    expect(await screen.findByText('本次查询数据量过大')).not.toBeNull();
+    expect(screen.queryByText('遥测存储暂不可用')).toBeNull();
+
+    await user.click(screen.getByRole('tab', { name: '调用链' }));
+
+    expect((await screen.findAllByText('本次查询数据量过大')).length).toBeGreaterThan(0);
+    expect(screen.queryByText('遥测存储暂不可用')).toBeNull();
   }, 15_000);
 });
 
@@ -266,6 +349,51 @@ describe('APM 服务详情错误 Tab', () => {
     expect(within(recentSection!).getByText('POST /checkout')).not.toBeNull();
   }, 15_000);
 
+  it('同一错误类型的不同端点样本各自展示端点标签和调用链', async () => {
+    api.getServiceErrorBreakdown.mockResolvedValue({
+      service_id: 'svc-1',
+      environment: 'production',
+      started_at: '2026-08-24T00:00:00Z',
+      ended_at: '2026-08-24T01:00:00Z',
+      data_state: 'available',
+      request_count: 10,
+      error_count: 2,
+      error_rate: 0.2,
+      failed_endpoints: [],
+      other_error_count: 0,
+      error_types: [{
+        error_type: 'timeout',
+        message: '',
+        count: 2,
+        location: 'entry',
+        last_seen_at: '2026-08-24T00:50:00Z',
+        sample_traces: [{
+          trace_id: 'd'.repeat(32),
+          span_id: '4'.repeat(16),
+          endpoint: 'POST /orders',
+          started_at: '2026-08-24T00:50:00Z',
+        }, {
+          trace_id: 'e'.repeat(32),
+          span_id: '5'.repeat(16),
+          endpoint: 'GET /inventory',
+          started_at: '2026-08-24T00:49:00Z',
+        }],
+      }],
+      recent_failures: [],
+    });
+    const user = userEvent.setup();
+    renderWithApmIntl(<ApmServiceDetailPage />);
+    await user.click(await screen.findByRole('tab', { name: '错误' }));
+
+    expect(await screen.findByText('timeout')).not.toBeNull();
+    const typeSection = screen.getByText('错误原因').closest('section');
+    expect(typeSection).not.toBeNull();
+    expect(within(typeSection!).getByText('POST /orders')).not.toBeNull();
+    expect(within(typeSection!).getByText('GET /inventory')).not.toBeNull();
+    expect(screen.getByRole('link', { name: /POST \/orders/ }).getAttribute('href')).toBe(`/apm/explore/traces/${'d'.repeat(32)}`);
+    expect(screen.getByRole('link', { name: /GET \/inventory/ }).getAttribute('href')).toBe(`/apm/explore/traces/${'e'.repeat(32)}`);
+  }, 15_000);
+
   it('没有失败请求时只显示空态，不展示三个列表区块', async () => {
     api.getServiceErrorBreakdown.mockResolvedValue({
       service_id: 'svc-1',
@@ -288,5 +416,80 @@ describe('APM 服务详情错误 Tab', () => {
     expect(await screen.findByText('本窗无失败请求')).not.toBeNull();
     expect(screen.queryByText('失败端点')).toBeNull();
     expect(screen.queryByText('错误原因')).toBeNull();
+  }, 15_000);
+
+  it('时间窗切换后只展示后发请求的结果，先完成的新窗不被旧窗覆盖', async () => {
+    const pending: ReturnType<typeof deferredBreakdown>[] = [];
+    api.getServiceErrorBreakdown.mockImplementation(() => {
+      const request = deferredBreakdown();
+      pending.push(request);
+      return request.promise;
+    });
+    const user = userEvent.setup();
+    renderWithApmIntl(<ApmServiceDetailPage />);
+
+    await user.click(await screen.findByRole('tab', { name: '错误' }));
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    await user.click(screen.getByText('15m'));
+    await waitFor(() => expect(pending).toHaveLength(2));
+
+    await act(async () => {
+      pending[1].resolve(errorBreakdownFixture('current-15m-window'));
+    });
+    expect(await screen.findByText('current-15m-window')).not.toBeNull();
+
+    await act(async () => {
+      pending[0].resolve(errorBreakdownFixture('stale-1h-window'));
+    });
+    expect(screen.getByText('current-15m-window')).not.toBeNull();
+    expect(screen.queryByText('stale-1h-window')).toBeNull();
+  }, 15_000);
+
+  it('环境切换后只展示后发请求的结果，先完成的新环境不被旧环境覆盖', async () => {
+    api.getService.mockResolvedValue({
+      id: 'svc-1',
+      application_id: 'shop',
+      application_name: 'Shop',
+      namespace: 'shop',
+      name: 'checkout',
+      language: 'python',
+      first_seen_at: '2026-08-01T00:00:00Z',
+      last_seen_at: '2026-08-24T00:00:00Z',
+      archived_at: null,
+      archive_reason: '',
+      status: 'active',
+      environment_views: [
+        { environment: 'production', last_seen_at: '2026-08-24T00:00:00Z', status: 'active' },
+        { environment: 'staging', last_seen_at: '2026-08-24T00:00:00Z', status: 'active' },
+      ],
+      organization_ids: [10],
+    });
+    const pending: ReturnType<typeof deferredBreakdown>[] = [];
+    api.getServiceErrorBreakdown.mockImplementation(() => {
+      const request = deferredBreakdown();
+      pending.push(request);
+      return request.promise;
+    });
+    const user = userEvent.setup();
+    renderWithApmIntl(<ApmServiceDetailPage />);
+
+    await user.click(await screen.findByRole('tab', { name: '错误' }));
+    await waitFor(() => expect(pending).toHaveLength(1));
+
+    await user.click(screen.getByRole('combobox', { name: '选择环境' }));
+    await user.click(screen.getAllByTitle('staging').at(-1)!);
+    await waitFor(() => expect(pending).toHaveLength(2));
+
+    await act(async () => {
+      pending[1].resolve(errorBreakdownFixture('current-staging', 'staging'));
+    });
+    expect(await screen.findByText('current-staging')).not.toBeNull();
+
+    await act(async () => {
+      pending[0].resolve(errorBreakdownFixture('stale-production', 'production'));
+    });
+    expect(screen.getByText('current-staging')).not.toBeNull();
+    expect(screen.queryByText('stale-production')).toBeNull();
   }, 15_000);
 });

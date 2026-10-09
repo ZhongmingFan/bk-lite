@@ -26,6 +26,7 @@ import {
 import {
   DeleteOutlined,
   DownOutlined,
+  EditOutlined,
   EyeInvisibleOutlined,
   EyeOutlined,
   HolderOutlined,
@@ -39,17 +40,21 @@ import SortableItem from '@/app/cmdb/components/sortable-item';
 import {
   MAX_CREDENTIAL_POOL_SIZE,
   PASSWORD_PLACEHOLDER,
+  SNMP_INTEGRITY_OPTIONS,
+  SNMP_PRIVACY_OPTIONS,
 } from '@/app/cmdb/constants/professCollection';
 import {
   CredentialPoolItem,
   CredentialSchema,
 } from '@/app/cmdb/types/autoDiscovery';
 import { useTranslation } from '@/utils/i18n';
+import CredentialPicker from '@/components/credential-picker';
+import { isVaultAuthField } from '../utils/vaultAuthFields';
 import type { CredentialHelpDefinition } from './credentialHelp';
 
 import styles from '../index.module.scss';
 
-type CredentialShape = 'ssh' | 'sql' | 'snmp' | 'config_file' | 'network_config_file' | 'vm' | 'winsphere' | 'cloud' | 'ipmi' | 'winrm' | 'macos_ssh' | 'influxdb' | 'platform_api';
+type CredentialShape = 'ssh' | 'sql' | 'snmp' | 'config_file' | 'network_config_file' | 'vm' | 'winsphere' | 'cloud' | 'ipmi' | 'redfish' | 'winrm' | 'macos_ssh' | 'influxdb' | 'platform_api';
 interface CredentialDragEndEvent {
   active: { id: string | number };
   over: { id: string | number } | null;
@@ -61,6 +66,26 @@ const IPMI_PRIVILEGE_OPTIONS = [
   { label: 'operator', value: 'operator' },
   { label: 'administrator', value: 'administrator' },
 ];
+
+const NETWORK_SSH_DEFAULT_PORT = 22;
+const NETWORK_TELNET_DEFAULT_PORT = 23;
+
+function normalizeNetworkTransport(value?: string): 'ssh' | 'telnet' {
+  return String(value || 'ssh').trim().toLowerCase() === 'telnet' ? 'telnet' : 'ssh';
+}
+
+function defaultPortForNetworkTransport(protocol: 'ssh' | 'telnet'): number {
+  return protocol === 'telnet' ? NETWORK_TELNET_DEFAULT_PORT : NETWORK_SSH_DEFAULT_PORT;
+}
+
+function portForNetworkTransportSwitch(currentPort: unknown, nextProtocol: 'ssh' | 'telnet'): number {
+  const numeric = Number(currentPort);
+  const previousDefault = nextProtocol === 'telnet' ? NETWORK_SSH_DEFAULT_PORT : NETWORK_TELNET_DEFAULT_PORT;
+  if (currentPort === undefined || currentPort === null || currentPort === '' || numeric === previousDefault) {
+    return defaultPortForNetworkTransport(nextProtocol);
+  }
+  return Number.isFinite(numeric) ? numeric : defaultPortForNetworkTransport(nextProtocol);
+}
 
 export interface CredentialPoolEditorProps {
   value?: CredentialPoolItem[];
@@ -85,6 +110,183 @@ export interface CredentialPoolEditorProps {
   };
   defaultPort?: number | string;
   credentialSchema?: CredentialSchema;
+  vaultCategory?: string | null;
+  vaultTypeKeys?: string[];
+  collectModelId?: string;
+}
+
+const VAULT_META_KEYS = new Set([
+  'credential_id', 'credential_version', 'credential_source',
+  'vault_credential_id', 'vault_actor_context', '_client_id',
+  'vault_type_key',
+]);
+
+function renderVaultDynamicFields(
+  item: CredentialPoolItem,
+  index: number,
+  shape: CredentialShape,
+  updateItem: (index: number, patch: Partial<CredentialPoolItem>) => void,
+  t: (key: string, defaultMessage?: string) => string,
+  showPort: boolean,
+  onCloudRegionRefresh?: () => void,
+  cloudRegionLoading?: boolean,
+  collectModelId?: string,
+  cloudRegionOptions: { label: string; value: string }[] = [],
+  cloudCredentialLabels?: {
+    accessKey: string;
+    accessSecret: string;
+    projectId?: string;
+  },
+): React.ReactNode {
+  const known = new Set([
+    'port', 'snmp_port', 'https_port', 'database', 'scheme', 'verify_tls',
+    'transport_protocol', 'privilege', 'ssl', 'regionId', 'regionName',
+    'source', 'user_type', 'subscription_id', 'enable_password', 'project_id',
+    'projectId',
+  ]);
+  const portKey = shape === 'snmp' ? 'snmp_port' : shape === 'winsphere' ? 'https_port' : 'port';
+  const extras = Object.entries(item).filter(([key, value]) =>
+    !VAULT_META_KEYS.has(key) && !isVaultAuthField(key, item) && !known.has(key)
+    && value !== undefined && (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')
+  );
+  return (
+    <div className={styles.credentialFieldGrid}>
+      {(shape === 'network_config_file' || item.transport_protocol !== undefined) && (
+        <>
+          <InputRow label={t('Collection.credentialPool.transportProtocol', '连接协议')}>
+            <Select
+              value={normalizeNetworkTransport(item.transport_protocol)}
+              options={[
+                { label: 'SSH', value: 'ssh' },
+                { label: 'Telnet', value: 'telnet' },
+              ]}
+              onChange={(nextValue) => {
+                const transport_protocol = normalizeNetworkTransport(nextValue);
+                updateItem(index, {
+                  transport_protocol,
+                  port: portForNetworkTransportSwitch(item.port, transport_protocol),
+                });
+              }}
+            />
+          </InputRow>
+          {normalizeNetworkTransport(item.transport_protocol) === 'telnet' && (
+            <Alert
+              type="warning"
+              showIcon
+              message={t(
+                'Collection.credentialPool.telnetWarning',
+                'Telnet 明文传输账号口令，仅应在隔离管理网或设备只开放 TCP/23 时使用。',
+              )}
+            />
+          )}
+        </>
+      )}
+      {(shape !== 'cloud' && (showPort || shape === 'snmp' || shape === 'winsphere')) && (
+        <InputRow label={t('Collection.port', '端口')}>
+          <InputNumber className="!w-full" min={1} max={65535} value={item[portKey]}
+            onChange={(next) => updateItem(index, { [portKey]: next ?? undefined })} />
+        </InputRow>
+      )}
+      {shape === 'cloud' && cloudCredentialLabels?.projectId && (
+        <InputRow label={cloudCredentialLabels.projectId}>
+          <Input
+            value={item.projectId}
+            placeholder={t('common.inputTip', '请输入')}
+            onChange={(event) => updateItem(index, {
+              projectId: event.target.value,
+              regionId: undefined,
+              regionName: undefined,
+            })}
+          />
+        </InputRow>
+      )}
+      {shape === 'cloud' && (
+        <InputRow label={t('Collection.cloudTask.region', '区域')}>
+          <div className={styles.credentialInlineControl}>
+            <Select
+              value={item.regionId}
+              onChange={(nextValue, option) => {
+                const label = Array.isArray(option) ? option[0]?.label : option?.label;
+                updateItem(index, { regionId: nextValue, regionName: typeof label === 'string' ? label : undefined });
+              }}
+              loading={cloudRegionLoading}
+              placeholder={t('common.selectTip', '请选择')}
+              options={cloudRegionOptions}
+            />
+            <Button
+              type="text"
+              aria-label={t('common.refresh')}
+              icon={<SyncOutlined spin={cloudRegionLoading} aria-hidden />}
+              onClick={onCloudRegionRefresh}
+              className={styles.credentialRefreshButton}
+            />
+          </div>
+        </InputRow>
+      )}
+      {collectModelId === 'smartx' && (
+        <InputRow label={t('Collection.smartxTask.source', '认证来源')}>
+          <Input value={item.source || 'LOCAL'} onChange={(event) => updateItem(index, { source: event.target.value })} />
+        </InputRow>
+      )}
+      {collectModelId === 'fusioncompute' && (
+        <InputRow label={t('Collection.fusioncomputeTask.userType', '用户类型')}>
+          <Input value={item.user_type ?? '0'} onChange={(event) => updateItem(index, { user_type: event.target.value })} />
+        </InputRow>
+      )}
+      {collectModelId === 'azure' && (
+        <InputRow label={t('Collection.azureTask.subscriptionId', '订阅 ID')}>
+          <Input value={item.subscription_id} onChange={(event) => updateItem(index, { subscription_id: event.target.value })} />
+        </InputRow>
+      )}
+      {collectModelId === 'openstack' && (
+        <InputRow label={t('Collection.platformApiTask.projectId', '项目 ID')} required={false}>
+          <Input value={item.project_id} onChange={(event) => updateItem(index, { project_id: event.target.value })} />
+        </InputRow>
+      )}
+      {(shape === 'sql' && item.database !== undefined) && (
+        <InputRow label={t('Collection.database', '数据库')}>
+          <Input value={item.database} onChange={(event) => updateItem(index, { database: event.target.value })} />
+        </InputRow>
+      )}
+      {(shape === 'influxdb' || item.scheme !== undefined) && (
+        <InputRow label={t('Collection.influxdbTask.scheme', '连接协议')}>
+          <Select value={item.scheme || 'http'} options={['http', 'https'].map((value) => ({ label: value.toUpperCase(), value }))}
+            onChange={(scheme) => updateItem(index, { scheme })} />
+        </InputRow>
+      )}
+      {shape === 'network_config_file' && item.vault_type_key !== 'network_cli' && (
+        <InputRow label={t('Collection.credentialPool.enablePassword', '特权密码')} required={false}>
+          <Input.Password value={item.enable_password} autoComplete="new-password"
+            onChange={(event) => updateItem(index, { enable_password: event.target.value })} />
+        </InputRow>
+      )}
+      {item.privilege !== undefined && (
+        <InputRow label={t('Collection.IPMITask.privilege', '权限级别')}>
+          <Select value={item.privilege} options={IPMI_PRIVILEGE_OPTIONS}
+            onChange={(privilege) => updateItem(index, { privilege })} />
+        </InputRow>
+      )}
+      {item.verify_tls !== undefined && (
+        <InputRow label={t('Collection.influxdbTask.verifyTls', '校验证书')}>
+          <Switch disabled={collectModelId === 'smartx'}
+            checked={collectModelId === 'smartx' || item.verify_tls !== false}
+            onChange={(verify_tls) => updateItem(index, { verify_tls })} />
+        </InputRow>
+      )}
+      {item.ssl !== undefined && (
+        <InputRow label={t('Collection.VMTask.sslVerify', 'SSL 验证')}>
+          <Switch checked={Boolean(item.ssl)} onChange={(ssl) => updateItem(index, { ssl })} />
+        </InputRow>
+      )}
+      {extras.map(([key, value]) => (
+        <InputRow key={key} label={t(`Collection.${key}`, key)}>
+          {typeof value === 'boolean'
+            ? <Switch checked={value} onChange={(next) => updateItem(index, { [key]: next })} />
+            : <Input disabled={collectModelId === 'manageone' && key === 'api_version'} value={value} onChange={(event) => updateItem(index, { [key]: event.target.value })} />}
+        </InputRow>
+      ))}
+    </div>
+  );
 }
 
 const makeClientId = () => `cred-local-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
@@ -94,6 +296,19 @@ const ensureClientIds = (items: CredentialPoolItem[]) =>
     ...item,
     _client_id: item._client_id || makeClientId(),
   }));
+
+const withDefaultSnmpVersion = (item: CredentialPoolItem): CredentialPoolItem => {
+  const version = String(item?.version || '').trim();
+  if (version === 'v2' || version === 'v2c' || version === 'v3') {
+    return item;
+  }
+  const community = String(item?.community || '').trim();
+  const username = String(item?.username || '').trim();
+  return {
+    ...item,
+    version: username && !community ? 'v3' : 'v2',
+  };
+};
 
 const createEmptyCredential = (
   shape: CredentialShape,
@@ -178,7 +393,9 @@ const createEmptyCredential = (
     ...(shape === 'vm' ? { ssl: false } : {}),
     ...(shape === 'cloud' ? { accessKey: '', accessSecret: '', regionId: '' } : {}),
     ...(shape === 'ipmi' ? { port: '623', privilege: 'administrator' } : {}),
+    ...(shape === 'redfish' ? { port: '443', verify_tls: true } : {}),
     ...(shape === 'sql' && showDatabase ? { database: 'master' } : {}),
+    ...(shape === 'network_config_file' ? { transport_protocol: 'ssh' } : {}),
   };
 };
 
@@ -346,10 +563,23 @@ function getPreviewFields(
   if (showPort) {
     fields.push({
       label: t('Collection.port', '端口'),
-      value: String(item.port || (shape === 'sql' ? '3306' : shape === 'vm' ? '443' : shape === 'ipmi' ? '623' : '22')),
+      value: String(item.port || (shape === 'sql' ? '3306' : shape === 'vm' || shape === 'redfish' ? '443' : shape === 'ipmi' ? '623' : '22')),
+    });
+  }
+  if (shape === 'redfish') {
+    fields.push({
+      label: t('Collection.RedfishTask.verifyTls', '校验证书'),
+      value: item.verify_tls !== false ? t('common.yes', '是') : t('common.no', '否'),
     });
   }
   if (shape === 'network_config_file') {
+    const transportProtocol = String(item.transport_protocol || 'ssh').toLowerCase() === 'telnet'
+      ? 'telnet'
+      : 'ssh';
+    fields.splice(0, 0, {
+      label: t('Collection.credentialPool.transportProtocol', '连接协议'),
+      value: transportProtocol === 'telnet' ? 'Telnet' : 'SSH',
+    });
     fields.push({
       label: t('Collection.credentialPool.enablePassword', '特权密码'),
       value: passwordVisible && item.enable_password && item.enable_password !== PASSWORD_PLACEHOLDER
@@ -461,6 +691,7 @@ function InputRow({
 }
 
 function renderCredentialFields({
+  collectModelId,
   item,
   index,
   shape,
@@ -476,6 +707,7 @@ function renderCredentialFields({
   t,
   updateItem,
 }: {
+  collectModelId?: string;
   item: CredentialPoolItem;
   index: number;
   shape: CredentialShape;
@@ -521,7 +753,7 @@ function renderCredentialFields({
                 id={inputId}
                 min={field.min}
                 max={field.max}
-                className="w-32"
+                className="!w-full"
                 value={item[field.key]}
                 onChange={(value) =>
                   updateItem(index, { [field.key]: value ?? undefined })
@@ -590,7 +822,7 @@ function renderCredentialFields({
           <InputNumber
             min={1}
             max={65535}
-            className="w-32"
+            className="!w-full"
             value={item.snmp_port}
             onChange={(nextValue) => updateItem(index, { snmp_port: nextValue ?? undefined })}
           />
@@ -629,18 +861,20 @@ function renderCredentialFields({
               />
             </InputRow>
             <InputRow label={t('Collection.SNMPTask.hashAlgorithm', '哈希算法')}>
-              <Select value={item.integrity || 'sha'} onChange={(nextValue) => updateItem(index, { integrity: nextValue })}>
-                <Select.Option value="sha">SHA</Select.Option>
-                <Select.Option value="md5">MD5</Select.Option>
-              </Select>
+              <Select
+                value={item.integrity || 'sha'}
+                options={[...SNMP_INTEGRITY_OPTIONS]}
+                onChange={(nextValue) => updateItem(index, { integrity: nextValue })}
+              />
             </InputRow>
             {level === 'authPriv' && (
               <>
                 <InputRow label={t('Collection.SNMPTask.encryptAlgorithm', '加密算法')}>
-                  <Select value={item.privacy || 'aes'} onChange={(nextValue) => updateItem(index, { privacy: nextValue })}>
-                    <Select.Option value="aes">AES</Select.Option>
-                    <Select.Option value="des">DES</Select.Option>
-                  </Select>
+                  <Select
+                    value={item.privacy || 'aes'}
+                    options={[...SNMP_PRIVACY_OPTIONS]}
+                    onChange={(nextValue) => updateItem(index, { privacy: nextValue })}
+                  />
                 </InputRow>
                 <InputRow label={t('Collection.SNMPTask.encryptKey', '加密密钥')}>
                   <SecretInput
@@ -696,7 +930,7 @@ function renderCredentialFields({
           <InputNumber
             min={1}
             max={65535}
-            className="w-32"
+            className="!w-full"
             value={item.port}
             onChange={(nextValue) => updateItem(index, { port: nextValue ?? undefined })}
           />
@@ -740,7 +974,7 @@ function renderCredentialFields({
           <InputNumber
             min={1}
             max={65535}
-            className="w-32"
+            className="!w-full"
             value={item.port}
             onChange={(nextValue) => updateItem(index, { port: nextValue ?? undefined })}
           />
@@ -907,6 +1141,7 @@ function renderCredentialFields({
           <InputNumber
             min={1}
             max={65535}
+            className="!w-full"
             value={item.port}
             onChange={(port) => updateItem(index, { port: port ?? undefined })}
           />
@@ -924,7 +1159,8 @@ function renderCredentialFields({
         </InputRow>
         <InputRow label={t('Collection.influxdbTask.verifyTls', '校验证书')}>
           <Switch
-            checked={item.verify_tls !== false}
+            disabled={collectModelId === 'smartx'}
+            checked={collectModelId === 'smartx' || item.verify_tls !== false}
             onChange={(verify_tls) => updateItem(index, { verify_tls })}
           />
         </InputRow>
@@ -945,14 +1181,62 @@ function renderCredentialFields({
   if (shape === 'platform_api') {
     return (
       <div className={styles.credentialFieldGrid}>
-        <InputRow label={t('user', '用户')}>
+        {item.source !== undefined && (
+          <InputRow label={t('Collection.smartxTask.source', '认证来源')}>
+            <Input value={item.source} onChange={(event) => updateItem(index, { source: event.target.value })} />
+          </InputRow>
+        )}
+        {item.user_type !== undefined && (
+          <InputRow label={t('Collection.fusioncomputeTask.userType', '用户类型')}>
+            <Input value={item.user_type} onChange={(event) => updateItem(index, { user_type: event.target.value })} />
+          </InputRow>
+        )}
+        {item.tenant_id !== undefined && (
+          <>
+            <InputRow label={t('Collection.platformApiTask.tenantId', '租户 ID')}>
+              <Input value={item.tenant_id} onChange={(event) => updateItem(index, { tenant_id: event.target.value })} />
+            </InputRow>
+            <InputRow label={t('Collection.azureTask.subscriptionId', '订阅 ID')}>
+              <Input value={item.subscription_id} onChange={(event) => updateItem(index, { subscription_id: event.target.value })} />
+            </InputRow>
+          </>
+        )}
+        {item.user_domain_name !== undefined && (
+          <>
+            <InputRow label={t('Collection.platformApiTask.userDomainName', '用户域名称')}>
+              <Input value={item.user_domain_name} onChange={(event) => updateItem(index, { user_domain_name: event.target.value })} />
+            </InputRow>
+            <InputRow label={t('Collection.platformApiTask.projectId', '项目 ID')} required={false}>
+              <Input value={item.project_id} onChange={(event) => updateItem(index, { project_id: event.target.value })} />
+            </InputRow>
+          </>
+        )}
+
+        {item.region !== undefined && (
+          <InputRow label={t('Collection.cloudTask.region', '区域')} required={false}>
+            <Input value={item.region} onChange={(event) => updateItem(index, { region: event.target.value })} />
+          </InputRow>
+        )}
+        {item.api_version !== undefined && (
+          <InputRow label={t('Collection.api_version', 'API 版本')}>
+            <Input disabled={collectModelId === 'manageone'} value={item.api_version} onChange={(event) => updateItem(index, { api_version: event.target.value })} />
+          </InputRow>
+        )}
+        {item.scheme !== undefined && (
+          <InputRow label={t('Collection.influxdbTask.scheme', '连接协议')}>
+            <Select value={item.scheme} options={['http', 'https'].map((value) => ({ label: value.toUpperCase(), value }))}
+              onChange={(scheme) => updateItem(index, { scheme })} />
+          </InputRow>
+        )}
+
+        <InputRow label={item.tenant_id !== undefined ? t('Collection.platformApiTask.clientId', '应用 ID') : t('user', '用户')}>
           <Input
             value={item.username}
             placeholder={t('common.inputTip', '请输入')}
             onChange={(event) => updateItem(index, { username: event.target.value })}
           />
         </InputRow>
-        <InputRow label={t('password', '密码')}>
+        <InputRow label={item.tenant_id !== undefined ? t('Collection.platformApiTask.clientSecret', '客户端密钥') : t('password', '密码')}>
           <SecretInput
             value={item.password}
             placeholder={t('common.inputTip', '请输入')}
@@ -960,20 +1244,22 @@ function renderCredentialFields({
             onChange={(password) => updateItem(index, { password })}
           />
         </InputRow>
-        <InputRow label={t('Collection.port', '端口')}>
+        {showPort && <InputRow label={collectModelId === 'openstack' ? t('Collection.platformApiTask.identityPort', '认证服务端口') : t('Collection.port', '端口')}>
           <InputNumber
             min={1}
             max={65535}
+            className="!w-full"
             value={item.port}
             onChange={(port) => updateItem(index, { port: port ?? undefined })}
           />
-        </InputRow>
-        <InputRow label={t('Collection.influxdbTask.verifyTls', '校验证书')}>
+        </InputRow>}
+        {collectModelId !== 'azure' && <InputRow label={t('Collection.influxdbTask.verifyTls', '校验证书')}>
           <Switch
-            checked={item.verify_tls !== false}
+            disabled={collectModelId === 'smartx'}
+            checked={collectModelId === 'smartx' || item.verify_tls !== false}
             onChange={(verify_tls) => updateItem(index, { verify_tls })}
           />
-        </InputRow>
+        </InputRow>}
         {item.verify_tls === false && (
           <Alert
             type="warning"
@@ -990,9 +1276,38 @@ function renderCredentialFields({
 
   return (
     <div className={styles.credentialFieldGrid}>
+      {shape === 'network_config_file' && (
+        <>
+          <InputRow label={t('Collection.credentialPool.transportProtocol', '连接协议')}>
+            <Select
+              value={normalizeNetworkTransport(item.transport_protocol)}
+              options={[
+                { label: 'SSH', value: 'ssh' },
+                { label: 'Telnet', value: 'telnet' },
+              ]}
+              onChange={(nextValue) => {
+                const transport_protocol = normalizeNetworkTransport(nextValue);
+                updateItem(index, {
+                  transport_protocol,
+                  port: portForNetworkTransportSwitch(item.port, transport_protocol),
+                });
+              }}
+            />
+          </InputRow>
+          {normalizeNetworkTransport(item.transport_protocol) === 'telnet' && (
+            <Alert
+              type="warning"
+              showIcon
+              message={t(
+                'Collection.credentialPool.telnetWarning',
+                'Telnet 明文传输账号口令，仅应在隔离管理网或设备只开放 TCP/23 时使用。',
+              )}
+            />
+          )}
+        </>
+      )}
       <InputRow
         label={shape === 'sql' || shape === 'vm' ? t('Collection.VMTask.username', '用户') : t('user', '用户')}
-        required={shape !== 'ssh'}
       >
         <Input
           value={shape === 'sql' ? item.user : item.username}
@@ -1002,7 +1317,6 @@ function renderCredentialFields({
       </InputRow>
       <InputRow
         label={shape === 'sql' || shape === 'vm' ? t('Collection.VMTask.password', '密码') : t('password', '密码')}
-        required={shape !== 'ssh'}
       >
         <SecretInput
           value={item.password}
@@ -1016,12 +1330,38 @@ function renderCredentialFields({
           <InputNumber
             min={1}
             max={65535}
-            className="w-32"
+            className="!w-full"
             value={item.port}
             onChange={(nextValue) => updateItem(index, { port: nextValue ?? undefined })}
           />
         </InputRow>
       )}
+      {shape === 'redfish' && (
+        <>
+          <InputRow label={t('Collection.RedfishTask.verifyTls', '校验证书')}>
+            <Switch
+              disabled={collectModelId === 'smartx'}
+            checked={collectModelId === 'smartx' || item.verify_tls !== false}
+              onChange={(verify_tls) => updateItem(index, { verify_tls })}
+            />
+          </InputRow>
+          {item.verify_tls === false && (
+            <Alert
+              type="warning"
+              showIcon
+              message={t(
+                'Collection.RedfishTask.tlsWarning',
+                '关闭证书校验会增加中间人攻击风险，仅应临时用于受信任网络中的自签名证书。',
+              )}
+            />
+          )}
+        </>
+      )}
+      {shape === 'sql' && ['namespace', 'bucket'].filter((key) => item[key] !== undefined).map((key) => (
+        <InputRow key={key} label={t(`Collection.${key}`, key)}>
+          <Input value={String(item[key] ?? '')} onChange={(event) => updateItem(index, { [key]: event.target.value })} />
+        </InputRow>
+      ))}
       {shape === 'sql' && showDatabase && (
         <InputRow label={t('Collection.database', '数据库')}>
           <Input
@@ -1040,7 +1380,7 @@ function renderCredentialFields({
         </InputRow>
       )}
       {shape === 'network_config_file' && (
-        <InputRow label="特权密码" required={false}>
+        <InputRow label={t('Collection.credentialPool.enablePassword', '特权密码')} required={false}>
           <SecretInput
             value={item.enable_password}
             placeholder={t('common.inputTip', '请输入')}
@@ -1082,21 +1422,42 @@ export default function CredentialPoolEditor({
   cloudCredentialLabels,
   defaultPort,
   credentialSchema,
+  vaultCategory,
+  vaultTypeKeys = [],
+  collectModelId,
 }: CredentialPoolEditorProps): React.ReactElement {
   const { t } = useTranslation();
   const sensors = useSensors(useSensor(PointerSensor));
-  const normalizedValue = useMemo(() => ensureClientIds(value), [value]);
+  const normalizedValue = useMemo(
+    () =>
+      ensureClientIds(
+        credentialShape === 'snmp' ? value.map((item) => withDefaultSnmpVersion(item)) : value
+      ),
+    [credentialShape, value]
+  );
   const [activeKeys, setActiveKeys] = useState<string[]>(
     normalizedValue.length ? [getItemKey(normalizedValue[0], 0)] : []
   );
   const [visibleSecretKeys, setVisibleSecretKeys] = useState<string[]>([]);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [credentialNames, setCredentialNames] = useState<Record<string, string>>({});
   const helpContentId = useId();
 
   const itemKeys = useMemo(
     () => normalizedValue.map((item, index) => getItemKey(item, index)),
     [normalizedValue]
   );
+
+  useEffect(() => {
+    if (credentialShape !== 'snmp') {
+      return;
+    }
+    const missingVersion = value.some((item) => !String(item?.version || '').trim());
+    if (!missingVersion) {
+      return;
+    }
+    onChange?.(ensureClientIds(value.map((item) => withDefaultSnmpVersion(item))));
+  }, [credentialShape, onChange, value]);
 
   useEffect(() => {
     setActiveKeys((prev) => {
@@ -1129,6 +1490,8 @@ export default function CredentialPoolEditor({
       credentialSchema,
       showPort,
     );
+    if (collectModelId === 'iris') nextItem.namespace = 'USER';
+    if (collectModelId === 'couchbase') nextItem.bucket = '';
     const nextItems = [...normalizedValue, nextItem];
     emitChange(nextItems);
     setActiveKeys((prev) => [...prev, getItemKey(nextItem, nextItems.length - 1)]);
@@ -1254,7 +1617,17 @@ export default function CredentialPoolEditor({
     const itemKey = getItemKey(item, index);
     const expanded = activeKeys.includes(itemKey);
     const passwordVisible = visibleSecretKeys.includes(itemKey);
-    const previewFields = getPreviewFields(
+    const source = item.credential_source || 'inline';
+    // 旧 JOB 引用可能未保存类型；该版本新增 SSH 引用始终显式保存 vault_type_key。
+    const legacyPasswordReference = vaultTypeKeys.includes('ssh')
+      && ['ssh', 'config_file'].includes(credentialShape)
+      && Boolean(item.vault_credential_id)
+      && (!item.vault_type_key || item.vault_type_key === 'sql');
+    const legacyNetworkReference = credentialShape === 'network_config_file' && vaultTypeKeys.includes('ssh')
+      && Boolean(item.vault_credential_id)
+      && (!item.vault_type_key || item.vault_type_key === 'platform_api');
+    const selectedVaultType = item.vault_type_key || (legacyNetworkReference ? 'platform_api' : legacyPasswordReference ? 'sql' : vaultTypeKeys[0]);
+    const previewFields = source === 'vault' ? [] : getPreviewFields(
       item,
       credentialShape,
       t,
@@ -1269,14 +1642,21 @@ export default function CredentialPoolEditor({
           <div className={styles.credentialCardHeader}>
             <button
               type="button"
-              className={styles.credentialCardSummary}
+              className={`${styles.credentialCardSummary} ${source === 'vault' ? '!flex-1' : ''}`}
               aria-expanded={expanded}
               aria-controls={`credential-panel-${itemKey}`}
               onClick={() => toggleExpanded(itemKey)}
             >
-              <div className={styles.credentialTitleBlock}>
+              <div className={source === 'vault' ? 'flex min-w-0 flex-1 items-center gap-2' : styles.credentialTitleBlock}>
                 <span className={styles.credentialOrderNumber}>{index + 1}</span>
                 <div className={styles.credentialTitle}>{`${t('Collection.credential', '凭据')} ${index + 1}`}</div>
+                {source === 'vault' && (
+                  <Tooltip title="任务保存凭据引用；执行时读取凭据管理中的认证字段。端口等参数仍在此填写。">
+                    <span className="min-w-0 truncate text-xs text-[var(--color-text-secondary)]">
+                      {`已有凭据 · ${item.vault_credential_id ? credentialNames[item.vault_credential_id] || '已选择' : '未选择'}`}
+                    </span>
+                  </Tooltip>
+                )}
               </div>
             </button>
             {!expanded && (
@@ -1334,7 +1714,79 @@ export default function CredentialPoolEditor({
               id={`credential-panel-${itemKey}`}
               className={styles.credentialCardBody}
             >
-              {renderCredentialFields({
+              <div className="mb-3 flex justify-end">
+                <Button
+                  type="link"
+                  className="!px-0"
+                  icon={<EditOutlined aria-hidden="true" />}
+                  onClick={() => {
+                    const next = source === 'vault' ? 'inline' : 'vault';
+                    // 首次切到已有凭据时尚未保存类型，仍须保留任务自己的特权密码。
+                    const authContext = { ...item, vault_type_key: selectedVaultType };
+                    const clean = Object.fromEntries(Object.entries(item).filter(([key]) => !isVaultAuthField(key, authContext) && key !== 'vault_actor_context'));
+                    if (next === 'vault') {
+                      clean.vault_type_key = selectedVaultType;
+                      if (credentialShape === 'network_config_file') {
+                        clean.transport_protocol = normalizeNetworkTransport(item.transport_protocol);
+                      }
+                    }
+                    if (next === 'inline') {
+                      delete clean.vault_credential_id;
+                      delete clean.vault_type_key;
+                    }
+                    emitChange(normalizedValue.map((candidate, candidateIndex) => candidateIndex === index
+                      ? { ...clean, credential_source: next } : candidate));
+                  }}
+                >
+                  {source === 'vault'
+                    ? t('Collection.credentialPool.useManual', '改用手动录入')
+                    : t('Collection.credentialPool.useExisting', '使用已有凭据')}
+                </Button>
+              </div>
+              {source === 'vault' && (
+                <div className="mb-4">
+                  {vaultCategory && vaultTypeKeys.length ? (
+                    <>
+                      {(legacyPasswordReference || legacyNetworkReference) && (
+                        <div className="mb-2 flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
+                          <span>{legacyNetworkReference ? t('Collection.legacyNetworkCredentialTip', '当前任务沿用已有的平台账户凭据。') : t('Collection.legacyJobCredentialTip', '当前任务沿用已有的用户名密码凭据。')}</span>
+                          <Button type="link" size="small" onClick={() => updateItem(index, {
+                            vault_type_key: 'ssh', vault_credential_id: undefined,
+                          })}>{t('Collection.switchToSshCredential', '改用 SSH 凭据')}</Button>
+                        </div>
+                      )}
+                      {vaultTypeKeys.length > 1 && (
+                        <Select className="mb-2 w-full" value={selectedVaultType}
+                          options={vaultTypeKeys.map((key) => ({ label: key, value: key }))}
+                          onChange={(vault_type_key) => updateItem(index, { vault_type_key, vault_credential_id: undefined })} />
+                      )}
+                      <CredentialPicker category={vaultCategory}
+                        type={selectedVaultType}
+                        value={item.vault_credential_id}
+                        onNamesResolved={(credentials) => setCredentialNames((previous) => {
+                          const next = { ...previous };
+                          let changed = false;
+                          credentials.forEach(({ credential_id, name }) => {
+                            if (next[credential_id] !== name) {
+                              next[credential_id] = name;
+                              changed = true;
+                            }
+                          });
+                          return changed ? next : previous;
+                        })}
+                        onChange={(vault_credential_id) => updateItem(index, {
+                          vault_credential_id, vault_type_key: selectedVaultType,
+                        })} />
+                    </>
+                  ) : <Alert type="warning" showIcon message="当前插件没有可用的内置凭据类型" />}
+                </div>
+              )}
+              {source === 'vault' ? renderVaultDynamicFields(
+                item, index, credentialShape, updateItem, t, showPort,
+                onCloudRegionRefresh, cloudRegionLoading, collectModelId,
+                cloudRegionOptions, cloudCredentialLabels,
+              ) : renderCredentialFields({
+                collectModelId,
                 item,
                 index,
                 shape: credentialShape,

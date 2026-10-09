@@ -36,9 +36,10 @@
 | 架构图管理 | 架构图的新增、编辑、删除 | 名称全局唯一 | GA |
 | 大屏管理 | 大屏的新增、编辑、删除 | 名称全局唯一 | GA |
 | 报表管理 | 报表的读取、编辑草稿、筛选、刷新、全屏、分享、PDF 与订阅 | 名称全局唯一 | GA |
-| 网络拓扑管理 | 网络拓扑画布的新增、编辑、删除与运行态预览 | 依赖 WeOps 连接与视图集 | GA |
+| 网络拓扑管理 | 网络拓扑画布的新增、编辑、删除、运行态预览与分享 | 依赖 WeOps 连接与视图集；分享走画布分享会话，凭证不进分享响应 | GA |
 | 挂载方式 | 分析对象可挂载到目录，也可以空目录形态存在 | — | GA |
 | 对象配置项 | 分析对象具备描述、视图配置与扩展配置 | — | GA |
+| 画布分享页 | 分享链接打开后仅展示只读画布，不带平台顶栏、左侧菜单与全局助手 | 路由前缀 `/ops-analysis/share/`；产品内 `/ops-analysis/view` 导航不变；不授予编辑权 | GA |
 | 内置画布 | 系统可预置内置仪表盘/拓扑/架构画布 | 内置对象带内置标识，初始化时写入 | GA |
 
 ### 3. 仪表盘组件
@@ -46,8 +47,9 @@
 | 功能项 | 功能说明 | 规格 / 约束 | 状态 |
 |---|---|---|---|
 | 组件化画布 | 仪表盘内容由组件化画布编排，组件支持新增、编辑、复制、删除 | — | GA |
-| 组件类型 | 支持的图表组件类型 | 17 种，以 `components/widgetRegistry.ts` 注册为准（含 Screen-only Scene Widget `application3D`） | GA |
-| 3D 应用场景组件 | application3D 在 Screen / Share 上以 self-fetch 方式展示 Application Wall→Focus→Detail；健康经 `application_run_host`×MonitorAlert 聚合；成员可经父 System.`status` ephemeral 过滤 | 后端 `Application3DQueryService` + scene/share 四类 operation；前端 Three.js Wall；编辑态无场景交互 | WIP |
+| 组件类型 | 支持的图表组件类型 | 以 `components/widgetRegistry.ts` 注册为准（含 Screen-only Scene Widget `application3D` / `room3D`） | GA |
+| 3D 应用场景组件 | application3D 在 Screen / Share 上以 self-fetch 方式展示 Application Wall→Focus→Detail；健康按 actor 可见且监控可读的主机会聚 `MonitorAlert`（与监控告警列表同一套可见性）；未接入/监控不可读主机在架构中置灰；覆盖缺口在墙卡状态行右侧标「监控覆盖 m/n」；成员可经父 System.`status` ephemeral 过滤；Wall 前端按告警排序分页；每页数量、告警单独成页、自动翻页和翻页特效由组件配置决定，缺省为每页 24 张、不自动翻页 | 后端 `Application3DQueryService` + scene/share 四类 operation；前端 Three.js Wall + 分页 HUD；编辑态无场景交互 | WIP |
+| 3D 机房场景组件 | room3D 在 Screen / Share 上以 self-fetch 方式展示单个机房 3D 布局；配置钉可选默认机房，并可配机柜顶两行显示；查看/分享在组件内切换且不写回；分享按分享者可见机房取数 | 后端 `Room3DService` 包装 CMDB NATS `get_room_list` / `get_room3d_layout`（含 `rack_type_name` / `rack_state_name`）；前端 Three.js 机房；编辑态无下拉、仅预览 | GA |
 
 > 证据来源：`specs/changes/ops-analysis-application3d/spec.md`、`server/apps/operation_analysis/services/application3d/`、`web/src/app/ops-analysis/types/sceneWidgetCapability.ts`、`web/src/app/ops-analysis/components/widgets/application3D/`
 
@@ -192,7 +194,7 @@
 | 多值 | `multiValue` | ComMultiValue |
 | 文本 | `text` | OpsAnalysisTextPanel |
 | 网络状态拓扑 | `networkStatusTopology` | NetworkStatusTopology |
-| 3D 机房 | `room3D` | Room3D（消费 CMDB NATS `get_room3d_layout`，渲染机房布局；设备告警摘要驱动侧栏/tooltip 与内部红光晕） |
+| 3D 机房 | `room3D` | Room3D（Screen-only 自取数场景组件；经运营分析包装 CMDB NATS `get_room_list` / `get_room3d_layout`；设备告警摘要驱动侧栏/tooltip 与内部红光晕） |
 | 拓扑地图 | `topologyMap` | TopologyMap |
 
 共 16 种，由前端 `components/widgetRegistry.ts` 实际注册并由 `getWidgetComponent()` 解析。后端 `chart_type` 字段仅作 JSON 透传，不再维护独立图表枚举（以前端落地为准）。
@@ -253,7 +255,7 @@
 | 多值 | `multiValue` | 多值展示组件 |
 | 文本 | `text` | 文本面板组件 |
 | 网络状态拓扑 | `networkStatusTopology` | 网络状态拓扑组件 |
-| 3D 机房 | `room3D` | 3D 机房大屏组件（消费 `get_room3d_layout`，含设备告警摘要与红光晕） |
+| 3D 机房 | `room3D` | 3D 机房大屏场景组件（自取数，含设备告警摘要与红光晕） |
 | 拓扑地图 | `topologyMap` | 通用关系拓扑地图组件 |
 
 ### 内置数据源 API（代表性摘录）

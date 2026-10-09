@@ -214,6 +214,7 @@ export const ARCH_TITLE_FILL = '#FFFFFF';
 export const ARCH_TITLE_SHADOW_COLOR = '#00A3FF';
 export const ARCH_TITLE_SHADOW_BLUR = 10;
 export const ARCH_LABEL_FILL = '#FFFFFF';
+export const ARCH_LABEL_FILL_DIM = '#8B93A0';
 export const ARCH_LABEL_HAS_BACKGROUND = false;
 /** Layer titles and node labels always face the camera. */
 export const ARCH_LABEL_BILLBOARD = true;
@@ -252,19 +253,16 @@ export const ARCH_CAMERA_TARGET_Z = -0.6;
  */
 export const ARCH_CAMERA_FRAME_FILL = 0.70;
 
-export const ARCH_PLANE_ORDER: Application3DArchitecturePlaneKind[] = [
-  'host',
-  'application',
-];
+export const ARCH_PLANE_ORDER = ['host', 'application'] as const satisfies readonly Application3DArchitecturePlaneKind[];
 
 export const ARCH_PLANE_TITLE: Record<
-  Application3DArchitecturePlaneKind,
+  (typeof ARCH_PLANE_ORDER)[number],
   { titleKey: string; titleFallback: string }
 > = {
-  host: { titleKey: 'dashboard.application3DKindHost', titleFallback: '主机' },
+  host: { titleKey: 'dashboard.application3DKindHost', titleFallback: 'Host' },
   application: {
     titleKey: 'dashboard.application3DKindApplication',
-    titleFallback: '应用',
+    titleFallback: 'Application',
   },
 };
 

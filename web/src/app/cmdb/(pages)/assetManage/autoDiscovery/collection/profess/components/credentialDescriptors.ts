@@ -12,6 +12,7 @@ export type CredentialFormKind =
   | 'winsphere'
   | 'vmware'
   | 'ipmi'
+  | 'redfish'
   | 'network_config_file';
 
 export interface CredentialFieldDescriptor {
@@ -60,6 +61,22 @@ const platformApiDescriptor = (
   fields: PLATFORM_API_FIELDS(String(defaultPort)),
 });
 
+const legacySqlDescriptor = (defaultPort: number): CredentialDescriptor => ({
+  formKind: 'sql', protocolKey: 'mysql', credentialKindKey: 'databaseAccount',
+  instructionKey: 'database', defaultPort,
+  fields: [...ACCOUNT_FIELDS, { key: 'databasePort', defaultValue: String(defaultPort) }],
+});
+
+const legacyAkSkDescriptor = (defaultPort: number): CredentialDescriptor => ({
+  formKind: 'cloud', protocolKey: 'httpsApi', credentialKindKey: 'platformAccount',
+  instructionKey: 'database', defaultPort,
+  fields: [
+    { key: 'storageAccessKey', formLabelKey: 'Collection.cloudTask.accessKey' },
+    { key: 'storageAccessSecret', formLabelKey: 'Collection.cloudTask.accessSecret' },
+    { key: 'cloudRegion' },
+  ],
+});
+
 const SNMP_FIELDS = [
   {
     key: 'snmpVersion',
@@ -73,12 +90,24 @@ const SNMP_FIELDS = [
     defaultValue: 'authNoPriv',
     recommendedValue: 'authPriv',
   },
-  { key: 'snmpAuthAlgorithm', defaultValue: 'SHA' },
+  { key: 'snmpAuthAlgorithm', defaultValue: 'SHA-1' },
   { key: 'snmpAuthPassword' },
-  { key: 'snmpPrivacyAlgorithm', defaultValue: 'AES' },
+  { key: 'snmpPrivacyAlgorithm', defaultValue: 'AES-128' },
   { key: 'snmpPrivacyKey' },
   { key: 'snmpPort', defaultValue: '161' },
 ] as const;
+
+const legacySnmpDescriptor = (): CredentialDescriptor => ({
+  formKind: 'snmp', protocolKey: 'snmp', credentialKindKey: 'snmpParameters',
+  instructionKey: 'snmp', defaultPort: 161, defaultPortLabel: 'UDP 161',
+  fields: SNMP_FIELDS,
+});
+
+const legacySshDescriptor = (): CredentialDescriptor => ({
+  formKind: 'ssh', protocolKey: 'ssh', credentialKindKey: 'hostAccount',
+  instructionKey: 'ssh', defaultPort: 22,
+  fields: [{ key: 'sshAccount' }, { key: 'sshPassword' }, { key: 'sshPort', defaultValue: '22' }],
+});
 
 export const CREDENTIAL_DESCRIPTORS = {
   protocols: {
@@ -136,6 +165,24 @@ export const CREDENTIAL_DESCRIPTORS = {
       defaultPort: 161,
       defaultPortLabel: 'UDP 161',
       fields: SNMP_FIELDS,
+    },
+    redfish: {
+      formKind: 'redfish',
+      protocolKey: 'redfish',
+      credentialKindKey: 'bmcAccount',
+      instructionKey: 'redfish',
+      defaultPort: 443,
+      defaultPortLabel: 'HTTPS 443',
+      fields: [
+        { key: 'platformUsername' },
+        { key: 'platformPassword' },
+        { key: 'platformPort', defaultValue: '443' },
+        {
+          key: 'tlsVerify',
+          defaultValueKey: 'enabled',
+          recommendedValueKey: 'enabled',
+        },
+      ],
     },
   },
   models: {
@@ -236,11 +283,20 @@ export const CREDENTIAL_DESCRIPTORS = {
     sangforscp: platformApiDescriptor(443),
     inspurincloudrail: platformApiDescriptor(443),
     zstack: platformApiDescriptor(8080),
-    openstack: platformApiDescriptor(443),
+    openstack: platformApiDescriptor(5000),
     smartx: platformApiDescriptor(443),
     manageone: platformApiDescriptor(443),
-    // Azure：现有 platform_api 可填 client_id/secret；tenant/subscription 后续专用表单补齐
-    azure: platformApiDescriptor(443),
+    // OAuth 身份来自凭据管理；订阅范围由采集任务设置。
+    azure: {
+      ...platformApiDescriptor(443),
+      defaultPort: undefined,
+      credentialKindKey: 'azureOAuth',
+      instructionKey: 'azureOAuth',
+      fields: [
+        { key: 'azureClientId' }, { key: 'azureClientSecret' },
+        { key: 'azureTenantId' }, { key: 'azureSubscriptionId' },
+      ],
+    },
     aws: {
       formKind: 'cloud',
       protocolKey: 'aws',
@@ -321,11 +377,13 @@ export const CREDENTIAL_DESCRIPTORS = {
     },
     network_config_file: {
       formKind: 'network_config_file',
-      protocolKey: 'ssh',
+      protocolKey: 'sshOrTelnet',
       credentialKindKey: 'networkDeviceAccount',
       instructionKey: 'networkConfig',
       defaultPort: 22,
+      defaultPortLabel: 'SSH 22 / Telnet 23',
       fields: [
+        { key: 'transportProtocol', defaultValue: 'ssh' },
         { key: 'sshAccount' },
         { key: 'sshPassword' },
         { key: 'sshPort', defaultValue: '22' },
@@ -395,10 +453,48 @@ export const CREDENTIAL_DESCRIPTORS = {
   pc: Record<string, CredentialDescriptor>;
 };
 
+// 未有专用描述的入口，逐项依据 cae36df3f^ 的 page.tsx / taskMap 恢复。
+// 此清单与已有凭据类型无关；FC 两项按已核实的 SSHPlugin 脚本修正为账号密码表单。
+const ORIGINAL_FORM_DESCRIPTORS: Record<string, CredentialDescriptor> = {
+  sap_hana: { ...legacySqlDescriptor(30015), protocolKey: 'sapHana' },
+  iris: { ...legacySqlDescriptor(1972), protocolKey: 'iris' },
+  couchbase: { ...legacySqlDescriptor(8091), protocolKey: 'couchbase' },
+  tongrds: { ...legacySqlDescriptor(6379), protocolKey: 'tongrds' },
+  ambari: { ...platformApiDescriptor(8080), protocolKey: 'httpApi', instructionKey: 'httpApi' },
+  ibm_storwize: platformApiDescriptor(7443),
+  emc_symmetrix: platformApiDescriptor(8443),
+  netapp_cluster: platformApiDescriptor(443),
+  oraclezfs: platformApiDescriptor(215),
+  infinidat: platformApiDescriptor(443),
+  oceanbase: { ...legacySqlDescriptor(2881) },
+  highgo: { ...CREDENTIAL_DESCRIPTORS.protocols.postgresql },
+  greenplum: { ...CREDENTIAL_DESCRIPTORS.protocols.postgresql },
+  kingbase: { ...CREDENTIAL_DESCRIPTORS.protocols.postgresql },
+  opengauss: { ...CREDENTIAL_DESCRIPTORS.protocols.postgresql },
+  vastbase: { ...CREDENTIAL_DESCRIPTORS.protocols.postgresql },
+  server_bmc: { ...CREDENTIAL_DESCRIPTORS.protocols.redfish },
+  nacos: { ...platformApiDescriptor(8848), protocolKey: 'httpApi', instructionKey: 'httpApi' },
+  ...Object.fromEntries(
+    'dell_unity netapp_ontap hds_vsp pure_array dell_powerstore hp_3par'.split(' ').map((id) => [id, platformApiDescriptor(443)]),
+  ),
+  ...Object.fromEntries(
+    "f5 security_device tape_library macrosan".split(' ').map((id) => [id, legacySnmpDescriptor()]),
+  ),
+  ...Object.fromEntries(
+    "tdsql gbase8a".split(' ').map((id) => [id, legacySqlDescriptor(3306)]),
+  ),
+  ...Object.fromEntries(
+    "brocade_fc cisco_fc informix sybase mycat redis_sentinel gbase8s oscar dameng db2 tidb hmc ibmmq tonglinkq tonggtp ihs cics hdfs yarn storm bes apusic inforsuite_as ceph jboss jetty tongweb weblogic websphere".split(' ').map((id) => [id, legacySshDescriptor()]),
+  ),
+  ...Object.fromEntries(
+    "ibm_ds xsky".split(' ').map((id) => [id, legacyAkSkDescriptor(443)]),
+  ),
+};
+
 type CredentialModel = Partial<
   Pick<
     ModelItem,
-    'model_id' | 'type' | 'credential_protocol' | 'credential_default_port'
+    'model_id' | 'type' | 'credential_protocol' | 'credential_default_port' | 'credential_binding'
   >
 >;
 
@@ -408,18 +504,30 @@ export function getCredentialDescriptor(
   if (model.model_id === 'physcial_server' && model.type !== 'protocol') {
     return CREDENTIAL_DESCRIPTORS.protocols.ssh;
   }
+  const withPort = (descriptor: CredentialDescriptor): CredentialDescriptor => {
+    if (model.credential_default_port == null || descriptor.defaultPort === model.credential_default_port) return descriptor;
+    const port = model.credential_default_port;
+    return { ...descriptor, defaultPort: port, fields: descriptor.fields.map((field) =>
+      field.key.endsWith('Port') ? { ...field, defaultValue: String(port) } : field),
+    };
+  };
+  if (model.credential_protocol) {
+    const protocolDescriptor = CREDENTIAL_DESCRIPTORS.protocols[
+      model.credential_protocol as keyof typeof CREDENTIAL_DESCRIPTORS.protocols
+    ];
+    if (protocolDescriptor) {
+      return withPort(protocolDescriptor);
+    }
+  }
   const modelDescriptor = CREDENTIAL_DESCRIPTORS.models[
     model.model_id as keyof typeof CREDENTIAL_DESCRIPTORS.models
   ];
   if (modelDescriptor) {
-    return modelDescriptor;
+    return withPort(modelDescriptor);
   }
-  if (!model.credential_protocol) {
-    return null;
-  }
-  return CREDENTIAL_DESCRIPTORS.protocols[
-    model.credential_protocol as keyof typeof CREDENTIAL_DESCRIPTORS.protocols
-  ] || null;
+  // 一次性认证沿用原采集表单；凭据管理绑定只参与已有凭据筛选。
+  const original = ORIGINAL_FORM_DESCRIPTORS[model.model_id || ''];
+  return original ? withPort(original) : null;
 }
 
 export function getCredentialDefaultPort(model: CredentialModel): number | undefined {

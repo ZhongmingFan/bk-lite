@@ -26,17 +26,20 @@ from apps.opspilot.services.wiki.kb_delete_service import delete_knowledge_base
 from apps.opspilot.services.wiki.markdown_export_service import QuotaExceededError
 from apps.opspilot.services.wiki.markdown_import_governance_service import (
     MarkdownImportGovernanceError,
-    execute_markdown_import,
+    _release_preflight_after_failure,
+    enqueue_markdown_import,
+    persist_markdown_import_celery_task_id,
     preflight_markdown_import,
+    reclaim_stale_markdown_import_builds,
 )
 from apps.opspilot.services.wiki.material_build_queue_service import has_active_runner, kb_has_user_build_in_progress, release_stale_runner_lease
-from apps.opspilot.services.wiki.native_markdown_export_service import build_native_markdown_export_zip
+from apps.opspilot.services.wiki.okf_export_service import build_okf_export_zip
 from apps.opspilot.services.wiki.overview_service import get_overview
 from apps.opspilot.services.wiki.parsed_media_service import sign_media_locators
-from apps.opspilot.services.wiki.purpose_schema_service import generate_purpose_schema, list_templates
 from apps.opspilot.services.wiki.rebuild_service import create_rebuild_record, running_build_record
 from apps.opspilot.services.wiki.relation_service import list_relations
 from apps.opspilot.services.wiki.retrieval_service import answer as wiki_answer
+from apps.opspilot.services.wiki.retrieval_service import default_retrieval_mode
 from apps.opspilot.services.wiki.retrieval_service import hybrid_search as wiki_hybrid_search
 from apps.opspilot.services.wiki.retrieval_service import search as wiki_search
 from apps.opspilot.services.wiki.retrieval_service import stream_answer as wiki_stream_answer
@@ -45,6 +48,7 @@ from apps.opspilot.services.wiki.structure_service import StructureServiceError,
 from apps.opspilot.services.wiki.title_service import canonical_title, compact_title_key, title_alias_map
 from apps.opspilot.services.wiki.wiki_budget_service import WikiBudgetExceeded
 from apps.opspilot.services.wiki.wiki_context_service import build_context
+from apps.opspilot.utils.user_message import user_message
 from apps.opspilot.viewsets.wiki_team_scope import WikiTeamScopeMixin
 from apps.system_mgmt.utils.operation_log_utils import log_operation
 from config.drf.renderers import CustomRenderer, EventStreamRenderer
@@ -106,10 +110,11 @@ def _rollback_error(error):
 
 
 class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
-    """新 Wiki 知识库 CRUD + 创建流程(模板/AI 生成 Purpose+Schema)。沿用团队权限。"""
+    """新 Wiki 知识库 CRUD；新建时 bootstrap 冻结六根。沿用团队权限。"""
 
     queryset = WikiKnowledgeBase.objects.all().order_by("-id")
     serializer_class = WikiKnowledgeBaseSerializer
+    lookup_value_regex = r"\d+"
     ordering = ("-id",)
     search_fields = ("name",)
     team_scope_field = "id"
@@ -261,25 +266,28 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
     def destroy(self, request, *args, **kwargs):
         instance = self.get_object()
         if running_build_record(instance):
-            return JsonResponse({"result": False, "message": "知识库存在运行中的构建任务,请等待完成后再操作"}, status=400)
+            message = self.loader.get("error.knowledge_base_build_running") if self.loader else "知识库存在运行中的构建任务,请等待完成后再操作"
+            return JsonResponse({"result": False, "message": message or "知识库存在运行中的构建任务,请等待完成后再操作"}, status=400)
         knowledge_base_id = instance.id
         name = instance.name
         try:
             delete_knowledge_base(instance)
         except ProtectedError:
+            message = self.loader.get("error.knowledge_base_protected") if self.loader else "知识库仍被受保护引用占用，无法删除，请稍后重试或联系管理员"
             return JsonResponse(
                 {
                     "result": False,
-                    "message": "知识库仍被受保护引用占用，无法删除，请稍后重试或联系管理员",
+                    "message": message or "知识库仍被受保护引用占用，无法删除，请稍后重试或联系管理员",
                     "code": "knowledge_base_protected",
                 },
                 status=409,
             )
         except Exception as error:  # noqa: BLE001 - 返回可读失败，避免裸 500
+            template = (self.loader.get("error.knowledge_base_delete_failed") if self.loader else "删除知识库失败: {error}") or "删除知识库失败: {error}"
             return JsonResponse(
                 {
                     "result": False,
-                    "message": f"删除知识库失败: {error}",
+                    "message": template.format(error=error),
                     "code": "knowledge_base_delete_failed",
                 },
                 status=500,
@@ -288,27 +296,20 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
         return JsonResponse({"result": True, "data": {"id": knowledge_base_id}})
 
     @HasPermission("wiki_list-View")
-    @action(methods=["GET"], detail=False)
-    def templates(self, request):
-        """返回创建知识库的场景模板列表。"""
-        return JsonResponse({"result": True, "data": list_templates()})
-
-    @HasPermission("wiki_list-View")
     @action(methods=["GET"], detail=True)
-    def export_markdown(self, request, pk=None):
-        """导出当前知识库启用中的知识页面为 Markdown zip。带配额审计。"""
+    def export_okf(self, request, pk=None):
+        """导出当前知识库启用中的知识页面为 OKF v0.2 zip。带配额审计。"""
         kb = self.get_object()
         try:
-            content, count = build_native_markdown_export_zip(kb)
+            content, stats = build_okf_export_zip(kb)
         except ActiveGenerationReadError as error:
             return _governance_error(error, status=409)
         except QuotaExceededError as exc:
-            # 审计失败导出尝试:留给运维/安全审计
             log_operation(
                 request,
                 "execute",
                 "opspilot",
-                f"导出 Markdown 超限: 知识库={kb.name} code={exc.code} detail={exc.message}",
+                f"导出 OKF 超限: 知识库={kb.name} code={exc.code} detail={exc.message}",
             )
             return JsonResponse(
                 {"result": False, "code": exc.code, "message": exc.message},
@@ -318,10 +319,10 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
             request,
             "execute",
             "opspilot",
-            f"导出 Markdown: 知识库={kb.name} pages={count} bytes={len(content)}",
+            f"导出 OKF: 知识库={kb.name} pages={stats['pages']} bytes={len(content)} images={stats['images']}",
         )
         response = HttpResponse(content, content_type="application/zip")
-        response["Content-Disposition"] = f'attachment; filename="wiki-kb-{kb.id}-markdown.zip"'
+        response["Content-Disposition"] = f'attachment; filename="wiki-kb-{kb.id}-okf.zip"'
         return response
 
     @HasPermission("wiki_list-Edit")
@@ -338,8 +339,6 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
             for field in ("classification_root_id", "target_directory_id"):
                 if request.data.get(field) not in (None, ""):
                     options[field] = int(request.data.get(field))
-            if request.data.get("restore_structure") not in (None, ""):
-                options["restore_structure"] = _bool_param(request.data, "restore_structure")
             data = preflight_markdown_import(
                 knowledge_base,
                 upload.read(),
@@ -355,7 +354,7 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
             request,
             "create",
             "opspilot",
-            f"预检 Markdown 导入: 知识库={knowledge_base.name} file={upload.name}",
+            f"预检 OKF 导入: 知识库={knowledge_base.name} file={upload.name}",
         )
         return JsonResponse({"result": True, "data": data})
 
@@ -368,23 +367,61 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
         if not upload or not token:
             return JsonResponse({"result": False, "message": "file 与 token 必填"}, status=400)
         operator = getattr(request.user, "username", "") or ""
+        filename = upload.name
         try:
-            data = execute_markdown_import(
+            data, dispatch = enqueue_markdown_import(
                 knowledge_base,
                 token,
                 upload.read(),
-                filename=upload.name,
+                filename=filename,
                 actor=operator,
             )
         except MarkdownImportGovernanceError as error:
             return _governance_error(error, status=error.status_code)
         except BuildGenerationError as error:
             return _governance_error(error, status=409 if error.retryable else 422)
+        if dispatch is None:
+            log_operation(
+                request,
+                "create",
+                "opspilot",
+                f"执行 OKF 导入: 知识库={knowledge_base.name} generation={data.get('generation_id')} build={data.get('build_record_id')}",
+            )
+            return JsonResponse({"result": True, "data": data})
+        try:
+            _opspilot_tasks.wiki_execute_markdown_import_task.apply_async(
+                kwargs={
+                    "kb_id": knowledge_base.id,
+                    "build_record_id": dispatch["build_record_id"],
+                    "operator": operator,
+                },
+                task_id=dispatch["celery_task_id"],
+            )
+        except Exception as error:
+            with transaction.atomic():
+                WikiKnowledgeBase.objects.select_for_update().get(pk=knowledge_base.pk)
+                failed = BuildRecord.objects.select_for_update().get(pk=dispatch["build_record_id"])
+                _opspilot_tasks._fail_wiki_task_build(
+                    failed,
+                    "task_dispatch_failed",
+                    str(error),
+                    retryable=True,
+                )
+                _release_preflight_after_failure((failed.inputs or {}).get("preflight_id"))
+            return _governance_error(
+                BuildGenerationError(
+                    "task_dispatch_failed",
+                    "导入任务下发失败，请重试",
+                    retryable=True,
+                ),
+                status=503,
+            )
+        persist_markdown_import_celery_task_id(dispatch["build_record_id"], dispatch["celery_task_id"])
         log_operation(
             request,
             "create",
             "opspilot",
-            f"执行 Markdown 导入: 知识库={knowledge_base.name} generation={data.get('generation_id')}",
+            f"受理 OKF 导入: 知识库={knowledge_base.name} build={dispatch['build_record_id']}",
         )
         return JsonResponse({"result": True, "data": data})
 
@@ -395,17 +432,6 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
 
         return self.import_markdown_preflight(request, pk=pk)
 
-    @HasPermission("wiki_list-Add")
-    @action(methods=["POST"], detail=False)
-    def generate_purpose_schema(self, request):
-        """根据模板 + 用户描述,AI 生成 purpose_md / schema_md 草稿(无模型/失败时回退模板骨架)。"""
-        purpose, schema = generate_purpose_schema(
-            template_key=request.data.get("template_key", "general"),
-            description=request.data.get("description", ""),
-            llm_model_id=request.data.get("llm_model_id"),
-        )
-        return JsonResponse({"result": True, "data": {"purpose_md": purpose, "schema_md": schema}})
-
     @HasPermission("wiki_list-View")
     @action(methods=["GET", "POST"], detail=True)
     def search(self, request, pk=None):
@@ -413,14 +439,26 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
         kb = self.get_object()
         params = request.data if request.method == "POST" else request.GET
         query = params.get("query", "")
+        top_k = _int_param(params, "top_k", 5, minimum=1)
+        directory_id = _optional_int_param(params, "directory_id")
+        include_descendants = _bool_param(params, "include_descendants")
         try:
-            results = wiki_search(
-                kb,
-                query or "",
-                top_k=_int_param(params, "top_k", 5, minimum=1),
-                directory_id=_optional_int_param(params, "directory_id"),
-                include_descendants=_bool_param(params, "include_descendants"),
-            )
+            if default_retrieval_mode(kb) == "hybrid":
+                results = wiki_hybrid_search(
+                    kb,
+                    query or "",
+                    top_k=top_k,
+                    directory_id=directory_id,
+                    include_descendants=include_descendants,
+                )
+            else:
+                results = wiki_search(
+                    kb,
+                    query or "",
+                    top_k=top_k,
+                    directory_id=directory_id,
+                    include_descendants=include_descendants,
+                )
         except ActiveGenerationReadError as error:
             return _governance_error(error, status=409)
         return JsonResponse({"result": True, "data": results})
@@ -446,7 +484,10 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
         """重建知识库全部有效页面的页面级和 chunk 级索引,并落构建记录供诊断追踪。"""
         kb = self.get_object()
         if not kb.embed_provider_id:
-            return JsonResponse({"result": False, "message": "知识库未配置向量模型,无法重建索引"}, status=400)
+            return JsonResponse(
+                {"result": False, "message": user_message(request, "error.no_embedding_model", "知识库未配置向量模型,无法重建索引", self.loader)},
+                status=400,
+            )
         pages = list(KnowledgePage.objects.filter(knowledge_base=kb, status="active").select_related("current_version").order_by("id"))
         record = rebuild_page_indexes(
             kb,
@@ -495,6 +536,7 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
                 kb,
                 request.data.get("query", ""),
                 llm_model_id=kb.llm_model_id,
+                retrieval_mode=request.data.get("retrieval_mode"),
             )
         except (WikiBudgetExceeded, ActiveGenerationReadError) as error:
             return _governance_error(error, status=422)
@@ -510,6 +552,7 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
         """检索测试流式回答:SSE meta/delta/done/error。"""
         kb = self.get_object()
         query = request.data.get("query", "")
+        retrieval_mode = request.data.get("retrieval_mode")
 
         def event_stream():
             try:
@@ -517,6 +560,7 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
                     kb,
                     query,
                     llm_model_id=kb.llm_model_id,
+                    retrieval_mode=retrieval_mode,
                 ):
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             except (WikiBudgetExceeded, ActiveGenerationReadError) as error:
@@ -535,9 +579,10 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
                 }
                 yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
-        response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
-        response["Cache-Control"] = "no-cache"
+        response = StreamingHttpResponse(event_stream(), content_type="text/event-stream; charset=utf-8")
+        response["Cache-Control"] = "no-cache, no-store, must-revalidate"
         response["X-Accel-Buffering"] = "no"
+        response["Connection"] = "keep-alive"
         return response
 
     @HasPermission("wiki_list-Edit")
@@ -608,11 +653,12 @@ class WikiKnowledgeBaseViewSet(WikiTeamScopeMixin, AuthViewSet):
         try:
             with transaction.atomic():
                 kb = WikiKnowledgeBase.objects.select_for_update().get(pk=kb.pk)
+                reclaim_stale_markdown_import_builds(kb.pk)
                 if kb_has_user_build_in_progress(kb.pk) or has_active_runner(kb.pk):
                     return JsonResponse(
                         {
                             "result": False,
-                            "message": "知识库存在运行中的构建任务,请等待完成后再操作",
+                            "message": user_message(request, "error.knowledge_base_build_running", "知识库存在运行中的构建任务,请等待完成后再操作", self.loader),
                             "code": "knowledge_base_build_in_progress",
                         },
                         status=400,

@@ -25,6 +25,7 @@ import {
   expandServiceRows,
   indexEnabledSlos,
   isTimeWindow,
+  lookupActiveAlert,
   metricKey,
   timeWindowRange,
   type TimeWindow,
@@ -149,7 +150,7 @@ export default function ApplicationObservability({
   const {
     getApplication,
     getServices,
-    getServiceRed,
+    getServiceRedBatch,
     getTopology,
     getEvents,
     getSlos,
@@ -160,6 +161,7 @@ export default function ApplicationObservability({
   const [state, setState] = useState<PageState>('loading');
   const [graph, setGraph] = useState<ApmTopologyGraph>({ nodes: [], edges: [], sampled_traces: 0, truncated: false, data_state: 'no_data' });
   const [topologyState, setTopologyState] = useState<TopologySurfaceState>('loading');
+  const [topologyError, setTopologyError] = useState<unknown>();
   const [topologyRefreshKey, setTopologyRefreshKey] = useState(0);
   const [redMetrics, setRedMetrics] = useState<Record<string, ApmServiceRed>>({});
   const [metricFailureKeys, setMetricFailureKeys] = useState<string[]>([]);
@@ -194,21 +196,30 @@ export default function ApplicationObservability({
     if (!application) return;
     const { startedAt, endedAt } = timeWindowRange(timeWindow);
     setTopologyState((current) => (current === 'ready' ? current : 'loading'));
+    let active = true;
     getTopology({
       started_at: startedAt.toISOString(),
       ended_at: endedAt.toISOString(),
       include_inferred: true,
       include_user_request: true,
+      application_id: application.application_id,
     })
       .then((topology) => {
+        if (!active) return;
         const focused = focusApplicationTopology(topology, application.application_id).graph;
         setGraph(focused);
+        setTopologyError(undefined);
         setTopologyState(focused.nodes.length ? 'ready' : 'empty');
       })
       .catch((error) => {
+        if (!active) return;
         setGraph({ nodes: [], edges: [], sampled_traces: 0, truncated: false, data_state: 'no_data' });
+        setTopologyError(error);
         setTopologyState(catalogErrorKind(error));
       });
+    return () => {
+      active = false;
+    };
   }, [application, getTopology, timeWindow, topologyRefreshKey]);
 
   const rows = useMemo(() => expandServiceRows(services), [services]);
@@ -222,30 +233,45 @@ export default function ApplicationObservability({
     }
     let active = true;
     const { startedAt, endedAt } = timeWindowRange(timeWindow);
-    Promise.allSettled(targets.map(async (row) => ({
-      key: metricKey(row.serviceId, row.environment),
-      metric: await getServiceRed(row.serviceId, row.environment, startedAt.toISOString(), endedAt.toISOString()),
+    const chunkSize = 40;
+    const chunks: typeof targets[] = [];
+    for (let offset = 0; offset < targets.length; offset += chunkSize) {
+      chunks.push(targets.slice(offset, offset + chunkSize));
+    }
+    // 任一批次整体失败只标记该批次内的服务，不影响其他批次已返回的指标。
+    void Promise.allSettled(chunks.map((chunk) => getServiceRedBatch({
+      started_at: startedAt.toISOString(),
+      ended_at: endedAt.toISOString(),
+      include_breakdown: true,
+      targets: chunk.map((row) => ({ service_id: row.serviceId, environment: row.environment })),
     })))
       .then((results) => {
         if (!active) return;
-        setRedMetrics(Object.fromEntries(results.flatMap((result) => (
-          result.status === 'fulfilled' ? [[result.value.key, result.value.metric]] : []
-        ))));
-        setMetricFailureKeys(results.flatMap((result, index) => (
-          result.status === 'rejected'
-            ? [metricKey(targets[index].serviceId, targets[index].environment)]
-            : []
-        )));
+        const metrics: Record<string, ApmServiceRed> = {};
+        const failureKeys: string[] = [];
+        results.forEach((result, index) => {
+          if (result.status === 'rejected') {
+            chunks[index].forEach((row) => failureKeys.push(metricKey(row.serviceId, row.environment)));
+            return;
+          }
+          result.value.items.forEach((item) => {
+            const key = metricKey(item.service_id, item.environment);
+            if (item.ok === false) failureKeys.push(key);
+            else metrics[key] = item;
+          });
+        });
+        setRedMetrics(metrics);
+        setMetricFailureKeys(failureKeys);
       });
     return () => {
       active = false;
     };
-  }, [getServiceRed, metricRefreshKey, rows, timeWindow]);
+  }, [getServiceRedBatch, metricRefreshKey, rows, timeWindow]);
 
   const alertCounts = useMemo(() => countActiveAlerts(events), [events]);
   const sloByServiceEnv = useMemo(() => indexEnabledSlos(slos), [slos]);
   const applicationAlertCount = useMemo(
-    () => rows.reduce((sum, row) => sum + (alertCounts.get(`${row.serviceName}::${row.environment}`)?.count ?? 0), 0),
+    () => rows.reduce((sum, row) => sum + (lookupActiveAlert(alertCounts, row.serviceId, row.serviceName, row.environment)?.count ?? 0), 0),
     [alertCounts, rows],
   );
   const applicationSloCount = useMemo(
@@ -430,6 +456,7 @@ export default function ApplicationObservability({
                   <div className="w-full">
                     <CatalogState
                       kind={topologyState}
+                      error={topologyError}
                       description={topologyState === 'empty' ? t('apm.applications.noTopology', '当前时间窗暂无应用内调用关系。') : undefined}
                       onRetry={topologyState === 'forbidden' ? undefined : () => setTopologyRefreshKey((value) => value + 1)}
                     />

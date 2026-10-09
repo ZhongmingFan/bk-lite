@@ -18,6 +18,7 @@ import {
   ARCH_LABEL_CANVAS_HEIGHT,
   ARCH_LABEL_CANVAS_WIDTH,
   ARCH_LABEL_FILL,
+  ARCH_LABEL_FILL_DIM,
   ARCH_LABEL_HAS_BACKGROUND,
   ARCH_LABEL_WORLD_HEIGHT,
   ARCH_LABEL_WORLD_WIDTH,
@@ -221,6 +222,7 @@ import {
   createTrapezoidFrustumGeometry,
   hashAppChipIconIndex,
   hostHasAlarm,
+  hostMonitorGap,
   findArchitectureRackRoot,
   liftCabinetAlbedoPixels,
   liftCabinetAlbedoTexture,
@@ -305,8 +307,8 @@ describe('application3D architecture layout', () => {
     expect(layout.planes).toHaveLength(2);
     expect(ARCH_PLANE_COUNT).toBe(2);
     expect(layout.planes.map((plane) => plane.kind)).toEqual(['host', 'application']);
-    expect(layout.planes.map((plane) => plane.titleFallback)).toEqual(['主机', '应用']);
-    expect(layout.planes.map((plane) => plane.titleText)).toEqual(['主机', '应用']);
+    expect(layout.planes.map((plane) => plane.titleFallback)).toEqual(['Host', 'Application']);
+    expect(layout.planes.map((plane) => plane.titleText)).toEqual(['Host', 'Application']);
     expect(layout.planes.map((plane) => plane.y)).toEqual([
       ARCH_PLANE_Y.host,
       ARCH_PLANE_Y.application,
@@ -747,6 +749,10 @@ describe('application3D architecture layout', () => {
     expect(architectureEdgeColor({ kind: 'application', health: { state: 'alarming' } })).toBe(ARCH_EDGE);
     expect(hostHasAlarm({ kind: 'host', health: { state: 'alarming' } })).toBe(true);
     expect(hostHasAlarm({ kind: 'application', health: { state: 'alarming' } })).toBe(false);
+    expect(hostMonitorGap({ kind: 'host', health: { reason: 'unmonitored' } })).toBe(true);
+    expect(hostMonitorGap({ kind: 'host', health: { reason: 'monitor_unreadable' } })).toBe(true);
+    expect(hostMonitorGap({ kind: 'host', health: { reason: 'unavailable' } })).toBe(false);
+    expect(hostMonitorGap({ kind: 'application', health: { reason: 'unmonitored' } })).toBe(false);
     expect(applicationHasAlarm({ kind: 'application', health: { state: 'alarming' } })).toBe(true);
     expect(applicationHasAlarm({ kind: 'application', health: { state: 'normal' } })).toBe(false);
     expect(applicationHasAlarm({ kind: 'host', health: { state: 'alarming' } })).toBe(false);
@@ -1109,7 +1115,7 @@ describe('application3D architecture view', () => {
     expect(view.planeGroups[0].position.y).toBeCloseTo(ARCH_PLANE_Y.host);
     expect(view.planeGroups[1].position.y).toBeCloseTo(ARCH_PLANE_Y.application);
     expect(view.planeGroups[0].position.y).toBeLessThan(view.planeGroups[1].position.y);
-    expect(titles.map((title) => title.userData.planeTitle)).toEqual(['主机', '应用']);
+    expect(titles.map((title) => title.userData.planeTitle)).toEqual(['Host', 'Application']);
     expect(titles.every((title) => title.userData.planeTitleSide === 'right')).toBe(true);
     expect(titles.every((title) => title.userData.titleHasBackground === false)).toBe(true);
     expect(titles.every((title) => title.userData.titleHasArrow === false)).toBe(true);
@@ -1253,7 +1259,7 @@ describe('application3D architecture view', () => {
     paintCalls.length = 0;
     fillRectCalls.length = 0;
     const view = createArchitectureTreeGroup(tree(), (_id, fallback = '') => fallback);
-    const titleTexts = paintCalls.filter((call) => call.text === '应用' || call.text === '主机');
+    const titleTexts = paintCalls.filter((call) => call.text === 'Application' || call.text === 'Host');
     expect(titleTexts).toHaveLength(2);
     expect(titleTexts.every((call) => (
       call.fillStyle === ARCH_TITLE_FILL
@@ -1758,6 +1764,40 @@ describe('application3D architecture view', () => {
     expect(viewSrc).toContain('if (alarming)');
     expect(viewSrc).toContain('materials.led');
     expect(viewSrc).toContain('ARCH_LED_COLOR');
+    view.dispose();
+  });
+
+  it('dims unmonitored host cabinets and turns the LEDs off', () => {
+    const gapHealth = {
+      ...health,
+      state: 'unknown' as const,
+      reason: 'unmonitored' as const,
+      activeAlarmCount: null,
+      severityCounts: null,
+      noDataAlarmCount: null,
+      highestSeverity: null,
+    };
+    const view = createArchitectureTreeGroup(tree({
+      nodes: [
+        { id: 'sys-1', kind: 'system', name: '门户系统', health },
+        { id: 'app-1', kind: 'application', name: '门户', health },
+        { id: 'host-gap', kind: 'host', name: 'bare', health: gapHealth },
+      ],
+      edges: [
+        { id: 'e1', sourceId: 'sys-1', targetId: 'app-1', relation: 'system_contains_application' },
+        { id: 'e2', sourceId: 'app-1', targetId: 'host-gap', relation: 'application_run_host' },
+      ],
+    }), (_id, fallback = '') => fallback);
+    const hostGroup = view.nodeGroups.get('host-gap');
+    expect(hostGroup?.userData.monitorGap).toBe(true);
+    const leds: THREE.Mesh[] = [];
+    hostGroup?.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (mesh.userData.archRole === 'rack-led') leds.push(mesh);
+    });
+    expect(leds.length).toBe(ARCH_RACK_LED_COUNT);
+    expect(leds.every((led) => led.visible === false)).toBe(true);
+    expect(view.nodeLabels.get('host-gap')?.userData.labelFill).toBe(ARCH_LABEL_FILL_DIM);
     view.dispose();
   });
 
@@ -2707,7 +2747,7 @@ describe('application3D architecture view', () => {
     expect(viewSrc).toContain('ARCH_APP_CHIP_WALL_INSET_GLOW_WIDTH');
     expect(viewSrc).toContain('sdRoundedBox');
     expect(viewSrc).toContain('yawObjectAroundYToCamera');
-    expect(viewSrc).toContain('addRackMeshes(nodeGroup, node, rackGeos, rackMats, alarming)');
+    expect(viewSrc).toContain('addRackMeshes(nodeGroup, node, rackGeos, rackMats, alarming, monitorGap)');
 
     const camera = new THREE.PerspectiveCamera(50, 16 / 9, 0.1, 200);
     camera.position.set(6, 4, 12);

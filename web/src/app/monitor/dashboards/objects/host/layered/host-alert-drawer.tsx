@@ -186,6 +186,9 @@ export default function HostAlertDrawer({
   const objectId = typeof monitorObjectId === 'string' || typeof monitorObjectId === 'number'
     ? String(monitorObjectId)
     : '';
+  const alertCenterHref = objectId
+    ? `/monitor/event/alert?objId=${encodeURIComponent(objectId)}`
+    : '/monitor/event/alert';
   const absolute = (value?: string | null) => {
     if (!value) return '—';
     return convertToLocalizedTime(value) || '—';
@@ -282,14 +285,12 @@ export default function HostAlertDrawer({
       }}
       footer={(
         <div className="flex items-center justify-between gap-3">
-          {objectId ? (
-            <Link
-              href={`/monitor/event/alert?objId=${encodeURIComponent(objectId)}`}
-              className="text-[13px] leading-5 text-[var(--color-primary)]"
-            >
-              在告警中心查看 →
-            </Link>
-          ) : <span />}
+          <Link
+            href={alertCenterHref}
+            className="text-[13px] leading-5 text-[var(--color-primary)]"
+          >
+            跳转告警中心
+          </Link>
           <span className="shrink-0 text-[12px] leading-5 text-[var(--color-text-3)]">仅显示本机活跃告警</span>
         </div>
       )}

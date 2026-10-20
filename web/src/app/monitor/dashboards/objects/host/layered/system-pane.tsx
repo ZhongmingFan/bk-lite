@@ -22,6 +22,7 @@ import {
   primaryChartSeries,
   resolveMemoryUsage
 } from './readings';
+import ProDashLoading from './pro-dash-loading';
 import classic from '../index.module.scss';
 import styles from './layered.module.scss';
 
@@ -512,6 +513,8 @@ export default function SystemPane({
     metrics.mem_used?.loadState
   ]);
   const memoryBytes = memoryCompose.parts.reduce((sum, item) => sum + item.bytes, 0);
+  const composeNames = ['mem_used', 'mem_cached', 'mem_buffered', 'mem_shared', 'mem_total', 'mem_available'] as const;
+  const composeLoading = phaseFor(composeNames, memoryCompose.series.length > 0) === 'loading';
   const cpuCompose = useMemo(() => {
     const series = CPU_BREAKDOWN.flatMap((item) => {
       const data = primaryChartSeries(metrics[item.key]?.viewData);
@@ -532,6 +535,7 @@ export default function SystemPane({
     metrics.cpu_usage_steal_total?.viewData
   ]);
   const gpuCharts = GPU_SERIES.filter((item) => metricHasPoints(metrics[item.key]));
+  const gpuLoading = phaseFor(GPU_SERIES.map((item) => item.key), gpuCharts.length > 0) === 'loading';
   const gpuMemUsed = latestNumber(metrics.nvidia_smi_memory_used);
   const gpuMemTotal = latestNumber(metrics.nvidia_smi_memory_total);
   const gpuMemReading = gpuMemUsed == null
@@ -551,11 +555,7 @@ export default function SystemPane({
             <CardAlertDot level={card.alertLevel} valueColor={card.valueColor} />
             <div className={styles.instantKpiLabel}>{card.label}</div>
             {card.phase === 'loading' ? (
-              <span
-                className="mt-1 block h-4 w-16 rounded bg-[var(--color-fill-2)]"
-                aria-busy="true"
-                aria-label="加载中"
-              />
+              <ProDashLoading size="small" layout="inline" />
             ) : card.phase === 'error' ? (
               <button
                 type="button"
@@ -599,10 +599,17 @@ export default function SystemPane({
               bare
               title=""
               unit="bytes"
+              loading={composeLoading}
               data={memoryCompose.trend}
               emptyText="暂无数据"
               legends={memoryCompose.series.map((item) => ({ label: item.label, color: item.color }))}
             />
+          ) : composeLoading ? (
+            <div className={styles.chartBody}>
+              <div className={styles.chartEmpty}>
+                <ProDashLoading />
+              </div>
+            </div>
           ) : memoryBytes > 0 ? (
             <CompositionDonut
               slices={memoryCompose.parts.map((item) => ({
@@ -628,11 +635,11 @@ export default function SystemPane({
             />
           </div>
           {breakdownPhase === 'loading' ? (
-            <span
-              className="mt-1 block h-4 w-16 rounded bg-[var(--color-fill-2)]"
-              aria-busy="true"
-              aria-label="加载中"
-            />
+            <div className={styles.chartBody}>
+              <div className={styles.chartEmpty}>
+                <ProDashLoading />
+              </div>
+            </div>
           ) : breakdownPhase === 'error' ? (
             <button
               type="button"
@@ -671,7 +678,15 @@ export default function SystemPane({
       </div>
       <div className={styles.detailFull} data-surface="gpu">
         <div className={styles.gpuBandTitle}>GPU</div>
-        {gpuCharts.length ? (
+        {gpuLoading ? (
+          <section className={`${classic.panel} ${styles.chartPanel} ${styles.detailCard}`}>
+            <div className={styles.chartBody}>
+              <div className={styles.chartEmpty}>
+                <ProDashLoading />
+              </div>
+            </div>
+          </section>
+        ) : gpuCharts.length ? (
           <div className={styles.gpuRow}>
             {GPU_SERIES.map((item) => {
               const title = item.key === 'nvidia_smi_memory_used'

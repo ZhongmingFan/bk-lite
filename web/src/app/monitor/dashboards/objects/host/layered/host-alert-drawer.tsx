@@ -36,6 +36,8 @@ interface HostAlertDrawerProps {
   focusAlertId?: string;
   onClose: () => void;
   onCount: (count: number) => void;
+  title?: string;
+  footerHint?: string;
   emptyCopy?: string;
   emptyHint?: string;
 }
@@ -72,6 +74,8 @@ export default function HostAlertDrawer({
   focusAlertId = '',
   onClose,
   onCount,
+  title = '本机告警',
+  footerHint = '仅显示本机活跃告警',
   emptyCopy = EMPTY_COPY,
   emptyHint = EMPTY_HINT
 }: HostAlertDrawerProps) {
@@ -186,8 +190,13 @@ export default function HostAlertDrawer({
   const objectId = typeof monitorObjectId === 'string' || typeof monitorObjectId === 'number'
     ? String(monitorObjectId)
     : '';
-  const alertCenterHref = objectId
-    ? `/monitor/event/alert?objId=${encodeURIComponent(objectId)}`
+  const instanceFilter = String(instanceId || '').trim();
+  const alertCenterParams = new URLSearchParams();
+  if (objectId) alertCenterParams.set('objId', objectId);
+  if (instanceFilter) alertCenterParams.set('instanceId', instanceFilter);
+  const alertQuery = alertCenterParams.toString();
+  const alertCenterHref = alertQuery
+    ? `/monitor/event/alert?${alertQuery}`
     : '/monitor/event/alert';
   const absolute = (value?: string | null) => {
     if (!value) return '—';
@@ -228,7 +237,7 @@ export default function HostAlertDrawer({
     <Drawer
       title={(
         <span className="inline-flex items-center gap-2.5 text-[16px] font-semibold leading-6 text-[var(--color-text-1)]">
-          本机告警
+          {title}
           {showBadge ? (
             <span
               className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[12px] font-semibold leading-none ${
@@ -291,7 +300,7 @@ export default function HostAlertDrawer({
           >
             跳转告警中心
           </Link>
-          <span className="shrink-0 text-[12px] leading-5 text-[var(--color-text-3)]">仅显示本机活跃告警</span>
+          <span className="shrink-0 text-[12px] leading-5 text-[var(--color-text-3)]">{footerHint}</span>
         </div>
       )}
     >

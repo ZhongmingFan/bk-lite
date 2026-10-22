@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Tabs } from 'antd';
 import useMonitorApi from '@/app/monitor/api';
 import {
@@ -18,7 +18,7 @@ import FlatProcessSplit from './layered/flat-process-split';
 import NetworkPane from './layered/network-pane';
 import { hostAlertRailEvents, type HostAlertRailEvent } from './layered/events-rail';
 import HostAlertDrawer from './layered/host-alert-drawer';
-import { activeHostAlertParams } from './layered/host-alert-list';
+import { overviewHostAlertParams } from './layered/host-alert-list';
 import OverviewPane from './layered/overview-pane';
 import SystemPane from './layered/system-pane';
 import { latestNumber, latestPreferCount, resolveMemoryUsage } from './layered/readings';
@@ -174,6 +174,8 @@ export default function HostCategoryLayout({
   const [alertCount, setAlertCount] = useState<number | null>(null);
   const [alertEvents, setAlertEvents] = useState<HostAlertRailEvent[]>([]);
   const [alertDrawerOpen, setAlertDrawerOpen] = useState(false);
+  const alertDrawerOpenRef = useRef(false);
+  alertDrawerOpenRef.current = alertDrawerOpen;
   const [alertRefreshKey, setAlertRefreshKey] = useState(0);
   const [focusAlertId, setFocusAlertId] = useState('');
   const instanceKey = String(dashboard.instanceId || '');
@@ -272,7 +274,7 @@ export default function HostCategoryLayout({
   }, [activeTab, processReady, setActiveTab]);
 
   useEffect(() => {
-    if (activeTab !== 'overview' || alertDrawerOpen) return undefined;
+    if (activeTab !== 'overview') return undefined;
     const instanceId = String(dashboard.instanceId || '');
     if (!instanceId) {
       setAlertCount(null);
@@ -280,38 +282,18 @@ export default function HostCategoryLayout({
       return undefined;
     }
     let active = true;
-    getMonitorAlert(activeHostAlertParams(instanceId, 1, 1))
-      .then((data) => {
-        if (active) setAlertCount(typeof data?.count === 'number' ? data.count : 0);
-      })
-      .catch(() => {
-        if (active) setAlertCount(null);
-      });
-    return () => {
-      active = false;
-    };
-  }, [activeTab, alertDrawerOpen, dashboard.instanceId, getMonitorAlert]);
-
-  useEffect(() => {
-    if (activeTab !== 'overview') return undefined;
-    const instanceId = String(dashboard.instanceId || '');
-    if (!instanceId) {
-      setAlertEvents([]);
-      return undefined;
-    }
-    let active = true;
-    getMonitorAlert({
-      monitor_instance_id: instanceId,
-      page: 1,
-      page_size: 20
-    })
+    getMonitorAlert(overviewHostAlertParams(instanceId))
       .then((data) => {
         if (!active) return;
         setAlertEvents(hostAlertRailEvents(data?.results));
+        if (!alertDrawerOpenRef.current) {
+          setAlertCount(typeof data?.count === 'number' ? data.count : 0);
+        }
       })
       .catch(() => {
         if (!active) return;
         setAlertEvents([]);
+        if (!alertDrawerOpenRef.current) setAlertCount(null);
       });
     return () => {
       active = false;

@@ -1,7 +1,7 @@
 import type { SimpleDashboardConfig } from '../common/simple-dashboard-core';
 
 /** Redis 监控高对比鲜活科技色板 */
-const REDIS_PALETTE = {
+export const REDIS_PALETTE = {
   emerald: '#10B981',   // 缓存命中率、键命中频率、网络出流量
   blue: '#2563EB',      // 内存使用量、网络入流量、客户端连接数
   indigo: '#6366F1',    // 运行时长、键过期频率
@@ -85,6 +85,14 @@ export const REDIS_DASHBOARD_CONFIG: SimpleDashboardConfig = {
       unit: 'cps',
       query: 'rate(redis_total_commands_processed{__$labels__}[__$window__])',
       color: REDIS_PALETTE.cyan
+    },
+    {
+      name: 'redis_instantaneous_ops_per_sec',
+      display_name: '实时操作频率',
+      description: 'Redis 当前每秒处理的命令数，反映瞬时负载。查询使用采集侧已有指标名，不是 rate 派生。',
+      unit: 'cps',
+      query: 'redis_instantaneous_ops_per_sec{__$labels__}',
+      color: REDIS_PALETTE.blue
     },
     {
       name: 'redis_keyspace_hits_rate',

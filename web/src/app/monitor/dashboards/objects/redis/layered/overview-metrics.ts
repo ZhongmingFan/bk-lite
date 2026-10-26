@@ -17,3 +17,23 @@ export const REDIS_OVERVIEW_KPI_TITLES = [
   '键驱逐频率',
   '客户端连接数'
 ] as const;
+
+/**
+ * 专业态要拉的指标。名字都在 config.ts；未命中频率的 query 是
+ * rate(redis_keyspace_misses[window])，不是落盘 __name__。
+ */
+export const REDIS_CATEGORY_METRIC_NAMES = [
+  ...REDIS_OVERVIEW_METRIC_NAMES,
+  'redis_used_memory',
+  'redis_maxmemory',
+  'redis_mem_fragmentation_ratio',
+  'redis_keyspace_hits_rate',
+  'redis_keyspace_misses_rate',
+  'redis_total_commands_processed_rate',
+  'redis_instantaneous_ops_per_sec',
+  'redis_blocked_clients',
+  'redis_expired_keys_rate',
+  'redis_rejected_connections_rate',
+  'redis_total_net_input_bytes_rate',
+  'redis_total_net_output_bytes_rate'
+] as const;

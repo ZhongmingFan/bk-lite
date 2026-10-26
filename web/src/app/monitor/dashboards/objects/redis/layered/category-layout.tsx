@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import { Tabs } from 'antd';
 import type { TimeValuesProps } from '@/app/monitor/types';
 import HostAlertDrawer from '../../host/layered/host-alert-drawer';
@@ -9,16 +9,20 @@ import type { PreparedSummaryCard } from '../../common/simple-dashboard-core';
 import { useDashboardText } from '../../../shared/utils/content-i18n';
 import layered from '../../host/layered/layered.module.scss';
 import OverviewPane from './overview-pane';
+import type { RedisTopicTab } from './focus-pane';
+import { CachePane, ClientsPane, MemoryPane, ThroughputPane } from './topic-panes';
 import { redisCategoryText, type RedisCategoryCopyKey } from './redis-copy';
+import type { RedisMetricMap } from './series';
 
-/**
- * S1 只露出已绑指标的概览。
- * 重点关注 / 性能与缓存 / 内存 / 连接与网络尚未绑指标，复制·哨兵 / Cluster / 慢命令为 HOLD，
- * 都不进 items，避免灰态或「暂无数据」占位。
- */
-const VISIBLE_TABS = [
-  { key: 'overview', copy: 'tabOverview' }
-] as const satisfies ReadonlyArray<{ key: string; copy: RedisCategoryCopyKey }>;
+type RedisContentTab = 'overview' | RedisTopicTab;
+
+const TABS: ReadonlyArray<{ key: RedisContentTab; copy: RedisCategoryCopyKey }> = [
+  { key: 'overview', copy: 'tabOverview' },
+  { key: 'memory', copy: 'tabMemory' },
+  { key: 'cache', copy: 'tabPerformance' },
+  { key: 'clients', copy: 'tabClients' },
+  { key: 'throughput', copy: 'tabThroughput' }
+];
 
 interface RedisCategoryLayoutProps {
   instanceId: React.Key;
@@ -28,6 +32,7 @@ interface RedisCategoryLayoutProps {
   loading: boolean;
   pendingMetricNames: ReadonlySet<string>;
   summaryCards: PreparedSummaryCard[];
+  metricMap: RedisMetricMap;
 }
 
 export default function RedisCategoryLayout({
@@ -37,10 +42,12 @@ export default function RedisCategoryLayout({
   queryTimeRange,
   loading,
   pendingMetricNames,
-  summaryCards
+  summaryCards,
+  metricMap
 }: RedisCategoryLayoutProps) {
   const { t } = useDashboardText();
   const text = (key: RedisCategoryCopyKey) => redisCategoryText(t, key);
+  const [tab, setTab] = useState<RedisContentTab>('overview');
   const kpiLoading = (loading && pendingMetricNames.size === 0)
     || summaryCards.some((card) => pendingMetricNames.has(card.card.metric));
 
@@ -54,15 +61,36 @@ export default function RedisCategoryLayout({
         <div className={layered.tabBand}>
           <Tabs
             className={layered.partitionTabs}
-            activeKey="overview"
-            items={VISIBLE_TABS.map((item) => ({
+            activeKey={tab}
+            onChange={(key) => setTab(key as RedisContentTab)}
+            items={TABS.map((item) => ({
               key: item.key,
               label: text(item.copy)
             }))}
           />
         </div>
         <div className={layered.main}>
-          <OverviewPane summaryCards={summaryCards} loading={kpiLoading} />
+          {tab === 'overview' ? (
+            <OverviewPane
+              summaryCards={summaryCards}
+              loading={kpiLoading}
+              metricMap={metricMap}
+              pendingMetricNames={pendingMetricNames}
+              onOpen={setTab}
+            />
+          ) : null}
+          {tab === 'memory' ? (
+            <MemoryPane metricMap={metricMap} pending={pendingMetricNames} />
+          ) : null}
+          {tab === 'cache' ? (
+            <CachePane metricMap={metricMap} pending={pendingMetricNames} />
+          ) : null}
+          {tab === 'clients' ? (
+            <ClientsPane metricMap={metricMap} pending={pendingMetricNames} />
+          ) : null}
+          {tab === 'throughput' ? (
+            <ThroughputPane metricMap={metricMap} pending={pendingMetricNames} />
+          ) : null}
         </div>
         {/* 事件轨下一刀才打开。这里只复用公共抽屉，并按实例过滤。 */}
         <HostAlertDrawer

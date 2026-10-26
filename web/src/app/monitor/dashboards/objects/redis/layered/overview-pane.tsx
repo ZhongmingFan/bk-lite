@@ -9,39 +9,59 @@ import {
 import type { PreparedSummaryCard } from '../../common/simple-dashboard-core';
 import { useDashboardText } from '../../../shared/utils/content-i18n';
 import { redisCategoryText, type RedisCategoryCopyKey } from './redis-copy';
+import { redisMemoryLimitUnset, type RedisMetricMap } from './series';
+import FocusPane, { type RedisTopicTab } from './focus-pane';
+import { CompactTrends } from './topic-panes';
 
 interface OverviewPaneProps {
   summaryCards: PreparedSummaryCard[];
   loading: boolean;
+  metricMap: RedisMetricMap;
+  pendingMetricNames: ReadonlySet<string>;
+  onOpen: (tab: RedisTopicTab) => void;
 }
 
 const headline = (main: PreparedSummaryCard['mainValue']) => (
   main.unit ? `${main.value}${main.unit}` : main.value
 );
 
-/** 概览只放传统五 KPI。重点关注、趋势留给后续切片。 */
-export default function OverviewPane({ summaryCards, loading }: OverviewPaneProps) {
+/** 概览主序：五 KPI、重点关注 2×2、紧凑趋势。诊断 Tab 不再复制这排 KPI。 */
+export default function OverviewPane({
+  summaryCards,
+  loading,
+  metricMap,
+  pendingMetricNames,
+  onOpen
+}: OverviewPaneProps) {
   const { t, dt } = useDashboardText();
   const text = (key: RedisCategoryCopyKey) => redisCategoryText(t, key);
+  const limitUnset = redisMemoryLimitUnset(metricMap);
   const cards = useMemo<KpiTileModel[]>(() => (
     summaryCards.map((summary) => {
-      const empty = summary.mainValue.value === '--';
+      const unsetUtilization = limitUnset && summary.card.metric === 'redis_memory_utilization';
+      const empty = unsetUtilization || summary.mainValue.value === '--';
       return {
         key: summary.card.metric,
         label: dt(summary.card.title),
-        value: headline(summary.mainValue),
+        value: unsetUtilization ? '--' : headline(summary.mainValue),
         tone: empty ? undefined : (summary.valueColor ?? summary.card.color),
-        subtitle: summary.card.isUptimeCard && summary.uptimeState
-          ? dt(summary.uptimeState.label)
-          : undefined
+        subtitle: unsetUtilization
+          ? text('memoryLimitUnset')
+          : summary.card.isUptimeCard && summary.uptimeState
+            ? dt(summary.uptimeState.label)
+            : undefined
       };
     })
-  ), [dt, summaryCards]);
+  ), [dt, limitUnset, summaryCards, t]);
 
   return (
-    <div data-redis-pane="overview">
+    <div data-redis-pane="overview" className="flex flex-col gap-4">
       <ProSection title={text('healthOverview')}>
         <KpiTileRow items={cards} loading={loading} columns={5} />
+      </ProSection>
+      <FocusPane metricMap={metricMap} pending={pendingMetricNames} onOpen={onOpen} />
+      <ProSection title={text('overviewTrends')}>
+        <CompactTrends metricMap={metricMap} pending={pendingMetricNames} />
       </ProSection>
     </div>
   );

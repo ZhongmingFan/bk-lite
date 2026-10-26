@@ -18,7 +18,7 @@ import {
 } from '../../shared/utils/pro-dashboard';
 import { REDIS_DASHBOARD_CONFIG } from './config';
 import RedisCategoryLayout from './layered/category-layout';
-import { REDIS_OVERVIEW_KPI_TITLES, REDIS_OVERVIEW_METRIC_NAMES } from './layered/overview-metrics';
+import { REDIS_CATEGORY_METRIC_NAMES, REDIS_OVERVIEW_KPI_TITLES } from './layered/overview-metrics';
 import styles from './index.module.scss';
 
 const SUMMARY_TITLES: string[] = [...REDIS_OVERVIEW_KPI_TITLES];
@@ -37,7 +37,7 @@ export default function RedisDashboardPage() {
   const dashboard = useSimpleDashboardData(
     REDIS_DASHBOARD_CONFIG,
     layout === 'category'
-      ? { metricNames: REDIS_OVERVIEW_METRIC_NAMES, reuseLoadedSeries: true }
+      ? { metricNames: REDIS_CATEGORY_METRIC_NAMES, reuseLoadedSeries: true }
       : undefined
   );
 
@@ -74,6 +74,7 @@ export default function RedisDashboardPage() {
           loading={dashboard.loading}
           pendingMetricNames={dashboard.pendingMetricNames}
           summaryCards={summaryCards}
+          metricMap={dashboard.metricSeries}
         />
       )}
       dashboardContent={

@@ -1,10 +1,14 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Tabs } from 'antd';
+import useMonitorApi from '@/app/monitor/api';
 import type { TimeValuesProps } from '@/app/monitor/types';
 import HostAlertDrawer from '../../host/layered/host-alert-drawer';
+import { hostAlertRailEvents, type HostAlertRailEvent } from '../../host/layered/events-rail';
+import { overviewHostAlertParams } from '../../host/layered/host-alert-list';
 import { ProTimeWindowProvider } from '../../host/layered/pro-time-window';
+import { selectProChartWindow } from '../../../shared/utils/pro-chart-window';
 import type { PreparedSummaryCard } from '../../common/simple-dashboard-core';
 import { useDashboardText } from '../../../shared/utils/content-i18n';
 import layered from '../../host/layered/layered.module.scss';
@@ -46,10 +50,74 @@ export default function RedisCategoryLayout({
   metricMap
 }: RedisCategoryLayoutProps) {
   const { t } = useDashboardText();
+  const { getMonitorAlert } = useMonitorApi();
   const text = (key: RedisCategoryCopyKey) => redisCategoryText(t, key);
   const [tab, setTab] = useState<RedisContentTab>('overview');
+  const [alertCount, setAlertCount] = useState<number | null>(null);
+  const [alertEvents, setAlertEvents] = useState<HostAlertRailEvent[]>([]);
+  const [eventsPhase, setEventsPhase] = useState<'loading' | 'ready'>('loading');
+  const eventsScopeRef = useRef<string | null>(null);
+  const [alertDrawerOpen, setAlertDrawerOpen] = useState(false);
+  const alertDrawerOpenRef = useRef(false);
+  alertDrawerOpenRef.current = alertDrawerOpen;
+  const [alertRefreshKey, setAlertRefreshKey] = useState(0);
+  const [focusAlertId, setFocusAlertId] = useState('');
+  const instanceKey = String(instanceId || '');
+  const [seenInstance, setSeenInstance] = useState(instanceKey);
+  if (instanceKey !== seenInstance) {
+    setSeenInstance(instanceKey);
+    setAlertCount(null);
+    setAlertEvents([]);
+    setFocusAlertId('');
+  }
+  const chartWindow = useMemo(
+    () => selectProChartWindow(timeValues, queryTimeRange),
+    [queryTimeRange, timeValues]
+  );
+  const chartWindowKey = chartWindow ? `${chartWindow.startSec}|${chartWindow.endSec}` : '';
+  const eventsScope = `${instanceKey}|${
+    chartWindow ? Math.round(chartWindow.endSec - chartWindow.startSec) : ''
+  }`;
   const kpiLoading = (loading && pendingMetricNames.size === 0)
     || summaryCards.some((card) => pendingMetricNames.has(card.card.metric));
+
+  useEffect(() => {
+    if (eventsScopeRef.current === eventsScope) return;
+    const first = eventsScopeRef.current == null;
+    eventsScopeRef.current = eventsScope;
+    if (first) return;
+    setAlertEvents([]);
+    setEventsPhase('loading');
+  }, [eventsScope]);
+
+  useEffect(() => {
+    if (tab !== 'overview') return undefined;
+    if (!instanceKey) {
+      setAlertCount(null);
+      setAlertEvents([]);
+      setEventsPhase('ready');
+      return undefined;
+    }
+    let active = true;
+    getMonitorAlert(overviewHostAlertParams(instanceKey))
+      .then((data) => {
+        if (!active) return;
+        setAlertEvents(hostAlertRailEvents(data?.results));
+        setEventsPhase('ready');
+        if (!alertDrawerOpenRef.current) {
+          setAlertCount(typeof data?.count === 'number' ? data.count : 0);
+        }
+      })
+      .catch(() => {
+        if (!active) return;
+        setAlertEvents([]);
+        setEventsPhase('ready');
+        if (!alertDrawerOpenRef.current) setAlertCount(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [chartWindowKey, getMonitorAlert, instanceKey, tab]);
 
   return (
     <ProTimeWindowProvider
@@ -57,7 +125,11 @@ export default function RedisCategoryLayout({
       queryTimeRange={queryTimeRange}
       suspend={loading && pendingMetricNames.size === 0}
     >
-      <div className={layered.root} data-redis-pro="category">
+      <div
+        className={layered.root}
+        data-redis-pro="category"
+        data-redis-alert-count={alertCount ?? undefined}
+      >
         <div className={layered.tabBand}>
           <Tabs
             className={layered.partitionTabs}
@@ -76,6 +148,13 @@ export default function RedisCategoryLayout({
               loading={kpiLoading}
               metricMap={metricMap}
               pendingMetricNames={pendingMetricNames}
+              alertEvents={alertEvents}
+              eventsLoading={eventsPhase === 'loading'}
+              onFocusAlert={(alertId) => {
+                setFocusAlertId(alertId);
+                setAlertDrawerOpen(true);
+                setAlertRefreshKey((key) => key + 1);
+              }}
               onOpen={setTab}
             />
           ) : null}
@@ -92,14 +171,14 @@ export default function RedisCategoryLayout({
             <ThroughputPane metricMap={metricMap} pending={pendingMetricNames} />
           ) : null}
         </div>
-        {/* 事件轨下一刀才打开。这里只复用公共抽屉，并按实例过滤。 */}
         <HostAlertDrawer
-          open={false}
-          refreshKey={0}
-          instanceId={String(instanceId || '')}
+          open={alertDrawerOpen}
+          refreshKey={alertRefreshKey}
+          instanceId={instanceKey}
           monitorObjectId={monitorObjectId}
-          onClose={() => undefined}
-          onCount={() => undefined}
+          focusAlertId={focusAlertId}
+          onClose={() => setAlertDrawerOpen(false)}
+          onCount={setAlertCount}
           title={text('alertTitle')}
           footerHint={text('alertFooter')}
           emptyCopy={text('alertEmpty')}

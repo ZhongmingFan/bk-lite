@@ -119,7 +119,7 @@ export default function FocusPane({
   }));
 
   return (
-    <div data-redis-pane="focus">
+    <div data-redis-pane="focus" className="min-w-0">
       <ProSection
         title={text('tabFocus')}
         hint={(

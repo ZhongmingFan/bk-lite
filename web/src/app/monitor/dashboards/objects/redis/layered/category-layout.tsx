@@ -1,10 +1,9 @@
 'use client';
 
-import React, { useState } from 'react';
+import React from 'react';
 import { Tabs } from 'antd';
 import type { TimeValuesProps } from '@/app/monitor/types';
 import HostAlertDrawer from '../../host/layered/host-alert-drawer';
-import { GrayTabEmptyState, ProSection } from '../../host/layered/pro-chrome';
 import { ProTimeWindowProvider } from '../../host/layered/pro-time-window';
 import type { PreparedSummaryCard } from '../../common/simple-dashboard-core';
 import { useDashboardText } from '../../../shared/utils/content-i18n';
@@ -12,27 +11,14 @@ import layered from '../../host/layered/layered.module.scss';
 import OverviewPane from './overview-pane';
 import { redisCategoryText, type RedisCategoryCopyKey } from './redis-copy';
 
-type RedisContentTab = 'overview' | 'focus' | 'performance' | 'memory' | 'clients';
-
-interface RedisTabItem {
-  key: RedisContentTab | 'replication' | 'cluster' | 'slowlog';
-  copy: RedisCategoryCopyKey;
-  /** HOLD：灰掉且不可进入，避免用空数据冒充已采集。 */
-  hold?: boolean;
-}
-
-const TABS: readonly RedisTabItem[] = [
-  { key: 'overview', copy: 'tabOverview' },
-  { key: 'focus', copy: 'tabFocus' },
-  { key: 'performance', copy: 'tabPerformance' },
-  { key: 'memory', copy: 'tabMemory' },
-  { key: 'clients', copy: 'tabClients' },
-  { key: 'replication', copy: 'tabReplication', hold: true },
-  { key: 'cluster', copy: 'tabCluster', hold: true },
-  { key: 'slowlog', copy: 'tabSlowlog', hold: true }
-];
-
-const CONTENT_TABS = new Set<string>(['overview', 'focus', 'performance', 'memory', 'clients']);
+/**
+ * S1 只露出已绑指标的概览。
+ * 重点关注 / 性能与缓存 / 内存 / 连接与网络尚未绑指标，复制·哨兵 / Cluster / 慢命令为 HOLD，
+ * 都不进 items，避免灰态或「暂无数据」占位。
+ */
+const VISIBLE_TABS = [
+  { key: 'overview', copy: 'tabOverview' }
+] as const satisfies ReadonlyArray<{ key: string; copy: RedisCategoryCopyKey }>;
 
 interface RedisCategoryLayoutProps {
   instanceId: React.Key;
@@ -55,7 +41,6 @@ export default function RedisCategoryLayout({
 }: RedisCategoryLayoutProps) {
   const { t } = useDashboardText();
   const text = (key: RedisCategoryCopyKey) => redisCategoryText(t, key);
-  const [tab, setTab] = useState<RedisContentTab>('overview');
   const kpiLoading = (loading && pendingMetricNames.size === 0)
     || summaryCards.some((card) => pendingMetricNames.has(card.card.metric));
 
@@ -69,31 +54,15 @@ export default function RedisCategoryLayout({
         <div className={layered.tabBand}>
           <Tabs
             className={layered.partitionTabs}
-            activeKey={tab}
-            onChange={(key) => {
-              if (CONTENT_TABS.has(key)) setTab(key as RedisContentTab);
-            }}
-            items={TABS.map((item) => ({
+            activeKey="overview"
+            items={VISIBLE_TABS.map((item) => ({
               key: item.key,
-              disabled: Boolean(item.hold),
-              label: (
-                <span title={item.hold ? text('holdHint') : undefined}>
-                  {text(item.copy)}
-                </span>
-              )
+              label: text(item.copy)
             }))}
           />
         </div>
         <div className={layered.main}>
-          {tab === 'overview' ? (
-            <OverviewPane summaryCards={summaryCards} loading={kpiLoading} />
-          ) : (
-            <div data-redis-pane={tab}>
-              <ProSection title={text(TABS.find((item) => item.key === tab)?.copy || 'tabFocus')}>
-                <GrayTabEmptyState title={text('paneEmpty')} />
-              </ProSection>
-            </div>
-          )}
+          <OverviewPane summaryCards={summaryCards} loading={kpiLoading} />
         </div>
         {/* 事件轨下一刀才打开。这里只复用公共抽屉，并按实例过滤。 */}
         <HostAlertDrawer

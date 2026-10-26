@@ -4094,8 +4094,6 @@
         "redisCategoryTabCluster": "Cluster",
         "redisCategoryTabSlowlog": "Slow commands",
         "redisCategoryHealthOverview": "Health overview",
-        "redisCategoryPaneEmpty": "No data",
-        "redisCategoryHoldHint": "Collection not ready",
         "redisCategoryAlertTitle": "Redis alerts",
         "redisCategoryAlertFooter": "Active alerts for this instance only",
         "redisCategoryAlertEmpty": "No active alerts",

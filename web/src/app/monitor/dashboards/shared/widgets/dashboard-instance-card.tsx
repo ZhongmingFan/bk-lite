@@ -71,7 +71,9 @@ export function DashboardInstanceCard({
           {icon}
         </div>
         <div className={styles.instanceInfo}>
-          <div className={styles.instanceName}>{instanceName}</div>
+          <div className={styles.instanceName} title={instanceName}>
+            {instanceName}
+          </div>
           {metaItems.length > 0 ? (
             <div className={[styles.meta, styles.instanceMetaLine].filter(Boolean).join(' ')}>
               {metaItems.map((item, index) => (

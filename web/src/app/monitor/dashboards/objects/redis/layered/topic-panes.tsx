@@ -1,10 +1,8 @@
 'use client';
 
-import React from 'react';
 import { Progress } from 'antd';
 import { ProDashLoading } from '../../host/layered/pro-chrome';
-import { RingChartPanel, StatCard } from '../../../shared/widgets';
-import { HealthIcon, MemoryIcon, PublishIcon } from '../../../shared/widgets/metric-icons';
+import { RingChartPanel } from '../../../shared/widgets';
 import { useDashboardText } from '../../../shared/utils/content-i18n';
 import type { MetricUnit } from '../../../shared/types';
 import { REDIS_PALETTE } from '../config';
@@ -71,7 +69,6 @@ function BigNumber({
   metric,
   unit,
   color,
-  icon,
   footer,
   metricMap,
   pending
@@ -80,26 +77,32 @@ function BigNumber({
   metric: string;
   unit: MetricUnit;
   color: string;
-  icon: React.ReactNode;
   footer?: string;
   metricMap: RedisMetricMap;
   pending: ReadonlySet<string>;
 }) {
   const shown = redisDisplay(metricMap, metric, unit);
   const loading = pending.has(metric) && shown.value == null;
+  const valueColor = shown.value == null ? 'var(--color-text-3)' : color;
   return (
-    <StatCard
-      title={title}
-      value={loading ? ' ' : shown.text}
-      unit={loading ? '' : shown.unit}
-      icon={icon}
-      iconStyle={{ color }}
-      color={shown.value == null ? 'var(--color-text-3)' : color}
-      hideTrend
-      footer={footer}
-      extra={loading ? <ProDashLoading size="small" layout="inline" /> : undefined}
-      styles={styles}
-    />
+    <section className={styles.panel} data-redis-feature="bignum">
+      <div className={styles.panelHeading}>
+        <h3 className={styles.panelTitle}>{title}</h3>
+      </div>
+      {loading ? (
+        <div className="mt-3">
+          <ProDashLoading />
+        </div>
+      ) : (
+        <div className="mt-3 flex flex-col gap-2">
+          <div className={styles.statValue} style={{ color: valueColor }}>
+            {shown.text}
+            {shown.unit ? <span className={styles.statUnit}>{shown.unit}</span> : null}
+          </div>
+          {footer ? <div className={styles.statMeta}>{footer}</div> : null}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -201,7 +204,6 @@ export function MemoryPane({
           metric="redis_mem_fragmentation_ratio"
           unit="none"
           color={fragColor}
-          icon={<MemoryIcon />}
           footer={frag == null ? text('chartQuiet') : frag > 1.5 ? text('fragHigh') : text('fragOk')}
           metricMap={metricMap}
           pending={pending}
@@ -230,7 +232,14 @@ export function CachePane({
     <div data-redis-pane="cache" className="flex flex-col gap-4">
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         {loading ? (
-          <section className={styles.panel}><ProDashLoading /></section>
+          <section className={styles.panel} data-redis-feature="compare">
+            <div className={styles.panelHeading}>
+              <h3 className={styles.panelTitle}>{text('cardHitVsMiss')}</h3>
+            </div>
+            <div className="mt-3">
+              <ProDashLoading />
+            </div>
+          </section>
         ) : (
           <RingChartPanel
             title={text('cardHitVsMiss')}
@@ -250,7 +259,6 @@ export function CachePane({
           metric="redis_keyspace_hitrate"
           unit="percent"
           color={REDIS_PALETTE.emerald}
-          icon={<HealthIcon />}
           metricMap={metricMap}
           pending={pending}
         />
@@ -341,7 +349,6 @@ export function ThroughputPane({
           metric="redis_instantaneous_ops_per_sec"
           unit="cps"
           color={REDIS_PALETTE.blue}
-          icon={<PublishIcon />}
           metricMap={metricMap}
           pending={pending}
         />

@@ -55,6 +55,36 @@ monitor_object_metric:
     redis_rejected_connections_rate:
       name: 连接拒绝频率
       desc: 因达到最大连接数而被拒绝的连接请求频率，反映连接资源紧张程度，非零频率需考虑扩容
+    redis_connected_slaves:
+      name: 副本连接数
+      desc: 当前连接到本实例的副本数量，用于观察主从拓扑是否完整
+    redis_master_link_status:
+      name: 主从链接状态
+      desc: 副本与主节点之间的链接是否健康。健康表示复制通道畅通，断链表示副本暂时无法从主节点接收数据
+    redis_repl_backlog_active:
+      name: 复制积压启用
+      desc: 复制积压是否已启用，便于副本在短暂离线后继续追赶
+    redis_repl_backlog_size:
+      name: 复制积压大小
+      desc: 复制积压的容量。过小可能导致离线副本无法增量追赶
+    redis_repl_backlog_histlen:
+      name: 复制积压已用长度
+      desc: 复制积压中当前已占用的数据长度
+    redis_master_repl_offset:
+      name: 主复制偏移
+      desc: 主节点当前复制进度，用于对照副本追赶情况
+    redis_slave_repl_offset:
+      name: 副本复制偏移
+      desc: 副本当前已追赶的复制进度
+    redis_mem_replication_backlog:
+      name: 复制积压内存
+      desc: 复制积压占用的内存
+    redis_cluster_enabled:
+      name: 集群模式
+      desc: 实例是否以集群形态运行
+    redis_cluster_connections:
+      name: 集群连接数
+      desc: 集群节点之间的连接数量
 monitor_object_metric_group:
   Redis:
     Base: 基础
@@ -63,3 +93,5 @@ monitor_object_metric_group:
     Network: 网络
     Client: 客户端
     Error: 错误
+    Replication: 复制
+    Cluster: 集群

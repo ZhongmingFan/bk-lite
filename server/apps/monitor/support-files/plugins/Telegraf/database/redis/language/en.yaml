@@ -80,6 +80,41 @@ monitor_object_metric:
       desc: Frequency of connection requests rejected due to reaching max connections,
         reflects connection resource tension, non-zero frequency requires consideration
         of expansion
+    redis_connected_slaves:
+      name: Connected Replicas
+      desc: Number of replicas currently connected to this instance, used to check
+        whether the primary-replica topology is intact
+    redis_master_link_status:
+      name: Master-Replica Link Status
+      desc: Health of the link from this replica to its primary. Healthy means replication
+        is flowing; a broken link means the replica cannot receive updates
+    redis_repl_backlog_active:
+      name: Replication Backlog Enabled
+      desc: Whether the replication backlog is enabled, so replicas can catch up after
+        a brief disconnect
+    redis_repl_backlog_size:
+      name: Replication Backlog Size
+      desc: Capacity of the replication backlog. If too small, disconnected replicas
+        may be unable to catch up incrementally
+    redis_repl_backlog_histlen:
+      name: Replication Backlog Used Length
+      desc: Amount of data currently held in the replication backlog
+    redis_master_repl_offset:
+      name: Primary Replication Offset
+      desc: Current replication progress on the primary, used to compare how far replicas
+        have caught up
+    redis_slave_repl_offset:
+      name: Replica Replication Offset
+      desc: Current replication progress already applied on the replica
+    redis_mem_replication_backlog:
+      name: Replication Backlog Memory
+      desc: Memory occupied by the replication backlog
+    redis_cluster_enabled:
+      name: Cluster Mode
+      desc: Whether this instance runs in cluster mode
+    redis_cluster_connections:
+      name: Cluster Connections
+      desc: Number of connections among cluster nodes
 monitor_object_metric_group:
   Redis:
     Base: Base
@@ -88,3 +123,5 @@ monitor_object_metric_group:
     Network: Network
     Client: Client
     Error: Error
+    Replication: Replication
+    Cluster: Cluster

@@ -189,6 +189,116 @@
       "dimensions": [],
       "description": "Frequency of connection requests rejected due to reaching max connections, reflects connection resource tension, non-zero frequency requires consideration of expansion",
       "query": "rate(redis_rejected_connections{__$labels__}[5m])"
+    },
+    {
+      "metric_group": "Replication",
+      "name": "redis_connected_slaves",
+      "display_name": "Connected Replicas",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "counts",
+      "dimensions": [],
+      "description": "Number of replicas currently connected to this instance, used to check whether the primary-replica topology is intact",
+      "query": "redis_connected_slaves{__$labels__}"
+    },
+    {
+      "metric_group": "Replication",
+      "name": "redis_master_link_status",
+      "display_name": "Master-Replica Link Status",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "none",
+      "dimensions": [],
+      "description": "Health of the link from this replica to its primary. Healthy means replication is flowing; a broken link means the replica cannot receive updates",
+      "query": "redis_master_link_status{__$labels__}"
+    },
+    {
+      "metric_group": "Replication",
+      "name": "redis_repl_backlog_active",
+      "display_name": "Replication Backlog Enabled",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "none",
+      "dimensions": [],
+      "description": "Whether the replication backlog is enabled, so replicas can catch up after a brief disconnect",
+      "query": "redis_repl_backlog_active{__$labels__}"
+    },
+    {
+      "metric_group": "Replication",
+      "name": "redis_repl_backlog_size",
+      "display_name": "Replication Backlog Size",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "bytes",
+      "dimensions": [],
+      "description": "Capacity of the replication backlog. If too small, disconnected replicas may be unable to catch up incrementally",
+      "query": "redis_repl_backlog_size{__$labels__}"
+    },
+    {
+      "metric_group": "Replication",
+      "name": "redis_repl_backlog_histlen",
+      "display_name": "Replication Backlog Used Length",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "bytes",
+      "dimensions": [],
+      "description": "Amount of data currently held in the replication backlog",
+      "query": "redis_repl_backlog_histlen{__$labels__}"
+    },
+    {
+      "metric_group": "Replication",
+      "name": "redis_master_repl_offset",
+      "display_name": "Primary Replication Offset",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "counts",
+      "dimensions": [],
+      "description": "Current replication progress on the primary, used to compare how far replicas have caught up",
+      "query": "redis_master_repl_offset{__$labels__}"
+    },
+    {
+      "metric_group": "Replication",
+      "name": "redis_slave_repl_offset",
+      "display_name": "Replica Replication Offset",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "counts",
+      "dimensions": [],
+      "description": "Current replication progress already applied on the replica",
+      "query": "redis_slave_repl_offset{__$labels__}"
+    },
+    {
+      "metric_group": "Replication",
+      "name": "redis_mem_replication_backlog",
+      "display_name": "Replication Backlog Memory",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "bytes",
+      "dimensions": [],
+      "description": "Memory occupied by the replication backlog",
+      "query": "redis_mem_replication_backlog{__$labels__}"
+    },
+    {
+      "metric_group": "Cluster",
+      "name": "redis_cluster_enabled",
+      "display_name": "Cluster Mode",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "none",
+      "dimensions": [],
+      "description": "Whether this instance runs in cluster mode",
+      "query": "redis_cluster_enabled{__$labels__}"
+    },
+    {
+      "metric_group": "Cluster",
+      "name": "redis_cluster_connections",
+      "display_name": "Cluster Connections",
+      "instance_id_keys": ["instance_id"],
+      "data_type": "Number",
+      "unit": "counts",
+      "dimensions": [],
+      "description": "Number of connections among cluster nodes",
+      "query": "redis_cluster_connections{__$labels__}"
     }
   ]
 }

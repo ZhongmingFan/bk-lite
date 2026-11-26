@@ -1,4 +1,5 @@
 import json
+import math
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -38,6 +39,54 @@ def _format_duration(seconds: int) -> str:
 
 def _query_window(start: int, end: int) -> str:
     return _format_duration(max(1, round((end - start) / 1000)))
+
+
+# 模板里没有这两个占位时，其它对象的窗口替换保持原样。
+# 读不到采集间隔时按 60 秒，与 ES 插件默认间隔一致。
+_DEFAULT_RATE_INTERVAL_SECONDS = 60
+
+
+def _positive_seconds(value) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return number
+
+
+def _derived_step_seconds(start: int, end: int, collection_interval_seconds: int | None) -> int:
+    """与前端 calculateQueryStep 相同：max(ceil(范围 / 100), 采集间隔, 1)。"""
+    span = max(0, (end - start) / 1000)
+    target = math.ceil(span / 100) if span else 1
+    interval = _positive_seconds(collection_interval_seconds) or _DEFAULT_RATE_INTERVAL_SECONDS
+    return max(target, interval, 1)
+
+
+def _replace_rate_placeholders(
+    query: str,
+    step_seconds: int | None,
+    collection_interval_seconds: int | None,
+    start: int,
+    end: int,
+) -> str:
+    """速率窗口取 max(4 × 采集间隔, 步长)；每步次数用步长本身。
+
+    范围查询会传入图表步长。只给起止时间时，按同一条规则从范围推算步长，
+    这样已登记的速率模板不会留下未替换的占位符。
+    """
+    needs_rate = "__$rate_window__" in query
+    needs_step = "__$step__" in query
+    if not needs_rate and not needs_step:
+        return query
+    step = _positive_seconds(step_seconds) or _derived_step_seconds(start, end, collection_interval_seconds)
+    interval = _positive_seconds(collection_interval_seconds) or _DEFAULT_RATE_INTERVAL_SECONDS
+    if needs_step:
+        query = query.replace("__$step__", _format_duration(step))
+    if needs_rate:
+        query = query.replace("__$rate_window__", _format_duration(max(4 * interval, step)))
+    return query
 
 
 # 稀疏计数在范围查询里按图表步长分桶。整窗 increase 会把相邻点涂成滚动合计，
@@ -156,6 +205,7 @@ def build_dashboard_query(
     end: int,
     params=None,
     step_seconds: int | None = None,
+    collection_interval_seconds: int | None = None,
 ) -> str:
     instance_keys = [str(key).strip() for key in monitor_object.instance_id_keys or [] if str(key).strip()]
     if not instance_keys:
@@ -181,6 +231,7 @@ def build_dashboard_query(
     if step_seconds and _uses_bucket_window(capability.template):
         window = _format_duration(step_seconds)
     query = query.replace("__$window__", window)
+    query = _replace_rate_placeholders(query, step_seconds, collection_interval_seconds, start, end)
     if "__$" in query:
         raise AuthorizedMetricQueryError("查询能力参数不完整", code="capability_template_invalid")
     return query

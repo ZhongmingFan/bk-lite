@@ -122,8 +122,24 @@ interface ThinTimeSeriesProps {
    * 不传时保持原来的刻度和悬浮。
    */
   formatReading?: (value: number) => string;
+  /** 只改 Y 轴刻度。悬浮仍走 formatReading，避免轴上带上单位。 */
+  formatAxis?: (value: number) => string;
   /** 图区高度。等待构成用它和右侧 Top 5 行对齐。 */
   plotHeight?: number;
+  /** 缺省 smooth。linear 关闭平滑，step 用阶梯线。 */
+  curve?: 'smooth' | 'linear' | 'step';
+  seriesType?: 'line' | 'bar';
+  stacked?: boolean;
+  showPointMarkers?: boolean;
+  referenceLines?: readonly number[];
+  /** 计数轴只出整数，最大值至少为 1。 */
+  integerAxis?: boolean;
+  /** 缺省连上空隙。传 false 时断点断开。 */
+  connectNulls?: boolean;
+  /** 柱图全 0 时不画柱，轴保留，图中央写这句。 */
+  zeroBarOverlay?: string;
+  /** 同名序列保持原色，其余变淡。 */
+  emphasisName?: string | null;
   /**
    * 全 0 且非负的序列，彩色笔画只在绘制层上移这么多像素。
    * 不传时其它盘保持原来的贴轴处理。数据点和轴最小值仍是 0。
@@ -493,8 +509,18 @@ export default function ThinTimeSeries({
   keepSeriesColor = false,
   markZeroCount = false,
   formatReading,
+  formatAxis,
   plotHeight,
-  uniformZeroStrokeLiftPx
+  uniformZeroStrokeLiftPx,
+  curve = 'smooth',
+  seriesType = 'line',
+  stacked = false,
+  showPointMarkers = false,
+  referenceLines,
+  integerAxis = false,
+  connectNulls = true,
+  zeroBarOverlay,
+  emphasisName = null
 }: ThinTimeSeriesProps) {
   const proTime = useProTimeWindow();
   const chartWindow = proTime?.window ?? null;
@@ -555,6 +581,10 @@ export default function ThinTimeSeries({
     [keys, legendKey]
   );
   const splitAxes = independentAxes && keys.length > 1;
+  const hideZeroBars = seriesType === 'bar' && Boolean(zeroBarOverlay) && keys.length > 0 && keys.every((key) => {
+    const samples = seriesAxisValues(plotted, key);
+    return samples.length > 0 && samples.every((value) => value === 0);
+  });
   const option = useMemo(() => {
     if (suspend || !plotted.length || !keys.length) return null;
     let minTime = chartWindow?.startSec ?? Number.POSITIVE_INFINITY;
@@ -623,6 +653,7 @@ export default function ThinTimeSeries({
           color,
           show: !flatAxis,
           formatter: (value: number) => {
+            if (formatAxis) return formatAxis(Number(value));
             if (formatReading) return formatReading(Number(value));
             if (focusAxis) return focusAxis.formatTick(Number(value));
             return formatAxisTick(Number(value), axisUnit, peak);
@@ -634,6 +665,14 @@ export default function ThinTimeSeries({
           ? { lineStyle: { color: axisColor, width: 1 } }
           : { show: false }
       };
+    };
+    const withIntegerAxis = (axis: ReturnType<typeof valueAxis>, samples: number[]) => {
+      if (!integerAxis || lockedAxis) return axis;
+      const peak = samples.reduce((best, value) => Math.max(best, value), 0);
+      const max = Math.max(1, Math.ceil(peak));
+      const span = Math.max(1, max);
+      const interval = span <= 4 ? 1 : Math.max(1, Math.ceil(span / 4));
+      return { ...axis, min: 0, max: interval * Math.ceil(max / interval), interval, minInterval: 1 };
     };
     return {
       animation: false,
@@ -677,11 +716,14 @@ export default function ThinTimeSeries({
           ...valueAxis(seriesAxisValues(plotted, key), seriesColors[index] || mutedColor, index === 0, unitAt(index)),
           position: index === 0 ? 'left' as const : 'right' as const
         }))
-        : valueAxis(
-          keys.flatMap((key) => seriesAxisValues(plotted, key)),
-          mutedColor,
-          true,
-          unit
+        : withIntegerAxis(
+          valueAxis(
+            keys.flatMap((key) => seriesAxisValues(plotted, key)),
+            mutedColor,
+            true,
+            unit
+          ),
+          keys.flatMap((key) => seriesAxisValues(plotted, key))
         ),
       tooltip: {
         show: true,
@@ -750,23 +792,53 @@ export default function ThinTimeSeries({
         // 保留序列色时，0 仍贴在共用轴底部，描边抬 2px，避免被轴线裁掉。
         const coloredFloor = sitsOnFloor && keepSeriesColor;
         const showArea = !zeroCountLine && !dashed && typeof areaOpacity === 'number' && areaOpacity > 0;
+        const seriesName = legends[index]?.title || legends[index]?.label || key;
+        const faded = Boolean(emphasisName) && emphasisName !== seriesName;
+        const pointData = plotted.map((point) => {
+          const value = point[key];
+          return [point.time, typeof value === 'number' ? value : null];
+        });
+        if (seriesType === 'bar') {
+          return {
+            type: 'bar' as const,
+            name: seriesName,
+            ...(stacked ? { stack: 'total' } : {}),
+            barWidth: '60%',
+            itemStyle: { color, opacity: hideZeroBars ? 0 : (faded ? 0.2 : 1) },
+            data: pointData
+          };
+        }
         return {
           type: 'line' as const,
-          name: legends[index]?.title || legends[index]?.label || key,
+          name: seriesName,
+          ...(curve === 'step' ? { step: 'end' as const } : {}),
           ...(splitAxes ? { yAxisIndex: index } : {}),
-          showSymbol: zeroCountLine,
-          symbol: zeroCountLine ? 'circle' as const : 'none' as const,
-          ...(zeroCountLine ? { showAllSymbol: true, symbolSize: ZERO_COUNT_SYMBOL_SIZE, large: false } : {}),
-          smooth: onFloor || coloredFloor || zeroCountLine ? 0 : 0.15,
-          connectNulls: true,
+          showSymbol: showPointMarkers || zeroCountLine,
+          symbol: showPointMarkers || zeroCountLine ? 'circle' as const : 'none' as const,
+          ...((showPointMarkers || zeroCountLine) ? {
+            showAllSymbol: true,
+            symbolSize: showPointMarkers ? 4 : ZERO_COUNT_SYMBOL_SIZE,
+            large: false
+          } : {}),
+          smooth: curve === 'smooth' && !onFloor && !coloredFloor && !zeroCountLine ? 0.15 : 0,
+          connectNulls,
           ...(onFloor ? { clip: false as const, z: 8 } : {}),
           ...(coloredFloor ? { clip: false as const, z: 5 } : {}),
           ...(zeroCountLine ? { clip: false as const, z: 4 } : {}),
-          itemStyle: { color },
-          data: plotted.map((point) => {
-            const value = point[key];
-            return [point.time, typeof value === 'number' ? value : null];
-          }),
+          itemStyle: { color, opacity: faded ? 0.2 : 1 },
+          data: pointData,
+          ...(index === 0 && referenceLines?.length ? {
+            markLine: {
+              symbol: 'none',
+              silent: true,
+              animation: false,
+              data: referenceLines.map((value) => ({
+                yAxis: value,
+                label: { show: false },
+                lineStyle: { type: 'dashed' as const, color: mutedColor, width: 1 }
+              }))
+            }
+          } : {}),
           ...(showArea ? { areaStyle: { color, opacity: areaOpacity } } : {}),
           lineStyle: liftStroke
             ? {
@@ -778,6 +850,7 @@ export default function ThinTimeSeries({
               ? {
                 width: dashed ? 1.2 : 2,
                 color: axisColor,
+                opacity: faded ? 0.2 : 1,
                 type: dashed ? 'dashed' as const : 'solid' as const,
                 shadowColor: color,
                 shadowBlur: 0,
@@ -787,6 +860,7 @@ export default function ThinTimeSeries({
                 ? {
                   width: dashed ? 1.2 : 2,
                   color,
+                  opacity: faded ? 0.2 : 1,
                   type: dashed ? 'dashed' as const : 'solid' as const,
                   shadowColor: color,
                   shadowBlur: 0,
@@ -795,7 +869,7 @@ export default function ThinTimeSeries({
                 : {
                   width: zeroCountLine ? ZERO_COUNT_LINE_WIDTH : (dashed ? 1.2 : 1.6),
                   color,
-                  ...(showArea ? { opacity: 1 } : {}),
+                  opacity: faded ? 0.2 : 1,
                   type: dashed ? 'dashed' as const : 'solid' as const
                 }
         };
@@ -845,7 +919,7 @@ export default function ThinTimeSeries({
         }];
       })
     };
-  }, [areaOpacity, axisColor, chartWindow, formatReading, hideFlatAxisLabels, keepLegend, keepSeriesColor, keys, legendKey, markZeroCount, mutedColor, numericAxis, panelColor, pinAxisZero, plotted, resolveValueBounds, seriesColors, splitAxes, suspend, textColor, uniformZeroStrokeLiftPx, unit, valueBounds?.min, valueBounds?.max]);
+  }, [areaOpacity, axisColor, chartWindow, connectNulls, curve, emphasisName, formatAxis, formatReading, hideFlatAxisLabels, hideZeroBars, integerAxis, keepLegend, keepSeriesColor, keys, legendKey, markZeroCount, mutedColor, numericAxis, panelColor, pinAxisZero, plotted, referenceLines, resolveValueBounds, seriesColors, seriesType, showPointMarkers, splitAxes, stacked, suspend, textColor, uniformZeroStrokeLiftPx, unit, valueBounds?.min, valueBounds?.max]);
   const { containerRef } = useECharts(option);
   const drawnSeriesCount = keys.filter((key) => plotted.some((point) => {
     const value = point[key];
@@ -944,9 +1018,14 @@ export default function ThinTimeSeries({
         </div>
       ) : null}
       <div
-        className={styles.chartBody}
+        className={`${styles.chartBody} relative`}
         style={plotHeight ? { height: plotHeight, minHeight: plotHeight, flex: 'none' } : undefined}
       >
+        {hideZeroBars && zeroBarOverlay ? (
+          <div className="pointer-events-none absolute inset-0 z-[1] flex items-center justify-center text-[13px] text-[var(--color-text-3)]">
+            {zeroBarOverlay}
+          </div>
+        ) : null}
         {suspend || !plotted.length ? (
           <div className={styles.chartEmpty}>
             {suspend || loading ? <ProDashLoading /> : (

@@ -2,7 +2,7 @@
 
 import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Tooltip } from 'antd';
-import { QuestionCircleOutlined } from '@ant-design/icons';
+import { ExclamationCircleOutlined, QuestionCircleOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { useECharts } from '../../../shared/widgets/useECharts';
 import { ChartData } from '@/app/monitor/types';
@@ -135,6 +135,21 @@ interface ThinTimeSeriesProps {
    * 全图都是 0 时改走统一上移，不再叠在轴上。
    */
   stackId?: string;
+  /** 阶梯线。瞬时计数用 end，缺省仍是平滑折线。 */
+  lineStep?: 'end';
+  /** 直线段，不开平滑。速率和耗时用。 */
+  straightLine?: boolean;
+  /** 窗口点数不超过 30 时画出直径 4px 的点标。 */
+  markSamples?: boolean;
+  /** 柱。缺省仍是折线。 */
+  seriesKind?: 'line' | 'bar';
+  /** 缺点断开，不把空点连起来。 */
+  disconnectGaps?: boolean;
+  /**
+   * 卡面状态。不传时沿用原来的加载和空态。
+   * error 只显示加载失败和重试，不把失败画成 0 或暂无数据。
+   */
+  status?: 'loading' | 'error' | 'empty' | 'ready';
 }
 
 const areaKeys = (data: ChartData[]) => {
@@ -486,7 +501,13 @@ export default function ThinTimeSeries({
   formatReading,
   plotHeight,
   floorStrokeLiftPx,
-  stackId
+  stackId,
+  lineStep,
+  straightLine = false,
+  markSamples = false,
+  seriesKind = 'line',
+  disconnectGaps = false,
+  status
 }: ThinTimeSeriesProps) {
   const proTime = useProTimeWindow();
   const chartWindow = proTime?.window ?? null;
@@ -731,12 +752,14 @@ export default function ThinTimeSeries({
           const itemSamples = seriesAxisValues(plotted, item);
           return itemSamples.length > 0 && itemSamples.every((value) => value === 0);
         });
-        if (liftPx > 0 && flatZero && (!stackId || chartAllZero)) {
+        if (seriesKind !== 'bar' && liftPx > 0 && flatZero && (!stackId || chartAllZero)) {
           return flatZeroStrokeSeries({
             name: legends[index]?.title || legends[index]?.label || key,
             color,
             dashed,
             liftPx,
+            symbols: markSamples ? plotted.length <= 30 : true,
+            breakOnNull: disconnectGaps,
             points: plotted.map((point) => {
               const value = point[key];
               return [Number(point.time), typeof value === 'number' ? value : null] as const;
@@ -745,6 +768,7 @@ export default function ThinTimeSeries({
         }
         // 贴底描边改成轴线色，彩色影子抬进图区。数值仍是采样本身，不造非零点。
         // 全 0 的这条线不走贴底：留在 0，靠序列色和采样点认出来。对照序列没点时也不要把主序列藏掉。
+        const sampleMarkers = markSamples && plotted.length <= 30;
         const zeroCountLine = markedZeroSeries(markZeroCount, samples);
         const sitsOnFloor = !zeroCountLine && Boolean(
           axisColor
@@ -755,15 +779,29 @@ export default function ThinTimeSeries({
         // 保留序列色时，0 仍贴在共用轴底部，描边抬 2px，避免被轴线裁掉。
         const coloredFloor = sitsOnFloor && keepSeriesColor;
         const showArea = !zeroCountLine && !dashed && typeof areaOpacity === 'number' && areaOpacity > 0;
+        if (seriesKind === 'bar') {
+          return {
+            type: 'bar' as const,
+            name: legends[index]?.title || legends[index]?.label || key,
+            ...(stackId ? { stack: stackId } : {}),
+            barWidth: '60%',
+            itemStyle: { color },
+            data: plotted.map((point) => {
+              const value = point[key];
+              return [point.time, typeof value === 'number' ? value : null];
+            })
+          };
+        }
         const line = {
           type: 'line' as const,
           name: legends[index]?.title || legends[index]?.label || key,
           ...(splitAxes ? { yAxisIndex: index } : {}),
-          showSymbol: zeroCountLine,
-          symbol: zeroCountLine ? 'circle' as const : 'none' as const,
-          ...(zeroCountLine ? { showAllSymbol: true, symbolSize: ZERO_COUNT_SYMBOL_SIZE, large: false } : {}),
-          smooth: onFloor || coloredFloor || zeroCountLine ? 0 : 0.15,
-          connectNulls: true,
+          ...(lineStep ? { step: lineStep } : {}),
+          showSymbol: zeroCountLine || sampleMarkers,
+          symbol: zeroCountLine || sampleMarkers ? 'circle' as const : 'none' as const,
+          ...((zeroCountLine || sampleMarkers) ? { showAllSymbol: true, symbolSize: sampleMarkers ? 4 : ZERO_COUNT_SYMBOL_SIZE, large: false } : {}),
+          smooth: onFloor || coloredFloor || zeroCountLine || straightLine || lineStep ? 0 : 0.15,
+          connectNulls: !disconnectGaps,
           ...(onFloor ? { clip: false as const, z: 8 } : {}),
           ...(coloredFloor ? { clip: false as const, z: 5 } : {}),
           ...(zeroCountLine ? { clip: false as const, z: 4 } : {}),
@@ -806,7 +844,7 @@ export default function ThinTimeSeries({
         };
       })
     };
-  }, [areaOpacity, axisColor, chartWindow, floorStrokeLiftPx, formatReading, hideFlatAxisLabels, keepLegend, keepSeriesColor, keys, legendKey, markZeroCount, mutedColor, numericAxis, panelColor, pinAxisZero, plotted, resolveValueBounds, seriesColors, splitAxes, stackId, suspend, textColor, unit, valueBounds?.min, valueBounds?.max]);
+  }, [areaOpacity, axisColor, chartWindow, disconnectGaps, floorStrokeLiftPx, formatReading, hideFlatAxisLabels, keepLegend, keepSeriesColor, keys, legendKey, lineStep, markSamples, markZeroCount, mutedColor, numericAxis, panelColor, pinAxisZero, plotted, resolveValueBounds, seriesColors, seriesKind, splitAxes, stackId, straightLine, suspend, textColor, unit, valueBounds?.min, valueBounds?.max]);
   const { containerRef } = useECharts(option);
   const drawnSeriesCount = keys.filter((key) => plotted.some((point) => {
     const value = point[key];
@@ -908,12 +946,27 @@ export default function ThinTimeSeries({
         className={styles.chartBody}
         style={plotHeight ? { height: plotHeight, minHeight: plotHeight, flex: 'none' } : undefined}
       >
-        {suspend || !plotted.length ? (
+        {status === 'error' ? (
           <div className={styles.chartEmpty}>
-            {suspend || loading ? <ProDashLoading /> : (
-              <span className="text-[13px] font-semibold text-[var(--color-text-2)]">{emptyText}</span>
+            <span className="inline-flex flex-col items-center gap-2 text-[14px] text-[var(--color-text-3)]">
+              <ExclamationCircleOutlined className="text-[20px]" />
+              加载失败
+              {onRetry ? (
+                <button type="button" className="text-[var(--color-primary)]" onClick={onRetry}>重试</button>
+              ) : null}
+            </span>
+          </div>
+        ) : status === 'loading' || status === 'empty' || suspend || !plotted.length ? (
+          <div className={styles.chartEmpty}>
+            {status === 'loading' || suspend || (status !== 'empty' && loading) ? <ProDashLoading /> : (
+              <span className={status === 'empty'
+                ? 'text-[14px] text-[var(--color-text-3)]'
+                : 'text-[13px] font-semibold text-[var(--color-text-2)]'}
+              >
+                {emptyText}
+              </span>
             )}
-            {!loading && onRetry ? (
+            {!loading && status !== 'loading' && status !== 'empty' && onRetry ? (
               <button
                 type="button"
                 className="ml-2 text-[var(--color-primary)]"

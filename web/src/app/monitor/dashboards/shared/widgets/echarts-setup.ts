@@ -1,5 +1,5 @@
 import * as echarts from 'echarts/core';
-import { CustomChart, LineChart, PieChart, TreemapChart } from 'echarts/charts';
+import { BarChart, CustomChart, LineChart, PieChart, TreemapChart } from 'echarts/charts';
 import {
   GridComponent,
   TooltipComponent,
@@ -11,6 +11,7 @@ import {
 import { CanvasRenderer } from 'echarts/renderers';
 
 echarts.use([
+  BarChart,
   CustomChart,
   LineChart,
   PieChart,
